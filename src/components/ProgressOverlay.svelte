@@ -18,7 +18,7 @@
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 12px 14px;
-    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
     z-index: 15;
   }
   .label {

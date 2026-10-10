@@ -1,4 +1,4 @@
-// Canvas colours, read from CSS custom properties so they follow the OS light/dark theme.
+// Canvas colours, read once from the CSS custom properties in styles.css (the fixed dark palette).
 
 export interface Theme {
   laneBg: string;

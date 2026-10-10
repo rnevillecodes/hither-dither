@@ -138,13 +138,8 @@
   });
 
   onMount(() => {
+    // The palette is fixed (always dark), so the colours only need reading once.
     theme = readTheme(root);
-    const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const onTheme = () => {
-      theme = readTheme(root);
-      invalidate();
-    };
-    media.addEventListener("change", onTheme);
     const ro = new ResizeObserver(layout);
     ro.observe(waveArea);
     // Wheel listeners must be non-passive to prevent page scrolling.
@@ -152,7 +147,6 @@
     layout();
     return () => {
       destroyed = true;
-      media.removeEventListener("change", onTheme);
       ro.disconnect();
       root.removeEventListener("wheel", onWheel);
     };
