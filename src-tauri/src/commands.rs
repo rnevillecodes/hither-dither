@@ -146,6 +146,7 @@ pub async fn play(
             use std::sync::atomic::Ordering;
             while !shared.stop.load(Ordering::Relaxed) {
                 if shared.finished.load(Ordering::Acquire) {
+                    player.finish(&shared);
                     let _ = on_event.send(PlaybackEvent::Ended {
                         frame: shared.request.end as f64,
                     });

@@ -105,13 +105,31 @@ impl Player {
     /// Stop playback; returns the audible frame at the moment it stopped.
     pub fn stop(&self) -> Option<f64> {
         let session = self.session.lock().unwrap().take()?;
+        Some(self.end(session))
+    }
+
+    /// Stop playback only if `shared` is still the current session (releases the
+    /// output device after playback reaches its end without racing a newer `play`).
+    pub fn finish(&self, shared: &Arc<Shared>) {
+        let mut guard = self.session.lock().unwrap();
+        if guard
+            .as_ref()
+            .is_some_and(|s| Arc::ptr_eq(&s.shared, shared))
+        {
+            let session = guard.take().unwrap();
+            drop(guard);
+            self.end(session);
+        }
+    }
+
+    fn end(&self, session: Session) -> f64 {
         let pos = session.shared.position();
         session.shared.stop.store(true, Ordering::Relaxed);
         if let Some(audio) = &self.audio {
             audio.stop();
         }
         let _ = session.feeder.join();
-        Some(pos)
+        pos
     }
 
     pub fn set_volume(&self, gain: f32) {
