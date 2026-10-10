@@ -21,9 +21,10 @@ pub fn probe() -> Result<DeviceInfo, String> {
     let device = cpal::default_host()
         .default_output_device()
         .ok_or("No audio output device was found")?;
+    // cpal reports a missing ALSA card as "no longer available"; phrase it plainly.
     let config = device
         .default_output_config()
-        .map_err(|e| format!("The audio output device is unavailable: {e}"))?;
+        .map_err(|e| format!("No audio output device is available ({e})"))?;
     Ok(DeviceInfo {
         name: device.name().unwrap_or_else(|_| "Default output".into()),
         sample_rate: config.sample_rate().0,

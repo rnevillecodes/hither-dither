@@ -9,6 +9,7 @@
   import { openDialog } from "./lib/actions";
   import { app, setSelection } from "./lib/app.svelte";
   import { dropHover } from "./lib/dropHover.svelte";
+  import { runScrollBenchmark } from "./lib/perf";
   import { initTransport, resetTransport, seek, togglePlay, transport } from "./lib/transport.svelte";
   import { zoomIn, zoomOut, zoomToFit } from "./lib/view.svelte";
 
@@ -32,6 +33,11 @@
     if (mod && e.key.toLowerCase() === "o") {
       e.preventDefault();
       void openDialog();
+      return;
+    }
+    if (mod && e.shiftKey && e.key.toLowerCase() === "b" && app.meta) {
+      e.preventDefault();
+      runScrollBenchmark();
       return;
     }
     if (mod || e.altKey || !app.meta) return;

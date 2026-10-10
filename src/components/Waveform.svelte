@@ -13,6 +13,7 @@
     visibleEnd,
     zoomAround,
   } from "../lib/viewport";
+  import { recordDraw } from "../lib/perf";
   import { PeakLoader } from "../lib/waveform/peakLoader";
   import { drawOverview, drawRuler, drawWaveform } from "../lib/waveform/renderer";
   import { type Theme, readTheme } from "../lib/waveform/theme";
@@ -50,6 +51,7 @@
     scheduled = false;
     const vp = view.vp;
     if (!vp || !theme || !waveCanvas) return;
+    const t0 = performance.now();
     loader.ensure(vp, dpr);
     const scene = {
       vp,
@@ -63,6 +65,7 @@
     drawWaveform(waveCanvas.getContext("2d")!, scene, theme);
     drawRuler(rulerCanvas.getContext("2d")!, vp, dpr, meta.sample_rate, theme, playhead);
     drawOverview(overviewCanvas.getContext("2d")!, overviewTile, vp, dpr, theme, playhead);
+    recordDraw(performance.now() - t0);
   }
 
   function sizeCanvas(c: HTMLCanvasElement) {
