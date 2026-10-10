@@ -25,7 +25,7 @@
 
 - [x] 4.1 Implement `open_file` command: parse, mmap, build pyramid + whole-file stats on a worker thread, stream progress via `tauri::ipc::Channel`, keep previous file on failure; verify a Rust integration test that a failed open leaves prior state intact
 - [x] 4.2 Implement `get_metadata`, `get_peaks` (binary `ipc::Response`, raw samples at sample-level zoom), `compute_stats(range?)` and `get_clip_runs` commands; verify command-level tests for response shape and byte length
-- [ ] 4.3 Document the command API (inputs, outputs, binary layout) in `docs/ipc.md`; verify each documented command name matches the registered handlers
+- [x] 4.3 Document the command API (inputs, outputs, binary layout) in `docs/ipc.md`; verify each documented command name matches the registered handlers
 
 ## 5. Frontend shell and file opening
 
