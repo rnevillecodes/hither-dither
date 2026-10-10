@@ -110,8 +110,8 @@ Below, "A" is `cd-16bit-stereo-10s.wav` and "B" is `beep-every-second-mono-60s.w
 
 | # | Scenario | Steps | Expected | Evidence | Result |
 |---|---|---|---|---|---|
-| B1 | Running app on Windows | `npm run tauri dev` | Title bar and taskbar show the hither-dither icon (waveform tile), not the Tauri logo | | ⏳ |
-| B2 | Installed bundle | `npm run tauri build`, install the result | The installed shortcut/launcher shows the hither-dither icon | | ⏳ |
+| B1 | Running app on Windows | `npm run tauri dev` | Title bar and taskbar show the HitherDither icon (waveform tile), not the Tauri logo | | ⏳ |
+| B2 | Installed bundle | `npm run tauri build`, install the result | The installed shortcut/launcher shows the HitherDither icon | | ⏳ |
 | B3 | Small size | View `src-tauri/icons/32x32.png` at 100% | The waveform bars are recognisable | Signed off from the preview sheet on 2026-10-10 | ✅ |
 | B4 | Dark and light backgrounds | View the icon on white and on black | The tile is clearly separated from both | Signed off from the preview sheet on 2026-10-10 | ✅ |
 | B5 | Empty-screen watermark | Start the app with no files open, in a light and then a dark OS theme | A large faint imprint of the icon's waveform (bars and dots, no tile) sits above "Open a WAV file"; light grey on light, faint light tint on dark; the Open… button still works | | ⏳ |

@@ -44,7 +44,7 @@ export async function installMenu(): Promise<void> {
   if (isMac) {
     items.unshift(
       await Submenu.new({
-        text: "hither-dither",
+        text: "HitherDither",
         items: [
           await PredefinedMenuItem.new({ item: { About: null } }),
           await PredefinedMenuItem.new({ item: "Separator" }),
