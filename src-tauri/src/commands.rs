@@ -9,7 +9,7 @@ use tauri::State;
 use tauri::ipc::{Channel, Response};
 
 use crate::playback::{PlayRequest, PlaybackInfo, Player};
-use crate::state::{AppState, ClipRuns, LoadedFile, Metadata};
+use crate::state::{AppState, ClipRuns, FileId, LoadedFile, Metadata};
 use crate::stats::Stats;
 
 pub type SharedState = Arc<AppState>;
@@ -56,6 +56,7 @@ pub enum PlaybackEvent {
 pub async fn open_file(
     state: State<'_, SharedState>,
     player: State<'_, SharedPlayer>,
+    file_id: FileId,
     path: PathBuf,
     on_progress: Channel<LoadProgress>,
 ) -> Result<Metadata, String> {
@@ -64,7 +65,7 @@ pub async fn open_file(
     blocking(move || {
         let mut last = Instant::now();
         state
-            .open(&path, |done, total| {
+            .open(file_id, &path, |done, total| {
                 if done == total || last.elapsed() >= Duration::from_millis(50) {
                     last = Instant::now();
                     let _ = on_progress.send(LoadProgress {
@@ -81,19 +82,44 @@ pub async fn open_file(
     .await?
 }
 
+/// Cancel an `open_file` still running for `file_id`; that call then rejects as cancelled.
 #[tauri::command]
-pub fn get_metadata(state: State<'_, SharedState>) -> Option<Metadata> {
-    state.current().map(|f| f.metadata.clone())
+pub fn cancel_open(state: State<'_, SharedState>, file_id: FileId) {
+    state.cancel_open(file_id);
+}
+
+/// Close `file_id` (cancelling its load if one is running), stopping playback first if
+/// it is playing that file so the mapping is released.
+#[tauri::command]
+pub async fn close_file(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    file_id: FileId,
+) -> Result<(), String> {
+    let state = state.inner().clone();
+    let player = player.inner().clone();
+    blocking(move || {
+        if let Some(file) = state.close(file_id) {
+            player.stop_if_playing(&file.source);
+        }
+    })
+    .await
+}
+
+#[tauri::command]
+pub fn get_metadata(state: State<'_, SharedState>, file_id: FileId) -> Option<Metadata> {
+    state.get(file_id).map(|f| f.metadata.clone())
 }
 
 #[tauri::command]
 pub async fn get_peaks(
     state: State<'_, SharedState>,
+    file_id: FileId,
     start: u64,
     end: u64,
     columns: u32,
 ) -> Result<Response, String> {
-    let file = state.current().ok_or("No file is loaded")?;
+    let file = state.get(file_id).ok_or("No file is loaded")?;
     let bytes = blocking(move || encode_peaks(&file, start, end, columns)).await?;
     Ok(Response::new(bytes))
 }
@@ -101,15 +127,16 @@ pub async fn get_peaks(
 #[tauri::command]
 pub async fn compute_stats(
     state: State<'_, SharedState>,
+    file_id: FileId,
     range: Option<FrameRange>,
 ) -> Result<Option<Stats>, String> {
     let state = state.inner().clone();
-    blocking(move || state.compute_stats(range.map(|r| (r.start, r.end)))).await?
+    blocking(move || state.compute_stats(file_id, range.map(|r| (r.start, r.end)))).await?
 }
 
 #[tauri::command]
-pub fn get_clip_runs(state: State<'_, SharedState>) -> Result<ClipRuns, String> {
-    state.clip_runs()
+pub fn get_clip_runs(state: State<'_, SharedState>, file_id: FileId) -> Result<ClipRuns, String> {
+    state.clip_runs(file_id)
 }
 
 #[tauri::command]
@@ -119,16 +146,18 @@ pub fn playback_info(player: State<'_, SharedPlayer>) -> PlaybackInfo {
 
 /// Play from `from` to `end`; with `looping`, wrap back to `start` until stopped.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri maps each argument to an IPC field.
 pub async fn play(
     state: State<'_, SharedState>,
     player: State<'_, SharedPlayer>,
+    file_id: FileId,
     start: u64,
     end: u64,
     from: u64,
     looping: bool,
     on_event: Channel<PlaybackEvent>,
 ) -> Result<(), String> {
-    let file = state.current().ok_or("No file is loaded")?;
+    let file = state.get(file_id).ok_or("No file is loaded")?;
     let player = player.inner().clone();
     blocking(move || {
         if file.changed_on_disk() {

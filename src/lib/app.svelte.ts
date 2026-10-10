@@ -1,49 +1,59 @@
-// Shared application state and the file-loading flow.
-import { type ClipRuns, type Metadata, type Stats, computeStats, getClipRuns, openFile } from "./api";
+// The active document (facade over the active tab), loading a file into a tab, and
+// selection statistics.
+import { computeStats, getClipRuns, openFile } from "./api";
 import { notify } from "./notices.svelte";
 import type { Selection } from "./selection";
+import { type Tab, activeTab } from "./tabs.svelte";
 
 /** Loads shorter than this never show the progress indicator. */
 export const PROGRESS_DELAY_MS = 500;
 
-export const app = $state({
-  meta: null as Metadata | null,
-  clipRuns: null as ClipRuns | null,
-  wholeStats: null as Stats | null,
-  selection: null as Selection | null,
-  /** Stats currently displayed (whole file or selection). */
-  stats: null as Stats | null,
-  statsPending: false,
-  /** Set while a load runs; `visible` once it has lasted PROGRESS_DELAY_MS. */
-  loading: null as { name: string; fraction: number; visible: boolean } | null,
-  /** Incremented on every successful load so views can reset. */
-  generation: 0,
-});
+/**
+ * The active tab's document. Components read and write these as before; they forward
+ * to whichever tab is active (null/false when none is, or while it is still loading).
+ */
+export const app = {
+  get meta() {
+    return activeTab()?.meta ?? null;
+  },
+  get clipRuns() {
+    return activeTab()?.clipRuns ?? null;
+  },
+  get wholeStats() {
+    return activeTab()?.wholeStats ?? null;
+  },
+  get selection() {
+    return activeTab()?.selection ?? null;
+  },
+  set selection(sel: Selection | null) {
+    const tab = activeTab();
+    if (tab) tab.selection = sel;
+  },
+  get stats() {
+    return activeTab()?.stats ?? null;
+  },
+  get statsPending() {
+    return activeTab()?.statsPending ?? false;
+  },
+};
 
-let loadToken = 0;
-
-export async function loadPath(path: string): Promise<void> {
-  const token = ++loadToken;
-  const name = path.split(/[\\/]/).pop() ?? path;
-  app.loading = { name, fraction: 0, visible: false };
-  const timer = setTimeout(() => {
-    if (token === loadToken && app.loading) app.loading.visible = true;
-  }, PROGRESS_DELAY_MS);
+/**
+ * Load `tab.path` into `tab` (a reactive tab from `tabs.list`). Resolves when the tab is
+ * ready; rejects with the backend's error message on failure (`…was cancelled` if it
+ * was closed meanwhile).
+ */
+export async function loadIntoTab(tab: Tab): Promise<void> {
+  const timer = setTimeout(() => (tab.progress.visible = true), PROGRESS_DELAY_MS);
   try {
-    const meta = await openFile(path, (p) => {
-      if (token === loadToken && app.loading) {
-        app.loading.fraction = p.totalFrames ? p.doneFrames / p.totalFrames : 1;
-      }
+    const meta = await openFile(tab.id, tab.path, (p) => {
+      tab.progress.fraction = p.totalFrames ? p.doneFrames / p.totalFrames : 1;
     });
-    if (token !== loadToken) return;
-    const [whole, clipRuns] = await Promise.all([computeStats(null), getClipRuns()]);
-    app.meta = meta;
-    app.wholeStats = whole;
-    app.stats = whole;
-    app.clipRuns = clipRuns;
-    app.selection = null;
-    app.statsPending = false;
-    app.generation++;
+    const [whole, clipRuns] = await Promise.all([computeStats(tab.id, null), getClipRuns(tab.id)]);
+    tab.meta = meta;
+    tab.wholeStats = whole;
+    tab.stats = whole;
+    tab.clipRuns = clipRuns;
+    tab.status = "ready";
     if (meta.truncated) {
       notify(
         "warning",
@@ -51,40 +61,48 @@ export async function loadPath(path: string): Promise<void> {
         "The data chunk is shorter than its header declares. The audio that is present was loaded.",
       );
     }
-  } catch (e) {
-    if (token !== loadToken) return;
-    const msg = String(e);
-    // A newer open superseded this one; nothing to report.
-    if (!msg.endsWith("was cancelled")) notify("error", "Could not open file", msg);
   } finally {
     clearTimeout(timer);
-    if (token === loadToken) app.loading = null;
   }
 }
 
-let statsToken = 0;
+/** Latest selection-stats request per tab id. */
+const statsTokens = new Map<number, number>();
+let nextStatsToken = 0;
 
-/** Set the selection and refresh stats for it (or restore whole-file stats). */
+/**
+ * Set the active tab's selection and refresh its stats (or restore whole-file stats).
+ * The result goes to the tab that asked, even if another tab is active by then. If a
+ * request from another tab supersedes it, `statsPending` stays set and the stats are
+ * requested again when the tab is next activated.
+ */
 export async function setSelection(sel: Selection | null): Promise<void> {
-  app.selection = sel;
-  const token = ++statsToken;
+  const tab = activeTab();
+  if (!tab) return;
+  tab.selection = sel;
+  const token = ++nextStatsToken;
+  statsTokens.set(tab.id, token);
   if (!sel) {
-    app.stats = app.wholeStats;
-    app.statsPending = false;
+    tab.stats = tab.wholeStats;
+    tab.statsPending = false;
     // Cancels any selection job still running in the backend.
-    void computeStats(null);
+    void computeStats(tab.id, null).catch(() => {});
     return;
   }
-  app.statsPending = true;
+  tab.statsPending = true;
   try {
-    const stats = await computeStats({ start: sel.start, end: sel.end });
-    if (token !== statsToken || stats === null) return;
-    app.stats = stats;
-    app.statsPending = false;
+    const stats = await computeStats(tab.id, { start: sel.start, end: sel.end });
+    if (statsTokens.get(tab.id) !== token || stats === null) return;
+    tab.stats = stats;
+    tab.statsPending = false;
   } catch (e) {
-    if (token === statsToken) {
-      app.statsPending = false;
+    if (statsTokens.get(tab.id) === token) {
+      tab.statsPending = false;
       notify("error", "Could not compute statistics", String(e));
     }
   }
+}
+
+export function forgetStats(tabId: number) {
+  statsTokens.delete(tabId);
 }

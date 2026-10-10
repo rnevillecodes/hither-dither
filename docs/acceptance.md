@@ -1,6 +1,6 @@
 # Acceptance checklist
 
-Manual acceptance pass over every scenario in the four v1 specs (`openspec/changes/add-wav-analyser-app/specs/`).
+Manual acceptance pass over every scenario in the four v1 specs (`openspec/changes/add-wav-analyser-app/specs/`), plus the multi-file tabs and app icon change (`openspec/changes/add-multi-file-tabs/specs/`; sections file-tabs, audio-stats: details panel, app-branding, and rows I2b–I13).
 
 **Setup:** generate fixtures with `cd src-tauri && cargo run --release --example gen_fixtures -- ../fixtures --large`, then run `npm run tauri dev`. Fixture names below refer to files in `fixtures/`.
 
@@ -12,17 +12,21 @@ Environment for this pass: _fill in (OS, webview, audio device)_.
 
 | # | Scenario | Steps | Expected | Evidence | Result |
 |---|---|---|---|---|---|
-| I1 | Open via dialog | Ctrl/Cmd+O (or File › Open…), pick `cd-16bit-stereo-10s.wav` | Waveform, metadata and stats appear | | ⏳ |
-| I2 | Cancel dialog | With I1 loaded, Ctrl/Cmd+O, then Cancel | Same file still loaded, nothing changes | | ⏳ |
-| I3 | Drop one file | Drag `pcm24-stereo-48k.wav` onto the window | Replaces the loaded file | | ⏳ |
-| I4 | Drop several files | Drag `u8-mono.wav` and `float64-mono.wav` together | First file loads; notice "Only one file can be opened at a time" | | ⏳ |
+| I1 | Open via dialog | Ctrl/Cmd+O (or File › Open…), pick `cd-16bit-stereo-10s.wav` | Opens in a new active tab; waveform, metadata and stats appear | | ⏳ |
+| I2 | Cancel dialog | With I1 loaded, Ctrl/Cmd+O, then Cancel | Same tabs open, same tab active, nothing changes | | ⏳ |
+| I2b | Open several from dialog | Ctrl/Cmd+O, select `u8-mono.wav`, `float64-mono.wav` and `pcm24-stereo-48k.wav` | Each opens in its own tab; tabs already open stay open | | ⏳ |
+| I3 | Drop one file | With a file open, drag `pcm24-stereo-48k.wav` onto the window | Opens in a new active tab; the previous file stays open in its tab | | ⏳ |
+| I4 | Drop several files | Drag `u8-mono.wav` and `float64-mono.wav` together | Both open, one tab each; no "one file at a time" notice | | ⏳ |
 | I5 | 24-bit stereo | Open `pcm24-stereo-48k.wav` | 2 channels, 24-bit, 48,000 Hz | Auto: `wav::source::decodes_24_bit_exactly`, `parser::stereo_24_bit_48k` | ⏳ |
 | I6 | Extensible float 6-ch | Open `float32-extensible-5.1.wav` | 6 lanes (L R C LFE Ls Rs), IEEE float | Auto: `parser::extensible_float_six_channels` | ⏳ |
 | I7 | Metadata chunks | Open `with-list-bext-chunks.wav` | Loads normally | Auto: `parser::skips_metadata_and_odd_chunks` | ⏳ |
 | I8 | Truncated file | Open `truncated.wav` | Loads available audio; "appears truncated" warning | Auto: `tests/state.rs::truncated_file_loads_with_flag` | ⏳ |
-| I9 | Non-WAV file | With a file loaded, open `not-a-wav.wav` | Error names the file and "not a valid WAV file"; previous file stays | Auto: `tests/state.rs::failed_open_keeps_previous_file` | ⏳ |
+| I9 | Non-WAV file | With a file loaded, open `not-a-wav.wav` | Error names the file and "not a valid WAV file"; no tab is left for it; the open tabs stay | Auto: `tests/state.rs::failed_open_keeps_previous_file` | ⏳ |
+| I9b | One bad file among several | Drop `not-a-wav.wav` together with `u8-mono.wav` and `float64-mono.wav` | One error naming `not-a-wav.wav`; the two valid files each open in a tab | | ⏳ |
 | I10 | Unsupported encoding | Open `ima-adpcm.wav` (also `mu-law.wav`) | Error names "IMA ADPCM" (or "µ-law") | Auto: `parser::rejects_unsupported_encodings_by_name` | ⏳ |
 | I11 | Large file load | Open `large-1gb.wav`, then move the window and open a menu while it loads | Progress bar appears (load > 500 ms); window stays interactive | | ⏳ |
+| I12 | No toolbar Open button, nothing open | Start the app | Toolbar has no Open… button; the empty screen's Open… button opens the dialog | | ⏳ |
+| I13 | No toolbar Open button, files open | Open any file | Toolbar still has no Open… button; File › Open… works | | ⏳ |
 
 ## waveform-view
 
@@ -68,3 +72,47 @@ These need an audio output device. On WSL, install `libasound2-plugins` so ALSA 
 | P7 | Sample-rate mismatch | Play `tone-1khz-96k.wav` on a 48 kHz device | Correct pitch (1 kHz) and speed (10 s) | Auto: `playback::engine::resampler_keeps_length_and_pitch` | ⏳ |
 | P8 | No audio device | Run where no output device exists (e.g. WSL without the ALSA PulseAudio plugin) | Playback controls disabled with a message; waveform and stats work | | ⏳ |
 | P9 | Lower volume | Set volume to 50% while playing | Quieter; stats panel unchanged | Auto: `playback::engine::volume_scales_output_only` | ⏳ |
+
+## file-tabs
+
+Below, "A" is `cd-16bit-stereo-10s.wav` and "B" is `beep-every-second-mono-60s.wav`.
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| T1 | Two files open | Open A, then B | Tabs "A", "B" in that order; B active (highlighted) and shown in the panels; hovering a tab shows its full path | | ⏳ |
+| T2 | No files open | Start the app (or close every tab) | No tab strip; the empty "Open a WAV file" screen | | ⏳ |
+| T3 | Open while another file is shown | With A active, open B | New tab B becomes active; A stays open | | ⏳ |
+| T4 | Open the same file twice | With A and B open and B active, open A again (dialog or drop) | A's tab becomes active; still exactly two tabs | Auto: `tabOrder.test.ts` (path matching) | ⏳ |
+| T5 | Switch tabs during a long load | With A open, open `large-1gb.wav`, then click A's tab while it loads | Loading tab shows a spinner; A's waveform is usable; the load finishes and its tab becomes active | | ⏳ |
+| T6 | Click a tab | With A and B open and B active, click A | A becomes active with its own waveform, metadata and stats | | ⏳ |
+| T7 | Cycle with the keyboard | Open three files, activate the last, press Ctrl+Tab (then Ctrl+Shift+Tab) | First tab becomes active (then back to the last) | Auto: `tabOrder.test.ts` | ⏳ |
+| T8 | Selection kept across switches | In A select 1.0–2.0 s and zoom in; switch to B, then back to A | Same zoom and scroll, the 1.0–2.0 s selection, stats labelled "Selection" | | ⏳ |
+| T9 | Selections are independent | With a selection in A, switch to B (no selection) | B shows no selection and "Whole file" stats | | ⏳ |
+| T10 | Close with the keyboard | With A and B open and B active, press Ctrl/Cmd+W once | Only B closes; A remains | | ⏳ |
+| T11 | Close a loading tab | Open `large-1gb.wav`, click its tab's × while it loads | The load stops, the tab goes away, no error appears | Auto: `tests/state.rs::cancel_open_stops_only_that_load` | ⏳ |
+| T12 | Close the middle tab | Open three files, activate the middle one, close it | The tab to its right becomes active | Auto: `tabOrder.test.ts` | ⏳ |
+| T13 | Close the last tab | With one tab open, close it (also try middle-click and File › Close Tab) | Empty screen with its Open button; File › Close Tab is greyed out | | ⏳ |
+| T14 | Many tabs | Open about 15 files | The strip scrolls sideways; the active tab stays visible | | ⏳ |
+| T15 | Switch tabs during playback | Play B to about 12 s, switch to A, then back to B | Playback stops on switching; B's playhead is at about 12 s | | ⏳ |
+| T16 | Play in another tab | Switch to A and press Space | A plays from its own playhead | | ⏳ |
+| T17 | Close the playing tab | Play B, then close its tab | Playback stops; no error | | ⏳ |
+
+## audio-stats: details panel
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| D1 | No files open | Start the app (or close every tab) | No details panel and no panel toggle; the empty screen spans the full width | | ⏳ |
+| D2 | Hide the panel | Open a file, click the panel toggle at the right of the toolbar | Panel hides; the waveform widens to the full window | | ⏳ |
+| D3 | Choice is remembered | Hide the panel, switch tabs, quit, restart and open a file | Panel stays hidden until toggled back on | | ⏳ |
+| D4 | Narrow window | Make the window narrower than 820 px, toggle the panel | The bottom panel hides and shows | | ⏳ |
+
+## app-branding
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| B1 | Running app on Windows | `npm run tauri dev` | Title bar and taskbar show the HitherDither icon (waveform tile), not the Tauri logo | | ⏳ |
+| B2 | Installed bundle | `npm run tauri build`, install the result | The installed shortcut/launcher shows the HitherDither icon | | ⏳ |
+| B3 | Small size | View `src-tauri/icons/32x32.png` at 100% | The waveform bars are recognisable | Signed off from the preview sheet on 2026-10-10 | ✅ |
+| B4 | Dark and light backgrounds | View the icon on white and on black | The tile is clearly separated from both | Signed off from the preview sheet on 2026-10-10 | ✅ |
+| B5 | Empty-screen watermark | Start the app with no files open, in a light and then a dark OS theme | A large faint imprint of the icon's waveform (bars and dots, no tile) sits above "Open a WAV file"; light grey on light, faint light tint on dark; the Open… button still works | | ⏳ |
+| B6 | Watermark hidden with files | Open any file | The imprint is gone | | ⏳ |

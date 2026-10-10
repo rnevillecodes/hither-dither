@@ -47,10 +47,10 @@ fn failed_open_keeps_previous_file() {
     std::fs::write(&junk, b"definitely not audio").unwrap();
 
     let state = AppState::default();
-    let meta = state.open(&good, |_, _| {}).unwrap();
+    let meta = state.open(1, &good, |_, _| {}).unwrap();
     assert_eq!(meta.name, "good.wav");
 
-    let err = state.open(&adpcm, |_, _| {}).unwrap_err();
+    let err = state.open(2, &adpcm, |_, _| {}).unwrap_err();
     assert!(matches!(err, OpenError::Wav { .. }));
     let msg = err.to_string();
     assert!(
@@ -58,7 +58,7 @@ fn failed_open_keeps_previous_file() {
         "{msg}"
     );
 
-    let err = state.open(&junk, |_, _| {}).unwrap_err().to_string();
+    let err = state.open(3, &junk, |_, _| {}).unwrap_err().to_string();
     assert!(
         err.contains("notes.wav") && err.contains("not a valid WAV"),
         "{err}"
@@ -66,10 +66,81 @@ fn failed_open_keeps_previous_file() {
 
     assert!(
         state
-            .open(&dir.path().join("missing.wav"), |_, _| {})
+            .open(4, &dir.path().join("missing.wav"), |_, _| {})
             .is_err()
     );
-    assert_eq!(state.current().unwrap().metadata.name, "good.wav");
+    assert_eq!(state.get(1).unwrap().metadata.name, "good.wav");
+    assert!(state.get(2).is_none() && state.get(3).is_none() && state.get(4).is_none());
+}
+
+#[test]
+fn files_stay_open_side_by_side_until_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = write(
+        &dir,
+        "a.wav",
+        WavBuilder::new(Encoding::Pcm, 16, 1, 8_000),
+        &[0.1; 100],
+    );
+    let b = write(
+        &dir,
+        "b.wav",
+        WavBuilder::new(Encoding::Pcm, 16, 2, 8_000),
+        &[0.2; 400],
+    );
+    let state = AppState::default();
+    state.open(1, &a, |_, _| {}).unwrap();
+    state.open(2, &b, |_, _| {}).unwrap();
+    assert_eq!(state.get(1).unwrap().metadata.name, "a.wav");
+    assert_eq!(state.get(2).unwrap().metadata.name, "b.wav");
+    assert_eq!(state.compute_stats(2, None).unwrap().unwrap().end, 200);
+    assert_eq!(state.clip_runs(1).unwrap().channels.len(), 1);
+
+    assert_eq!(state.close(1).unwrap().metadata.name, "a.wav");
+    assert!(state.get(1).is_none());
+    assert!(state.compute_stats(1, None).is_err());
+    assert_eq!(state.get(2).unwrap().metadata.name, "b.wav");
+    assert!(state.close(1).is_none());
+}
+
+#[test]
+fn cancel_open_stops_only_that_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = write(
+        &dir,
+        "a.wav",
+        WavBuilder::new(Encoding::Pcm, 16, 1, 8_000),
+        &[0.1; 100],
+    );
+    let big = write(
+        &dir,
+        "big.wav",
+        WavBuilder::new(Encoding::Pcm, 16, 1, 48_000),
+        &vec![0.1; 480_000],
+    );
+    let state = AppState::default();
+    state.open(1, &a, |_, _| {}).unwrap();
+
+    let err = state
+        .open(2, &big, |_, _| state.cancel_open(2))
+        .unwrap_err();
+    assert!(
+        matches!(err, OpenError::Cancelled(ref n) if n == "big.wav"),
+        "{err}"
+    );
+    assert!(state.get(2).is_none());
+    assert_eq!(state.get(1).unwrap().metadata.name, "a.wav");
+
+    // Closing a loading file cancels it the same way.
+    let err = state
+        .open(3, &big, |_, _| drop(state.close(3)))
+        .unwrap_err();
+    assert!(matches!(err, OpenError::Cancelled(_)));
+    assert!(state.get(3).is_none());
+
+    // A later open under the same id is not affected by the earlier cancel.
+    state.open(2, &big, |_, _| {}).unwrap();
+    assert_eq!(state.get(2).unwrap().metadata.frames, 480_000);
 }
 
 #[test]
@@ -83,7 +154,7 @@ fn metadata_for_cd_quality_file() {
     );
     let state = AppState::default();
     let mut calls = Vec::new();
-    let m = state.open(&p, |d, t| calls.push((d, t))).unwrap();
+    let m = state.open(1, &p, |d, t| calls.push((d, t))).unwrap();
     assert_eq!(m.encoding, "PCM");
     assert_eq!(
         (m.bit_depth, m.sample_rate, m.channels, m.frames),
@@ -103,7 +174,7 @@ fn truncated_file_loads_with_flag() {
     bytes.truncate(bytes.len() - 21);
     let p = dir.path().join("cut.wav");
     std::fs::write(&p, bytes).unwrap();
-    let m = AppState::default().open(&p, |_, _| {}).unwrap();
+    let m = AppState::default().open(1, &p, |_, _| {}).unwrap();
     assert!(m.truncated);
     assert_eq!(m.frames, 89);
 }
@@ -119,8 +190,8 @@ fn peaks_response_shape_and_length() {
         &interleave(&[tone.clone(), tone]),
     );
     let state = AppState::default();
-    state.open(&p, |_, _| {}).unwrap();
-    let file = state.current().unwrap();
+    state.open(1, &p, |_, _| {}).unwrap();
+    let file = state.get(1).unwrap();
 
     let b = encode_peaks(&file, 0, 80_000, 800);
     assert_eq!(header(&b), (PEAKS_KIND_MINMAX, 2, 800, 0.0));
@@ -151,16 +222,16 @@ fn stats_and_clip_runs_commands() {
         &x,
     );
     let state = AppState::default();
-    assert!(state.compute_stats(None).is_err());
-    state.open(&p, |_, _| {}).unwrap();
+    assert!(state.compute_stats(1, None).is_err());
+    state.open(1, &p, |_, _| {}).unwrap();
 
-    let whole = state.compute_stats(None).unwrap().unwrap();
+    let whole = state.compute_stats(1, None).unwrap().unwrap();
     assert_eq!((whole.start, whole.end), (0, 96_000));
     assert_eq!(whole.channels[0].clip_runs, 1);
     assert!(matches!(whole.loudness, Loudness::Value { .. }));
 
     let sel = state
-        .compute_stats(Some((48_000, 96_000)))
+        .compute_stats(1, Some((48_000, 96_000)))
         .unwrap()
         .unwrap();
     assert_eq!(sel.channels[0].levels.peak_dbfs, None);
@@ -170,7 +241,7 @@ fn stats_and_clip_runs_commands() {
     assert!(json["channels"][0].get("peak_dbfs").is_some());
     assert_eq!(json["loudness"]["kind"], "silent");
 
-    let runs = state.clip_runs().unwrap();
+    let runs = state.clip_runs(1).unwrap();
     assert_eq!(runs.channels[0].len(), 1);
     assert_eq!(runs.channels[0][0].start, 10_000);
     assert!(!runs.capped);
@@ -186,8 +257,8 @@ fn detects_file_changed_on_disk() {
         &[0.1; 100],
     );
     let state = AppState::default();
-    state.open(&p, |_, _| {}).unwrap();
-    assert!(!state.current().unwrap().changed_on_disk());
+    state.open(1, &p, |_, _| {}).unwrap();
+    assert!(!state.get(1).unwrap().changed_on_disk());
     // Appending changes the size (and on most systems the mtime).
     use std::io::Write;
     std::fs::OpenOptions::new()
@@ -196,5 +267,5 @@ fn detects_file_changed_on_disk() {
         .unwrap()
         .write_all(&[0; 10])
         .unwrap();
-    assert!(state.current().unwrap().changed_on_disk());
+    assert!(state.get(1).unwrap().changed_on_disk());
 }

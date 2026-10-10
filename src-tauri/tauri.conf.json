@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "hither-dither",
+  "productName": "HitherDither",
   "version": "0.1.0",
   "identifier": "com.hitherdither.app",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "hither-dither",
+        "title": "HitherDither",
         "width": 1200,
         "height": 760,
         "minWidth": 640,

@@ -1,6 +1,10 @@
-# hither-dither
+<p align="center">
+  <img src="src-tauri/icons/128x128@2x.png" alt="HitherDither icon: waveform bars dissolving into dither dots" width="128" height="128">
+</p>
 
-A lightweight desktop app for inspecting WAV files. It shows the waveform, format metadata and level statistics, and plays back the file or a selection of it. Built with Tauri v2 (Rust backend) and Svelte 5 + TypeScript (frontend).
+<h1 align="center">HitherDither</h1>
+
+A lightweight desktop app for inspecting WAV files. It shows the waveform, format metadata and level statistics, and plays back the file or a selection of it. Several files can be open at once, each in its own tab. Built with Tauri v2 (Rust backend) and Svelte 5 + TypeScript (frontend).
 
 ## Development
 
@@ -33,3 +37,4 @@ See the [Tauri prerequisites guide](https://tauri.app/start/prerequisites/) for 
 - `src-tauri/`: Rust crate (WAV parsing, peak pyramid, statistics, playback, Tauri commands)
 - `src/`: Svelte frontend (`lib/` holds pure logic and the canvas renderer, `components/` holds UI panels)
 - `docs/`: IPC reference, performance and acceptance notes
+- `scripts/gen-icons.mjs`: generates the icon source (`src-tauri/icons/app-icon.svg`) and the empty-screen imprint (`src/assets/logo-shadow.svg`). After changing it, run `node scripts/gen-icons.mjs` and then `npx tauri icon src-tauri/icons/app-icon.svg`, and delete the generated `android/`, `ios/` and `64x64.png`, which the app doesn't use.

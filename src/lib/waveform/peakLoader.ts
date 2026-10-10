@@ -10,23 +10,18 @@ interface Request {
   start: number;
   end: number;
   columns: number;
-  generation: number;
 }
 
 export class PeakLoader {
   tile: PeakTile | null = null;
-  private generation = 0;
   private inFlight = false;
   private wanted: Request | null = null;
 
-  constructor(private onTile: () => void) {}
-
-  /** Drop cached data (new file loaded). */
-  reset() {
-    this.generation++;
-    this.tile = null;
-    this.wanted = null;
-  }
+  /** One loader per mounted waveform, so it only ever serves `fileId`. */
+  constructor(
+    private fileId: number,
+    private onTile: () => void,
+  ) {}
 
   /** Request a tile for `vp` at `dpr` device pixels per CSS pixel, unless the cached one fits. */
   ensure(vp: Viewport, dpr: number) {
@@ -37,7 +32,7 @@ export class PeakLoader {
     const end = Math.min(vp.totalFrames, Math.ceil(visibleEnd(vp) + margin));
     const columnsPerFrame = dpr / vp.fpp;
     const columns = Math.max(1, Math.min(MAX_COLUMNS, Math.round((end - start) * columnsPerFrame)));
-    this.wanted = { start, end, columns, generation: this.generation };
+    this.wanted = { start, end, columns };
     this.pump(vp.totalFrames);
   }
 
@@ -56,9 +51,8 @@ export class PeakLoader {
     const req = this.wanted;
     this.wanted = null;
     this.inFlight = true;
-    getPeaks(req.start, req.end, req.columns, totalFrames)
+    getPeaks(this.fileId, req.start, req.end, req.columns, totalFrames)
       .then((tile) => {
-        if (req.generation !== this.generation) return;
         this.tile = tile;
         this.onTile();
       })

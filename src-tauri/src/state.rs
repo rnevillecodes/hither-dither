@@ -1,5 +1,6 @@
-//! Loaded-file state, independent of the Tauri runtime so it can be tested directly.
+//! Open-file state, independent of the Tauri runtime so it can be tested directly.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -10,7 +11,7 @@ use crate::peaks::{PeakPyramid, PyramidBuilder};
 use crate::stats::{self, Analysis, ClipRun, MAX_STORED_RUNS, Stats, StatsRunner};
 use crate::wav::{SampleFormat, SampleSource, WavError, WavInfo};
 
-/// Everything known about the currently open file.
+/// Everything known about one open file.
 pub struct LoadedFile {
     pub metadata: Metadata,
     /// Size and modification time when loaded, to detect external changes.
@@ -55,23 +56,33 @@ pub struct ClipRuns {
     pub capped: bool,
 }
 
+/// Identifies an open file. Assigned by the frontend so a load can be cancelled
+/// before it finishes.
+pub type FileId = u32;
+
 #[derive(Default)]
 pub struct AppState {
-    file: RwLock<Option<Arc<LoadedFile>>>,
-    loading: Mutex<Option<Arc<AtomicBool>>>,
+    files: RwLock<HashMap<FileId, Arc<LoadedFile>>>,
+    loading: Mutex<HashMap<FileId, Arc<AtomicBool>>>,
     pub stats: StatsRunner,
 }
 
 impl AppState {
-    pub fn current(&self) -> Option<Arc<LoadedFile>> {
-        self.file.read().unwrap().clone()
+    pub fn get(&self, id: FileId) -> Option<Arc<LoadedFile>> {
+        self.files.read().unwrap().get(&id).cloned()
     }
 
-    /// Parse, map and analyse `path`, then make it the current file. On failure the
-    /// previous file stays loaded. A newer `open` cancels one still in progress.
+    fn require(&self, id: FileId) -> Result<Arc<LoadedFile>, String> {
+        self.get(id).ok_or_else(|| "No file is loaded".to_string())
+    }
+
+    /// Parse, map and analyse `path`, then install it under `id`. On failure nothing
+    /// is installed and other files are untouched. Loads of different ids run
+    /// independently; `cancel_open`/`close` (or re-opening the same id) cancel one.
     /// `progress(done, total)` is called with frames analysed so far.
     pub fn open(
         &self,
+        id: FileId,
         path: &Path,
         mut progress: impl FnMut(u64, u64),
     ) -> Result<Metadata, OpenError> {
@@ -79,50 +90,47 @@ impl AppState {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
-        let wav_err = |source| OpenError::Wav {
-            name: name.clone(),
-            source,
-        };
-
         let cancel = Arc::new(AtomicBool::new(false));
-        if let Some(old) = self.loading.lock().unwrap().replace(cancel.clone()) {
+        if let Some(old) = self.loading.lock().unwrap().insert(id, cancel.clone()) {
             old.store(true, Ordering::Relaxed);
         }
+        let result = load(path, &name, &cancel, &mut progress);
 
-        let fs_meta = std::fs::metadata(path).map_err(|e| wav_err(e.into()))?;
-        let size_bytes = fs_meta.len();
-        let source = Arc::new(SampleSource::open(path).map_err(wav_err)?);
-        let total = source.frames();
-        let mut builder = PyramidBuilder::new(source.channels(), total);
-        let whole = stats::analyse(&source, 0, total, &cancel, Some(&mut builder), |done| {
-            progress(done, total)
-        })
-        .map_err(|_| OpenError::Cancelled(name.clone()))?;
-
-        let metadata = Metadata::new(path, name.clone(), size_bytes, source.info());
-        let loaded = Arc::new(LoadedFile {
-            metadata: metadata.clone(),
-            disk_stamp: (size_bytes, fs_meta.modified().ok()),
-            source,
-            pyramid: builder.finish(),
-            whole,
-        });
-
-        // Only install the result if no newer open superseded this one meanwhile.
+        // Only install the result if the load was not cancelled meanwhile.
         let mut loading = self.loading.lock().unwrap();
+        if loading.get(&id).is_some_and(|c| Arc::ptr_eq(c, &cancel)) {
+            loading.remove(&id);
+        }
         if cancel.load(Ordering::Relaxed) {
             return Err(OpenError::Cancelled(name));
         }
-        *loading = None;
-        self.stats.cancel();
-        *self.file.write().unwrap() = Some(loaded);
+        let loaded = result?;
+        let metadata = loaded.metadata.clone();
+        self.files.write().unwrap().insert(id, loaded);
         Ok(metadata)
     }
 
-    /// Stats for `[start, end)`, or the cached whole-file stats when `range` is `None`.
-    /// Returns `Ok(None)` when superseded by a newer request.
-    pub fn compute_stats(&self, range: Option<(u64, u64)>) -> Result<Option<Stats>, String> {
-        let file = self.current().ok_or("No file is loaded")?;
+    /// Cancel a load still in progress for `id`; it then fails with `Cancelled`.
+    pub fn cancel_open(&self, id: FileId) {
+        if let Some(c) = self.loading.lock().unwrap().remove(&id) {
+            c.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Forget `id`, cancelling its load if one is running. Returns the file that was open.
+    pub fn close(&self, id: FileId) -> Option<Arc<LoadedFile>> {
+        self.cancel_open(id);
+        self.files.write().unwrap().remove(&id)
+    }
+
+    /// Stats for `[start, end)` of file `id`, or its cached whole-file stats when
+    /// `range` is `None`. Returns `Ok(None)` when superseded by a newer request.
+    pub fn compute_stats(
+        &self,
+        id: FileId,
+        range: Option<(u64, u64)>,
+    ) -> Result<Option<Stats>, String> {
+        let file = self.require(id)?;
         let Some((start, end)) = range else {
             self.stats.cancel();
             return Ok(Some(file.whole.stats.clone()));
@@ -137,8 +145,8 @@ impl AppState {
         Ok(rx.recv().ok().flatten().map(|a| a.stats))
     }
 
-    pub fn clip_runs(&self) -> Result<ClipRuns, String> {
-        let file = self.current().ok_or("No file is loaded")?;
+    pub fn clip_runs(&self, id: FileId) -> Result<ClipRuns, String> {
+        let file = self.require(id)?;
         let capped = file
             .whole
             .stats
@@ -150,6 +158,36 @@ impl AppState {
             capped,
         })
     }
+}
+
+/// Parse, map and analyse `path` (stops early if `cancel` is set).
+fn load(
+    path: &Path,
+    name: &str,
+    cancel: &AtomicBool,
+    progress: &mut impl FnMut(u64, u64),
+) -> Result<Arc<LoadedFile>, OpenError> {
+    let wav_err = |source| OpenError::Wav {
+        name: name.to_string(),
+        source,
+    };
+    let fs_meta = std::fs::metadata(path).map_err(|e| wav_err(e.into()))?;
+    let size_bytes = fs_meta.len();
+    let source = Arc::new(SampleSource::open(path).map_err(wav_err)?);
+    let total = source.frames();
+    let mut builder = PyramidBuilder::new(source.channels(), total);
+    let whole = stats::analyse(&source, 0, total, cancel, Some(&mut builder), |done| {
+        progress(done, total)
+    })
+    .map_err(|_| OpenError::Cancelled(name.to_string()))?;
+
+    Ok(Arc::new(LoadedFile {
+        metadata: Metadata::new(path, name.to_string(), size_bytes, source.info()),
+        disk_stamp: (size_bytes, fs_meta.modified().ok()),
+        source,
+        pyramid: builder.finish(),
+        whole,
+    }))
 }
 
 impl LoadedFile {
