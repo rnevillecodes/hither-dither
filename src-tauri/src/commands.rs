@@ -117,13 +117,14 @@ pub fn playback_info(player: State<'_, SharedPlayer>) -> PlaybackInfo {
     player.info()
 }
 
-/// Play file frames `[start, end)`; with `looping`, repeat until stopped.
+/// Play from `from` to `end`; with `looping`, wrap back to `start` until stopped.
 #[tauri::command]
 pub async fn play(
     state: State<'_, SharedState>,
     player: State<'_, SharedPlayer>,
     start: u64,
     end: u64,
+    from: u64,
     looping: bool,
     on_event: Channel<PlaybackEvent>,
 ) -> Result<(), String> {
@@ -136,7 +137,11 @@ pub async fn play(
                 file.metadata.name
             ));
         }
-        let shared = player.play(file.source.clone(), PlayRequest { start, end }, looping)?;
+        let shared = player.play(
+            file.source.clone(),
+            PlayRequest { start, end, from },
+            looping,
+        )?;
         std::thread::spawn(move || {
             use std::sync::atomic::Ordering;
             while !shared.stop.load(Ordering::Relaxed) {

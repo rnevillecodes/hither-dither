@@ -124,8 +124,9 @@ interface PlaybackInfo {
 
 | Arg | Type | Notes |
 | --- | --- | --- |
-| `start` | number | First frame to play |
+| `start` | number | Start of the play range; looping wraps back here |
 | `end` | number | Frame to stop at (exclusive); the file length for "play to end" |
+| `from` | number | Frame to begin at, within `[start, end]` (e.g. resuming a paused selection) |
 | `looping` | boolean | Repeat `[start, end)` until stopped |
 | `onEvent` | `Channel<PlaybackEvent>` | Position updates for this playback |
 

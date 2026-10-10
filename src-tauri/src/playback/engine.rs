@@ -20,11 +20,13 @@ const CHUNK_FRAMES: usize = 1024;
 /// Ring buffer length in seconds of device audio.
 const RING_SECS: f64 = 0.2;
 
-/// What to play: file frames `[start, end)`, wrapping to `start` while looping is on.
+/// What to play: from `from` up to `end`, wrapping to `start` while looping is on.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlayRequest {
     pub start: u64,
     pub end: u64,
+    /// First frame played, within `[start, end]` (e.g. resuming mid-selection).
+    pub from: u64,
 }
 
 /// State shared between the feeder, the audio callback and position reporting.
@@ -154,9 +156,11 @@ pub fn start(
     volume: Arc<AtomicU32>,
 ) -> (Engine, JoinHandle<()>) {
     let end = req.end.min(src.frames());
+    let start = req.start.min(end);
     let req = PlayRequest {
-        start: req.start.min(end),
+        start,
         end,
+        from: req.from.clamp(start, end),
     };
     let file_rate = src.info().sample_rate;
     let out_ch = map.out_channels();
@@ -171,7 +175,7 @@ pub fn start(
         stop: AtomicBool::new(false),
         feeder_done: AtomicBool::new(false),
         finished: AtomicBool::new(false),
-        audible: AtomicU64::new((req.start as f64).to_bits()),
+        audible: AtomicU64::new((req.from as f64).to_bits()),
         stamp_nanos: AtomicU64::new(0),
         running: AtomicBool::new(false),
         base: Instant::now(),
@@ -184,7 +188,7 @@ pub fn start(
         out_index: 0,
         segment: Marker {
             out_index: 0,
-            file_frame: req.start as f64,
+            file_frame: req.from as f64,
         },
         step: file_rate as f64 / out_rate as f64,
     };
@@ -218,7 +222,7 @@ impl Feeder {
         let out_ch = self.map.out_channels();
         let ratio = self.resampler.as_ref().map_or(1.0, |r| r.ratio);
         let (mut raw, mut mapped, mut out) = (Vec::new(), Vec::new(), Vec::new());
-        let mut pos = req.start;
+        let mut pos = req.from;
         // Input frames fed so far; marks where loop segments start in the output.
         let mut fed: u64 = 0;
 
@@ -453,6 +457,7 @@ mod tests {
         let req = PlayRequest {
             start: 12_000,
             end: 24_000,
+            from: 12_000,
         };
         let (mut engine, feeder) = start(
             src,
@@ -484,6 +489,7 @@ mod tests {
         let req = PlayRequest {
             start: 2_000,
             end: 3_000,
+            from: 2_000,
         };
         let (mut engine, feeder) = start(
             src,
@@ -512,12 +518,37 @@ mod tests {
     }
 
     #[test]
+    fn resumes_mid_range_and_loops_to_range_start() {
+        let src = ramp_source(10_000, 8_000);
+        let req = PlayRequest {
+            start: 2_000,
+            end: 3_000,
+            from: 2_600,
+        };
+        let (mut engine, feeder) = start(
+            src,
+            req,
+            true,
+            ChannelMap::new(1, 1, false),
+            8_000,
+            volume(),
+        );
+        let (out, _) = render_until_finished(&mut engine, 1, 1_500);
+        assert!((out[0] - 2_601.0 / 10_001.0).abs() < 1e-6);
+        // After the 400 frames to the end, it wraps to the range start, not to `from`.
+        assert!((out[400] - 2_001.0 / 10_001.0).abs() < 1e-6);
+        engine.shared().stop.store(true, Ordering::Relaxed);
+        feeder.join().unwrap();
+    }
+
+    #[test]
     fn volume_scales_output_only() {
         let src = ramp_source(4_000, 8_000);
         let vol = Arc::new(AtomicU32::new(0.5f32.to_bits()));
         let req = PlayRequest {
             start: 0,
             end: 4_000,
+            from: 0,
         };
         let (mut engine, _f) = start(src, req, false, ChannelMap::new(1, 1, false), 8_000, vol);
         let (out, _) = render_until_finished(&mut engine, 1, 10_000);
@@ -530,6 +561,7 @@ mod tests {
         let req = PlayRequest {
             start: 0,
             end: 96_000,
+            from: 0,
         };
         let (mut engine, feeder) = start(
             src,

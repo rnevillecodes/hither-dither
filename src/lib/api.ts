@@ -103,3 +103,39 @@ export function computeStats(range: { start: number; end: number } | null): Prom
 export function getClipRuns(): Promise<ClipRuns> {
   return invoke("get_clip_runs");
 }
+
+export interface PlaybackInfo {
+  available: boolean;
+  reason: string | null;
+  device: { name: string; sample_rate: number; channels: number } | null;
+}
+
+export type PlaybackEvent = { kind: "position"; frame: number } | { kind: "ended"; frame: number };
+
+export function playbackInfo(): Promise<PlaybackInfo> {
+  return invoke("playback_info");
+}
+
+export function play(
+  start: number,
+  end: number,
+  from: number,
+  looping: boolean,
+  onEvent: (e: PlaybackEvent) => void,
+): Promise<void> {
+  const channel = new Channel<PlaybackEvent>();
+  channel.onmessage = onEvent;
+  return invoke("play", { start, end, from, looping, onEvent: channel });
+}
+
+export function stopPlayback(): Promise<number | null> {
+  return invoke("stop_playback");
+}
+
+export function setVolume(volume: number): Promise<void> {
+  return invoke("set_volume", { volume });
+}
+
+export function setLoop(enabled: boolean): Promise<void> {
+  return invoke("set_loop", { enabled });
+}
