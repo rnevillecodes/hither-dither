@@ -104,7 +104,7 @@ fn main() -> std::io::Result<()> {
         .write(p("beep-every-second-mono-60s.wav"), &beeps)?;
 
     if large {
-        stream_sine(&p("large-1gb.wav"), 48_000, 2, 48_000 * 2790)?; // ≈ 1.0 GiB
+        stream_sine(&p("large-1gb.wav"), 48_000, 2, 48_000 * 5592)?; // ≈ 1.0 GiB
         stream_sine(&p("one-hour-stereo-48k.wav"), 48_000, 2, 48_000 * 3600)?;
     }
     println!("Fixtures written to {}", out.display());
