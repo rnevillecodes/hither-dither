@@ -29,14 +29,14 @@
 
 ## 5. Frontend shell and file opening
 
-- [ ] 5.1 Build app layout (toolbar, waveform area, metadata + stats side panel, notice/toast area) with OS light/dark theme; verify `npm run check` passes and the window renders the empty state
+- [x] 5.1 Build app layout (toolbar, waveform area, metadata + stats side panel, notice/toast area) with OS light/dark theme; verify `npm run check` passes and the window renders the empty state
 - [ ] 5.2 Wire Open menu item + Ctrl/Cmd+O to the dialog plugin (`.wav` filter), handling cancel; verify manually that cancel keeps the current file and a valid file loads
 - [ ] 5.3 Implement drag-and-drop loading (first file only + "one file at a time" notice) and error/warning toasts (invalid, unsupported encoding, truncated); verify manually with generated fixtures for each scenario
 - [ ] 5.4 Show progress indicator for loads exceeding 500 ms; verify manually with a ~1 GB generated file that progress shows and the window remains movable
 
 ## 6. Waveform view
 
-- [ ] 6.1 Implement pure `Viewport` module (frames-per-pixel, start frame, zoom-around-point, clamp, fit) and ruler tick generation (h:m:s down to samples); verify vitest unit tests including zoom-under-pointer invariance
+- [x] 6.1 Implement pure `Viewport` module (frames-per-pixel, start frame, zoom-around-point, clamp, fit) and ruler tick generation (h:m:s down to samples); verify vitest unit tests including zoom-under-pointer invariance
 - [ ] 6.2 Implement canvas renderer: per-channel lanes with labels and ±1.0 scale, min/max columns, sample point+line drawing at high zoom, rAF-coalesced redraws with latest-wins peak fetching; verify the single-spike fixture shows a full-scale spike when zoomed to fit
 - [ ] 6.3 Implement zoom (Ctrl/Cmd+wheel, +/-, zoom-to-fit) and scroll (wheel, Shift+wheel, scrollbar, overview strip drag); verify manually against each waveform-view zoom/scroll scenario
 - [ ] 6.4 Implement time selection (drag, Shift+click extend, Escape/click clear) with highlight and start/end/duration readout; verify vitest tests for selection math and manual check of the 1.0–2.5 s scenario

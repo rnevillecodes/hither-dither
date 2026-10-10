@@ -1,0 +1,111 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+
+  --bg: #f4f5f7;
+  --panel-bg: #ffffff;
+  --border: #d9dce1;
+  --text: #1d2228;
+  --text-dim: #66707c;
+  --accent: #2a6fdb;
+  --accent-text: #ffffff;
+  --button-bg: #ffffff;
+  --button-hover: #eceef2;
+  --danger: #c62828;
+  --warning: #a86200;
+  --scroll-thumb: #b9bec6;
+  --scroll-thumb-hover: #9aa1ab;
+
+  --wf-lane-bg: #ffffff;
+  --wf-lane-alt-bg: #f7f8fa;
+  --wf-wave: #2a6fdb;
+  --wf-zero: #b7c3d4;
+  --wf-grid: #e6e9ee;
+  --wf-selection: rgba(42, 111, 219, 0.16);
+  --wf-selection-edge: rgba(42, 111, 219, 0.7);
+  --wf-clip: rgba(214, 40, 40, 0.18);
+  --wf-clip-marker: #d62828;
+  --wf-playhead: #e07a00;
+  --wf-overview-wave: #8aa6d6;
+  --wf-overview-window: rgba(42, 111, 219, 0.18);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17191d;
+    --panel-bg: #1f2227;
+    --border: #33373e;
+    --text: #e3e6ea;
+    --text-dim: #959ca6;
+    --accent: #5b9bff;
+    --accent-text: #0b1020;
+    --button-bg: #2a2e35;
+    --button-hover: #353a42;
+    --danger: #ff6b6b;
+    --warning: #f0a440;
+    --scroll-thumb: #4a5059;
+    --scroll-thumb-hover: #5d646e;
+
+    --wf-lane-bg: #1b1e22;
+    --wf-lane-alt-bg: #202328;
+    --wf-wave: #69a7ff;
+    --wf-zero: #3d4653;
+    --wf-grid: #2a2e35;
+    --wf-selection: rgba(105, 167, 255, 0.18);
+    --wf-selection-edge: rgba(105, 167, 255, 0.75);
+    --wf-clip: rgba(255, 90, 90, 0.2);
+    --wf-clip-marker: #ff5a5a;
+    --wf-playhead: #ffb02e;
+    --wf-overview-wave: #4f6f9f;
+    --wf-overview-window: rgba(105, 167, 255, 0.2);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+}
+
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--button-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) {
+  background: var(--button-hover);
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+button.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 88%, black);
+}
+button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.mono {
+  font-variant-numeric: tabular-nums;
+}
