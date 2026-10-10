@@ -34,7 +34,7 @@
     border-left: 4px solid var(--accent);
     border-radius: 8px;
     padding: 10px 12px;
-    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
   }
   .notice.warning {
     border-left-color: var(--warning);

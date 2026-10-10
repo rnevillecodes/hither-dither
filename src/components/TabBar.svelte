@@ -97,6 +97,11 @@
     padding: 6px 4px 6px 12px;
     border-radius: 6px 0 0 0;
   }
+  /* The strip clips overflow, so draw the focus ring inside the tab. */
+  .name:focus-visible,
+  .close:focus-visible {
+    outline-offset: -2px;
+  }
   .label {
     overflow: hidden;
     text-overflow: ellipsis;
