@@ -1,4 +1,4 @@
-//! Audio playback of the loaded file.
+//! Audio playback of an open file.
 
 mod device;
 mod engine;
@@ -25,6 +25,8 @@ pub struct PlaybackInfo {
 }
 
 struct Session {
+    /// The file being played, so closing it can stop playback.
+    source: Arc<SampleSource>,
     shared: Arc<Shared>,
     feeder: std::thread::JoinHandle<()>,
 }
@@ -81,7 +83,7 @@ impl Player {
             info.channels == 6 && matches!(info.channel_mask, None | Some(0x3F) | Some(0x60F));
         let map = ChannelMap::new(info.channels as usize, format.channels as usize, five_one);
         let (engine, feeder) = engine::start(
-            src,
+            src.clone(),
             req,
             looping,
             map,
@@ -96,6 +98,7 @@ impl Player {
             return Err(e);
         }
         *self.session.lock().unwrap() = Some(Session {
+            source: src,
             shared: shared.clone(),
             feeder,
         });
@@ -106,6 +109,16 @@ impl Player {
     pub fn stop(&self) -> Option<f64> {
         let session = self.session.lock().unwrap().take()?;
         Some(self.end(session))
+    }
+
+    /// Stop playback if it is playing `src`.
+    pub fn stop_if_playing(&self, src: &Arc<SampleSource>) {
+        let mut guard = self.session.lock().unwrap();
+        if guard.as_ref().is_some_and(|s| Arc::ptr_eq(&s.source, src)) {
+            let session = guard.take().unwrap();
+            drop(guard);
+            self.end(session);
+        }
     }
 
     /// Stop playback only if `shared` is still the current session (releases the

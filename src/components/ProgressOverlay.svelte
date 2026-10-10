@@ -9,9 +9,9 @@
 
 <style>
   .progress {
-    position: fixed;
+    position: absolute;
     left: 50%;
-    top: 64px;
+    top: 24px;
     transform: translateX(-50%);
     width: min(420px, calc(100vw - 32px));
     background: var(--panel-bg);

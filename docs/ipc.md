@@ -4,20 +4,43 @@ The frontend calls these Tauri commands with `invoke(name, args)` from `@tauri-a
 
 Commands that return `Result` reject the `invoke` promise with a human-readable string on error.
 
+Several files can be open at once (one per tab). Each is identified by a `fileId`: an unsigned 32-bit integer the frontend picks when it starts opening the file, so it can cancel the load before it finishes. Commands that act on a file take `fileId` and reject with `No file is loaded` if that ID isn't open.
+
 ## File loading
 
 ### `open_file`
 
 | Arg | Type | Notes |
 | --- | --- | --- |
+| `fileId` | number | ID to open the file under |
 | `path` | string | Absolute path to a `.wav` file |
 | `onProgress` | `Channel<LoadProgress>` | Receives `{ doneFrames, totalFrames }` at most every 50 ms, and once at completion |
 
-Returns `Metadata` (below). On failure, rejects with a message naming the file and the reason (for example `Could not open “x.wav”: the IMA ADPCM (format tag 0x0011) encoding is not supported`), and the previously loaded file stays loaded. A newer `open_file` cancels one still in progress, and the older call then rejects with `Opening “…” was cancelled`.
+Returns `Metadata` (below). On failure, rejects with a message naming the file and the reason (for example `Could not open “x.wav”: the IMA ADPCM (format tag 0x0011) encoding is not supported`). Nothing is installed under `fileId`, and other open files are unaffected. Loads under different IDs are independent. A load cancelled with `cancel_open` or `close_file` (or replaced by another `open_file` with the same ID) rejects with `Opening “…” was cancelled`. On success, any current playback stops.
+
+### `cancel_open`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | The load to cancel |
+
+Cancels an `open_file` still running for `fileId`. Does nothing if there isn't one.
+
+### `close_file`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | The file to close |
+
+Forgets the file, releasing its memory mapping, and cancels its load if one is still running. If playback is playing this file, it stops first. Closing an ID that isn't open does nothing.
 
 ### `get_metadata`
 
-No arguments. Returns `Metadata | null`.
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+
+Returns `Metadata | null` (`null` if `fileId` isn't open).
 
 ```ts
 interface Metadata {
@@ -42,6 +65,7 @@ interface Metadata {
 
 | Arg | Type | Notes |
 | --- | --- | --- |
+| `fileId` | number | |
 | `start` | number | First frame (inclusive), clamped to the file |
 | `end` | number | Last frame (exclusive), clamped to the file |
 | `columns` | number | Pixel columns, 1 to 16384 |
@@ -68,9 +92,10 @@ Sample values are normalised to −1.0…+1.0 (integer PCM divided by 2^(bits−
 
 | Arg | Type | Notes |
 | --- | --- | --- |
+| `fileId` | number | |
 | `range` | `{ start, end } \| null` | Frame range; `null` returns the cached whole-file stats |
 
-Returns `Stats | null`. The result is `null` when a newer `compute_stats` request superseded this one, and the caller should discard it.
+Returns `Stats | null`. The result is `null` when a newer `compute_stats` request (for any file) superseded this one, and the caller should discard it.
 
 ```ts
 interface Stats {
@@ -95,7 +120,11 @@ interface ChannelStats {
 
 ### `get_clip_runs`
 
-No arguments. Returns the clipped runs in the whole file, used for waveform markers:
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+
+Returns the clipped runs in the whole file, used for waveform markers:
 
 ```ts
 interface ClipRuns {
@@ -124,13 +153,14 @@ interface PlaybackInfo {
 
 | Arg | Type | Notes |
 | --- | --- | --- |
+| `fileId` | number | The file to play |
 | `start` | number | Start of the play range; looping wraps back here |
 | `end` | number | Frame to stop at (exclusive); the file length for "play to end" |
 | `from` | number | Frame to begin at, within `[start, end]` (e.g. resuming a paused selection) |
 | `looping` | boolean | Repeat `[start, end)` until stopped |
 | `onEvent` | `Channel<PlaybackEvent>` | Position updates for this playback |
 
-Replaces any current playback. Rejects if no device is available, the output can't be opened, or the file changed on disk since it was loaded.
+Replaces any current playback, whichever file it was playing (only one file plays at a time). Rejects if no device is available, the output can't be opened, or the file changed on disk since it was loaded.
 
 ```ts
 type PlaybackEvent =

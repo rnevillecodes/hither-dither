@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- hither-dither app icon: waveform bars dissolving into ordered-dither dots. Source for tauri icon. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2b2f7a"/>
+      <stop offset="1" stop-color="#0e1330"/>
+    </linearGradient>
+    <linearGradient id="wave" gradientUnits="userSpaceOnUse" x1="126" y1="0" x2="898" y2="0">
+      <stop offset="0" stop-color="#2fd3c9"/>
+      <stop offset="0.55" stop-color="#7fd98a"/>
+      <stop offset="1" stop-color="#ffc23a"/>
+    </linearGradient>
+  </defs>
+  <rect x="40" y="40" width="944" height="944" rx="210" fill="url(#tile)"/>
+  <rect x="44" y="44" width="936" height="936" rx="206" fill="none" stroke="#ffffff" stroke-opacity="0.14" stroke-width="8"/>
+  <g fill="url(#wave)"><rect x="126" y="362" width="76" height="300" rx="38"/><rect x="242" y="252" width="76" height="520" rx="38"/><rect x="358" y="167" width="76" height="690" rx="38"/><rect x="474" y="277" width="76" height="470" rx="38"/><rect x="590" y="326" width="76" height="372" rx="38"/><rect x="706" y="414.5" width="76" height="195" rx="38"/><rect x="822" y="464.5" width="76" height="95" rx="38"/></g>
+  <g fill="url(#wave)"><rect x="596.0" y="284.5" width="26" height="26" rx="5"/><rect x="634.0" y="284.5" width="26" height="26" rx="5"/><rect x="596.0" y="713.5" width="26" height="26" rx="5"/><rect x="634.0" y="713.5" width="26" height="26" rx="5"/><rect x="634.0" y="246.5" width="26" height="26" rx="5"/><rect x="634.0" y="751.5" width="26" height="26" rx="5"/><rect x="596.0" y="208.5" width="26" height="26" rx="5"/><rect x="596.0" y="789.5" width="26" height="26" rx="5"/><rect x="712.0" y="373.0" width="26" height="26" rx="5"/><rect x="750.0" y="373.0" width="26" height="26" rx="5"/><rect x="712.0" y="625.0" width="26" height="26" rx="5"/><rect x="750.0" y="625.0" width="26" height="26" rx="5"/><rect x="712.0" y="335.0" width="26" height="26" rx="5"/><rect x="712.0" y="663.0" width="26" height="26" rx="5"/><rect x="750.0" y="297.0" width="26" height="26" rx="5"/><rect x="750.0" y="701.0" width="26" height="26" rx="5"/><rect x="828.0" y="423.0" width="26" height="26" rx="5"/><rect x="866.0" y="423.0" width="26" height="26" rx="5"/><rect x="828.0" y="575.0" width="26" height="26" rx="5"/><rect x="866.0" y="575.0" width="26" height="26" rx="5"/><rect x="866.0" y="385.0" width="26" height="26" rx="5"/><rect x="866.0" y="613.0" width="26" height="26" rx="5"/></g>
+</svg>

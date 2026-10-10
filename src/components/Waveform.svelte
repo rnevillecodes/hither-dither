@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { type Metadata, type PeakTile, getPeaks } from "../lib/api";
   import { app, setSelection } from "../lib/app.svelte";
+  import { overviewCache } from "../lib/tabs.svelte";
   import { DRAG_THRESHOLD_PX, between, extend } from "../lib/selection";
   import { view, setViewport } from "../lib/view.svelte";
   import {
@@ -19,12 +20,14 @@
   import { type Theme, readTheme } from "../lib/waveform/theme";
 
   interface Props {
+    /** Backend id of the file shown. The component is remounted when it changes. */
+    fileId: number;
     meta: Metadata;
     /** Interpolated playhead frame, or null when there is none to show. */
     playhead: number | null;
     onseek: (frame: number) => void;
   }
-  let { meta, playhead, onseek }: Props = $props();
+  let { fileId, meta, playhead, onseek }: Props = $props();
 
   let root: HTMLDivElement;
   let waveArea: HTMLDivElement;
@@ -37,8 +40,11 @@
   let theme: Theme | null = null;
   let overviewTile: PeakTile | null = null;
   let scheduled = false;
+  let destroyed = false;
 
-  const loader = new PeakLoader(() => invalidate());
+  // The parent remounts this component when the file changes, so `fileId` is fixed.
+  // svelte-ignore state_referenced_locally
+  const loader = new PeakLoader(fileId, () => invalidate());
 
   /** Coalesce redraws into one per animation frame. */
   function invalidate() {
@@ -50,7 +56,7 @@
   function draw() {
     scheduled = false;
     const vp = view.vp;
-    if (!vp || !theme || !waveCanvas) return;
+    if (destroyed || !vp || !theme || !waveCanvas) return;
     const t0 = performance.now();
     loader.ensure(vp, dpr);
     const scene = {
@@ -80,13 +86,31 @@
     return false;
   }
 
+  let overviewToken = 0;
+  let overviewLoading = false;
+
+  /** Fetch the whole-file overview at the strip's width, reusing the tab's cached one. */
   async function fetchOverview() {
-    const gen = app.generation;
     const columns = Math.max(1, Math.min(16_384, overviewCanvas.width));
-    const tile = await getPeaks(0, meta.frames, columns, meta.frames);
-    if (gen !== app.generation) return;
-    overviewTile = tile;
-    invalidate();
+    const cached = overviewCache.get(fileId);
+    if (cached && cached.columns === columns) {
+      overviewTile = cached.tile;
+      invalidate();
+      return;
+    }
+    const token = ++overviewToken;
+    overviewLoading = true;
+    try {
+      const tile = await getPeaks(fileId, 0, meta.frames, columns, meta.frames);
+      if (token !== overviewToken || destroyed) return;
+      overviewTile = tile;
+      overviewCache.set(fileId, { columns, tile });
+      invalidate();
+    } catch {
+      // The file was closed meanwhile.
+    } finally {
+      if (token === overviewToken) overviewLoading = false;
+    }
   }
 
   function layout() {
@@ -96,25 +120,13 @@
     const overviewResized = sizeCanvas(overviewCanvas);
     const width = waveCanvas.getBoundingClientRect().width;
     if (width > 0) {
+      // `view.vp` is this tab's saved viewport (restored on activation), or null for a
+      // file shown for the first time.
       setViewport(view.vp && view.vp.totalFrames === meta.frames ? resize(view.vp, width) : fit(meta.frames, width));
     }
-    if (overviewResized) void fetchOverview();
+    if (overviewResized || (!overviewTile && !overviewLoading)) void fetchOverview();
     invalidate();
   }
-
-  // Reset the view whenever a new file loads.
-  let lastGeneration = -1;
-  $effect(() => {
-    const gen = app.generation;
-    if (gen === lastGeneration || !waveCanvas) return;
-    lastGeneration = gen;
-    loader.reset();
-    overviewTile = null;
-    const width = waveCanvas.getBoundingClientRect().width;
-    setViewport(fit(meta.frames, Math.max(1, width)));
-    view.userScrolled = false;
-    void fetchOverview();
-  });
 
   // Redraw on anything the scene depends on.
   $effect(() => {
@@ -139,6 +151,7 @@
     root.addEventListener("wheel", onWheel, { passive: false });
     layout();
     return () => {
+      destroyed = true;
       media.removeEventListener("change", onTheme);
       ro.disconnect();
       root.removeEventListener("wheel", onWheel);

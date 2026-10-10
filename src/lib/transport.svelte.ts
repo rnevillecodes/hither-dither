@@ -2,6 +2,7 @@
 import * as api from "./api";
 import { app } from "./app.svelte";
 import { notify } from "./notices.svelte";
+import { tabs } from "./tabs.svelte";
 import { reveal, view } from "./view.svelte";
 import { visibleEnd } from "./viewport";
 
@@ -20,6 +21,8 @@ export const transport = $state({
 /** Last position reported by the backend and when it arrived. */
 let reported = { frame: 0, at: 0 };
 let session = 0;
+/** The session in which playback was last stopped (pause, stop or halt). */
+let stoppedSession = -1;
 let raf = 0;
 
 export async function initTransport() {
@@ -34,18 +37,18 @@ export function playbackAvailable(): boolean {
   return !!transport.info?.available && !!app.meta;
 }
 
-/** Reset for a newly loaded file. */
-export function resetTransport() {
-  session++;
-  cancelAnimationFrame(raf);
+/** Stop playback at once (for switching or closing tabs), leaving the playhead where it is. */
+export function haltPlayback() {
+  stoppedSession = ++session;
+  stopTicking();
   transport.playing = false;
-  transport.playhead = 0;
-  transport.playStart = 0;
+  void api.stopPlayback();
 }
 
 export async function play() {
   const meta = app.meta;
-  if (!meta || !playbackAvailable()) return;
+  const fileId = tabs.activeId;
+  if (!meta || fileId === null || !playbackAvailable()) return;
   const total = meta.frames;
   const sel = app.selection;
   let start: number;
@@ -68,7 +71,7 @@ export async function play() {
   reported = { frame: from, at: performance.now() };
   view.userScrolled = false;
   try {
-    await api.play(start, end, from, transport.looping, (e) => {
+    await api.play(fileId, start, end, from, transport.looping, (e) => {
       if (token !== session) return;
       if (e.kind === "position") {
         reported = { frame: e.frame, at: performance.now() };
@@ -78,7 +81,11 @@ export async function play() {
         transport.playhead = e.frame;
       }
     });
-    if (token !== session) return;
+    if (token !== session) {
+      // Stopped while the backend was starting: make sure it does not keep playing.
+      if (session === stoppedSession) void api.stopPlayback();
+      return;
+    }
     transport.playing = true;
     tick();
   } catch (e) {
@@ -90,7 +97,7 @@ export async function play() {
 }
 
 export async function pause() {
-  session++;
+  stoppedSession = ++session;
   stopTicking();
   const pos = await api.stopPlayback();
   transport.playing = false;
@@ -98,7 +105,7 @@ export async function pause() {
 }
 
 export async function stop() {
-  session++;
+  stoppedSession = ++session;
   stopTicking();
   await api.stopPlayback();
   transport.playing = false;

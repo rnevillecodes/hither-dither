@@ -79,29 +79,45 @@ export function decodePeaks(buf: ArrayBuffer, span: number): PeakTile {
   return { kind, channels, count, start, span: kind === PEAKS_KIND_SAMPLES ? count : span, values };
 }
 
-export function openFile(path: string, onProgress: (p: LoadProgress) => void): Promise<Metadata> {
+export function openFile(fileId: number, path: string, onProgress: (p: LoadProgress) => void): Promise<Metadata> {
   const channel = new Channel<LoadProgress>();
   channel.onmessage = onProgress;
-  return invoke<Metadata>("open_file", { path, onProgress: channel });
+  return invoke<Metadata>("open_file", { fileId, path, onProgress: channel });
 }
 
-export function getMetadata(): Promise<Metadata | null> {
-  return invoke("get_metadata");
+/** Cancel an `openFile` still running for `fileId`. */
+export function cancelOpen(fileId: number): Promise<void> {
+  return invoke("cancel_open", { fileId });
 }
 
-export async function getPeaks(start: number, end: number, columns: number, totalFrames: number): Promise<PeakTile> {
+/** Close `fileId`, stopping playback first if it is playing that file. */
+export function closeFile(fileId: number): Promise<void> {
+  return invoke("close_file", { fileId });
+}
+
+export function getMetadata(fileId: number): Promise<Metadata | null> {
+  return invoke("get_metadata", { fileId });
+}
+
+export async function getPeaks(
+  fileId: number,
+  start: number,
+  end: number,
+  columns: number,
+  totalFrames: number,
+): Promise<PeakTile> {
   const s = Math.max(0, Math.min(Math.floor(start), totalFrames));
   const e = Math.max(s, Math.min(Math.ceil(end), totalFrames));
-  const buf = await invoke<ArrayBuffer>("get_peaks", { start: s, end: e, columns });
+  const buf = await invoke<ArrayBuffer>("get_peaks", { fileId, start: s, end: e, columns });
   return decodePeaks(buf, e - s);
 }
 
-export function computeStats(range: { start: number; end: number } | null): Promise<Stats | null> {
-  return invoke("compute_stats", { range });
+export function computeStats(fileId: number, range: { start: number; end: number } | null): Promise<Stats | null> {
+  return invoke("compute_stats", { fileId, range });
 }
 
-export function getClipRuns(): Promise<ClipRuns> {
-  return invoke("get_clip_runs");
+export function getClipRuns(fileId: number): Promise<ClipRuns> {
+  return invoke("get_clip_runs", { fileId });
 }
 
 export interface PlaybackInfo {
@@ -117,6 +133,7 @@ export function playbackInfo(): Promise<PlaybackInfo> {
 }
 
 export function play(
+  fileId: number,
   start: number,
   end: number,
   from: number,
@@ -125,7 +142,7 @@ export function play(
 ): Promise<void> {
   const channel = new Channel<PlaybackEvent>();
   channel.onmessage = onEvent;
-  return invoke("play", { start, end, from, looping, onEvent: channel });
+  return invoke("play", { fileId, start, end, from, looping, onEvent: channel });
 }
 
 export function stopPlayback(): Promise<number | null> {

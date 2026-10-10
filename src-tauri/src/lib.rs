@@ -15,6 +15,8 @@ pub fn run() {
         .manage::<commands::SharedPlayer>(Arc::new(playback::Player::new()))
         .invoke_handler(tauri::generate_handler![
             commands::open_file,
+            commands::cancel_open,
+            commands::close_file,
             commands::get_metadata,
             commands::get_peaks,
             commands::compute_stats,
