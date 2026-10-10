@@ -178,7 +178,10 @@ mod tests {
 
         let bytes = std::fs::read(&path).unwrap();
         let info = parse_header(&bytes).unwrap();
-        assert_eq!((info.channels, info.sample_rate, info.frames), (2, 44_100, 3));
+        assert_eq!(
+            (info.channels, info.sample_rate, info.frames),
+            (2, 44_100, 3)
+        );
         let off = info.data_offset as usize;
         let raw: Vec<i16> = bytes[off..]
             .chunks_exact(2)

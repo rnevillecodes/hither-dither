@@ -244,7 +244,11 @@ mod tests {
 
     #[test]
     fn stereo_24_bit_48k() {
-        let i = info(&WavBuilder::new(Encoding::Pcm, 24, 2, 48_000), &[0.0; 96_000]).unwrap();
+        let i = info(
+            &WavBuilder::new(Encoding::Pcm, 24, 2, 48_000),
+            &[0.0; 96_000],
+        )
+        .unwrap();
         assert_eq!((i.channels, i.sample_rate, i.frames), (2, 48_000, 48_000));
         assert_eq!(i.format, SampleFormat::I24);
     }
@@ -325,15 +329,26 @@ mod tests {
         }
         let mut rf64 = WavBuilder::new(Encoding::Pcm, 16, 1, 8_000).build(&[0.0]);
         rf64[0..4].copy_from_slice(b"RF64");
-        assert!(parse_header(&rf64).unwrap_err().to_string().contains("RF64"));
+        assert!(
+            parse_header(&rf64)
+                .unwrap_err()
+                .to_string()
+                .contains("RF64")
+        );
     }
 
     #[test]
     fn rejects_unsupported_bit_depths() {
         let err = info(&WavBuilder::new(Encoding::Pcm, 12, 1, 8_000), &[0.0]).unwrap_err();
-        assert!(matches!(err, WavError::UnsupportedBitDepth { bits: 12, .. }));
+        assert!(matches!(
+            err,
+            WavError::UnsupportedBitDepth { bits: 12, .. }
+        ));
         let err = info(&WavBuilder::new(Encoding::Float, 16, 1, 8_000), &[0.0]).unwrap_err();
-        assert!(matches!(err, WavError::UnsupportedBitDepth { bits: 16, .. }));
+        assert!(matches!(
+            err,
+            WavError::UnsupportedBitDepth { bits: 16, .. }
+        ));
     }
 
     #[test]

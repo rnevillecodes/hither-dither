@@ -101,14 +101,9 @@ impl SampleSource {
         let valid = (info.valid_bits as u32).min(container);
         let limits = IntLimits::new(valid, container - valid);
         match info.format {
-            SampleFormat::U8 => decode_int::<1>(
-                bytes,
-                |b| b[0] as i32 - 128,
-                1.0 / 128.0,
-                limits,
-                out,
-                fs,
-            ),
+            SampleFormat::U8 => {
+                decode_int::<1>(bytes, |b| b[0] as i32 - 128, 1.0 / 128.0, limits, out, fs)
+            }
             SampleFormat::I16 => decode_int::<2>(
                 bytes,
                 |b| i16::from_le_bytes(*b) as i32,

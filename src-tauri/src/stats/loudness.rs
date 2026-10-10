@@ -8,10 +8,14 @@ use crate::wav::WavInfo;
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Loudness {
-    Value { lufs: f64 },
+    Value {
+        lufs: f64,
+    },
     /// Every gating block is below the absolute gate (-70 LUFS): shown as -inf.
     Silent,
-    Unavailable { reason: String },
+    Unavailable {
+        reason: String,
+    },
 }
 
 pub struct LoudnessMeter {

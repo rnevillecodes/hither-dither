@@ -164,7 +164,13 @@ mod tests {
         let tone = sine(1000.0, 1.0, rate, rate as usize);
         let silence = vec![0.0; tone.len()];
         for (enc, bits) in [(Encoding::Pcm, 16), (Encoding::Float, 32)] {
-            let s = src(enc, bits, 2, rate, &interleave(&[tone.clone(), silence.clone()]));
+            let s = src(
+                enc,
+                bits,
+                2,
+                rate,
+                &interleave(&[tone.clone(), silence.clone()]),
+            );
             let st = whole(&s).stats;
             let l = &st.channels[0].levels;
             near(l.peak_dbfs, 0.0, 0.1);
@@ -197,13 +203,19 @@ mod tests {
             assert_eq!(a.stats.channels[0].clip_runs, 2, "{enc:?}");
             assert_eq!(
                 a.clip_runs[0],
-                [ClipRun { start: 100, len: 5 }, ClipRun { start: 500, len: 5 }]
+                [
+                    ClipRun { start: 100, len: 5 },
+                    ClipRun { start: 500, len: 5 }
+                ]
             );
         }
         // Negative full scale and a run ending at the end of the range both count.
         let mut x = vec![0.0; 10];
         x[7..].fill(-1.0);
-        assert_eq!(whole(&src(Encoding::Pcm, 16, 1, 8_000, &x)).stats.channels[0].clip_runs, 1);
+        assert_eq!(
+            whole(&src(Encoding::Pcm, 16, 1, 8_000, &x)).stats.channels[0].clip_runs,
+            1
+        );
     }
 
     #[test]
@@ -213,7 +225,10 @@ mod tests {
         let a = whole(&src(Encoding::Pcm, 16, 1, 8_000, &x));
         assert_eq!(
             a.clip_runs[0],
-            [ClipRun { start: BLOCK_FRAMES as u64 - 2, len: 4 }]
+            [ClipRun {
+                start: BLOCK_FRAMES as u64 - 2,
+                len: 4
+            }]
         );
     }
 
@@ -221,7 +236,13 @@ mod tests {
     fn reference_tone_loudness() {
         let rate = 48_000;
         let tone = sine(1000.0, db_to_amp(-18.0), rate, rate as usize * 5);
-        let s = src(Encoding::Float, 32, 2, rate, &interleave(&[tone.clone(), tone]));
+        let s = src(
+            Encoding::Float,
+            32,
+            2,
+            rate,
+            &interleave(&[tone.clone(), tone]),
+        );
         match whole(&s).stats.loudness {
             Loudness::Value { lufs } => assert!((lufs + 18.0).abs() <= 0.1, "{lufs}"),
             other => panic!("{other:?}"),
@@ -238,10 +259,16 @@ mod tests {
         assert!(matches!(whole(&s).stats.loudness, Loudness::Value { .. }));
 
         let quad = src(Encoding::Float, 32, 4, rate, &vec![0.1; rate as usize * 4]);
-        assert!(matches!(whole(&quad).stats.loudness, Loudness::Unavailable { .. }));
+        assert!(matches!(
+            whole(&quad).stats.loudness,
+            Loudness::Unavailable { .. }
+        ));
 
         let surround = src(Encoding::Float, 32, 6, rate, &vec![0.1; rate as usize * 6]);
-        assert!(matches!(whole(&surround).stats.loudness, Loudness::Value { .. }));
+        assert!(matches!(
+            whole(&surround).stats.loudness,
+            Loudness::Value { .. }
+        ));
 
         let silent = src(Encoding::Float, 32, 2, rate, &vec![0.0; rate as usize * 2]);
         assert_eq!(whole(&silent).stats.loudness, Loudness::Silent);
@@ -262,7 +289,8 @@ mod tests {
         let rate = 48_000;
         let frames = rate as usize * 600;
         let tone = sine(997.0, 0.5, rate, frames);
-        let bytes = WavBuilder::new(Encoding::Pcm, 16, 2, rate).build(&interleave(&[tone.clone(), tone]));
+        let bytes =
+            WavBuilder::new(Encoding::Pcm, 16, 2, rate).build(&interleave(&[tone.clone(), tone]));
         Arc::new(SampleSource::from_bytes(bytes).unwrap())
     }
 

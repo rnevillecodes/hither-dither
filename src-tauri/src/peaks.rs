@@ -258,9 +258,10 @@ mod tests {
         let spike_at = 654_321usize;
         let mut samples = vec![0.0; frames];
         samples[spike_at] = 1.0;
-        let src =
-            SampleSource::from_bytes(WavBuilder::new(Encoding::Float, 32, 1, 48_000).build(&samples))
-                .unwrap();
+        let src = SampleSource::from_bytes(
+            WavBuilder::new(Encoding::Float, 32, 1, 48_000).build(&samples),
+        )
+        .unwrap();
         let pyr = build(&src);
         assert_eq!(pyr.frames(), frames as u64);
 

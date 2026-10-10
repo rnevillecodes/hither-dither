@@ -16,15 +16,15 @@
 ## 3. Peak pyramid and whole-file stats pass (Rust)
 
 - [x] 3.1 Implement per-channel min/max pyramid (256-frame base, 2× levels) built in one streaming pass, with `query(channel, start, end, columns)`; verify tests that a single full-scale sample in silence appears at the correct column at every zoom level, and query results match brute-force min/max on random data
-- [ ] 3.2 Implement stats accumulator: peak (dBFS + linear), RMS, DC offset %, crest factor, `-inf` for silence; verify the full-scale-sine and silent-channel scenarios (±0.1 tolerances)
-- [ ] 3.3 Implement clip-run detection (≥3 consecutive raw full-scale samples) recording run positions; verify two-runs and isolated-sample scenarios for 16-bit PCM and float
-- [ ] 3.4 Integrate `ebur128` integrated loudness for mono/stereo/5.1 (LFE excluded), `n/a` for other layouts or ranges <400 ms; verify -18 dBFS stereo 1 kHz sine → -18.0 LUFS ±0.1 and the 200 ms "n/a" case
-- [ ] 3.5 Implement range-scoped stats job on a worker thread with cancellation token (newer request cancels older); verify a test that 10 min stereo 48 kHz selection stats complete in <1 s in release mode and that cancellation stops an in-progress job
+- [x] 3.2 Implement stats accumulator: peak (dBFS + linear), RMS, DC offset %, crest factor, `-inf` for silence; verify the full-scale-sine and silent-channel scenarios (±0.1 tolerances)
+- [x] 3.3 Implement clip-run detection (≥3 consecutive raw full-scale samples) recording run positions; verify two-runs and isolated-sample scenarios for 16-bit PCM and float
+- [x] 3.4 Integrate `ebur128` integrated loudness for mono/stereo/5.1 (LFE excluded), `n/a` for other layouts or ranges <400 ms; verify -18 dBFS stereo 1 kHz sine → -18.0 LUFS ±0.1 and the 200 ms "n/a" case
+- [x] 3.5 Implement range-scoped stats job on a worker thread with cancellation token (newer request cancels older); verify a test that 10 min stereo 48 kHz selection stats complete in <1 s in release mode and that cancellation stops an in-progress job
 
 ## 4. Backend commands and loading
 
-- [ ] 4.1 Implement `open_file` command: parse, mmap, build pyramid + whole-file stats on a worker thread, stream progress via `tauri::ipc::Channel`, keep previous file on failure; verify a Rust integration test that a failed open leaves prior state intact
-- [ ] 4.2 Implement `get_metadata`, `get_peaks` (binary `ipc::Response`, raw samples at sample-level zoom), `compute_stats(range?)` and `get_clip_runs` commands; verify command-level tests for response shape and byte length
+- [x] 4.1 Implement `open_file` command: parse, mmap, build pyramid + whole-file stats on a worker thread, stream progress via `tauri::ipc::Channel`, keep previous file on failure; verify a Rust integration test that a failed open leaves prior state intact
+- [x] 4.2 Implement `get_metadata`, `get_peaks` (binary `ipc::Response`, raw samples at sample-level zoom), `compute_stats(range?)` and `get_clip_runs` commands; verify command-level tests for response shape and byte length
 - [ ] 4.3 Document the command API (inputs, outputs, binary layout) in `docs/ipc.md`; verify each documented command name matches the registered handlers
 
 ## 5. Frontend shell and file opening
