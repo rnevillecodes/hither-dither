@@ -13,6 +13,8 @@ use crate::wav::{SampleFormat, SampleSource, WavError, WavInfo};
 /// Everything known about the currently open file.
 pub struct LoadedFile {
     pub metadata: Metadata,
+    /// Size and modification time when loaded, to detect external changes.
+    disk_stamp: (u64, Option<std::time::SystemTime>),
     pub source: Arc<SampleSource>,
     pub pyramid: PeakPyramid,
     pub whole: Analysis,
@@ -87,9 +89,8 @@ impl AppState {
             old.store(true, Ordering::Relaxed);
         }
 
-        let size_bytes = std::fs::metadata(path)
-            .map_err(|e| wav_err(e.into()))?
-            .len();
+        let fs_meta = std::fs::metadata(path).map_err(|e| wav_err(e.into()))?;
+        let size_bytes = fs_meta.len();
         let source = Arc::new(SampleSource::open(path).map_err(wav_err)?);
         let total = source.frames();
         let mut builder = PyramidBuilder::new(source.channels(), total);
@@ -101,6 +102,7 @@ impl AppState {
         let metadata = Metadata::new(path, name.clone(), size_bytes, source.info());
         let loaded = Arc::new(LoadedFile {
             metadata: metadata.clone(),
+            disk_stamp: (size_bytes, fs_meta.modified().ok()),
             source,
             pyramid: builder.finish(),
             whole,
@@ -147,6 +149,17 @@ impl AppState {
             channels: file.whole.clip_runs.clone(),
             capped,
         })
+    }
+}
+
+impl LoadedFile {
+    /// The file's size or modification time differs from when it was loaded. Reading a
+    /// memory-mapped file that was changed or truncated is unsafe, so playback refuses.
+    pub fn changed_on_disk(&self) -> bool {
+        match std::fs::metadata(&self.metadata.path) {
+            Ok(m) => (m.len(), m.modified().ok()) != self.disk_stamp,
+            Err(_) => true,
+        }
     }
 }
 

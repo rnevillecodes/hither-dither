@@ -8,10 +8,15 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use tauri::ipc::{Channel, Response};
 
+use crate::playback::{PlayRequest, PlaybackInfo, Player};
 use crate::state::{AppState, ClipRuns, LoadedFile, Metadata};
 use crate::stats::Stats;
 
 pub type SharedState = Arc<AppState>;
+pub type SharedPlayer = Arc<Player>;
+
+/// Interval between playhead position events (~60 Hz).
+const POSITION_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Largest column count `get_peaks` accepts.
 pub const MAX_COLUMNS: u32 = 16_384;
@@ -38,13 +43,24 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
         .map_err(|e| format!("Worker failed: {e}"))
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum PlaybackEvent {
+    /// Audible file frame (latency-compensated).
+    Position { frame: f64 },
+    /// Playback reached the end of the requested range.
+    Ended { frame: f64 },
+}
+
 #[tauri::command]
 pub async fn open_file(
     state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
     path: PathBuf,
     on_progress: Channel<LoadProgress>,
 ) -> Result<Metadata, String> {
     let state = state.inner().clone();
+    let player = player.inner().clone();
     blocking(move || {
         let mut last = Instant::now();
         state
@@ -56,6 +72,9 @@ pub async fn open_file(
                         total_frames: total,
                     });
                 }
+            })
+            .inspect(|_| {
+                player.stop();
             })
             .map_err(|e| e.to_string())
     })
@@ -91,6 +110,71 @@ pub async fn compute_stats(
 #[tauri::command]
 pub fn get_clip_runs(state: State<'_, SharedState>) -> Result<ClipRuns, String> {
     state.clip_runs()
+}
+
+#[tauri::command]
+pub fn playback_info(player: State<'_, SharedPlayer>) -> PlaybackInfo {
+    player.info()
+}
+
+/// Play file frames `[start, end)`; with `looping`, repeat until stopped.
+#[tauri::command]
+pub async fn play(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    start: u64,
+    end: u64,
+    looping: bool,
+    on_event: Channel<PlaybackEvent>,
+) -> Result<(), String> {
+    let file = state.current().ok_or("No file is loaded")?;
+    let player = player.inner().clone();
+    blocking(move || {
+        if file.changed_on_disk() {
+            return Err(format!(
+                "“{}” changed on disk since it was opened. Reopen it to play.",
+                file.metadata.name
+            ));
+        }
+        let shared = player.play(file.source.clone(), PlayRequest { start, end }, looping)?;
+        std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
+            while !shared.stop.load(Ordering::Relaxed) {
+                if shared.finished.load(Ordering::Acquire) {
+                    let _ = on_event.send(PlaybackEvent::Ended {
+                        frame: shared.request.end as f64,
+                    });
+                    break;
+                }
+                let event = PlaybackEvent::Position {
+                    frame: shared.position(),
+                };
+                if on_event.send(event).is_err() {
+                    break;
+                }
+                std::thread::sleep(POSITION_INTERVAL);
+            }
+        });
+        Ok(())
+    })
+    .await?
+}
+
+/// Stop playback (used for both pause and stop). Returns the audible frame, if playing.
+#[tauri::command]
+pub async fn stop_playback(player: State<'_, SharedPlayer>) -> Result<Option<f64>, String> {
+    let player = player.inner().clone();
+    blocking(move || player.stop()).await
+}
+
+#[tauri::command]
+pub fn set_volume(player: State<'_, SharedPlayer>, volume: f32) {
+    player.set_volume(volume);
+}
+
+#[tauri::command]
+pub fn set_loop(player: State<'_, SharedPlayer>, enabled: bool) {
+    player.set_looping(enabled);
 }
 
 /// Encode a waveform tile for frames `[start, end)` (see `docs/ipc.md` for the layout).

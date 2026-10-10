@@ -50,8 +50,8 @@
 
 ## 8. Playback (Rust + UI)
 
-- [ ] 8.1 Implement playback engine: default `cpal` device, feeder thread with `rtrb` ring buffer, channel mapping (mono→stereo, down-mix 1/√N with safety clamp), `rubato` resampling, volume gain, atomic frame position with latency compensation; verify Rust unit tests for channel mapping and resampler output length/pitch on a sine
-- [ ] 8.2 Implement transport commands (play from position/range, pause, stop-returns-to-start, seek, loop flag, volume) and position streaming via `ipc::Channel` at ~60 Hz; verify a Rust test with a null/mock output that selection playback stops at range end and loop wraps
+- [x] 8.1 Implement playback engine: default `cpal` device, feeder thread with `rtrb` ring buffer, channel mapping (mono→stereo, down-mix 1/√N with safety clamp), `rubato` resampling, volume gain, atomic frame position with latency compensation; verify Rust unit tests for channel mapping and resampler output length/pitch on a sine
+- [x] 8.2 Implement transport commands (play from position/range, pause, stop-returns-to-start, seek, loop flag, volume) and position streaming via `ipc::Channel` at ~60 Hz; verify a Rust test with a null/mock output that selection playback stops at range end and loop wraps
 - [ ] 8.3 Handle no-device case: disable playback UI with message while analysis works; verify by running in an environment without audio (e.g. WSL without PulseAudio)
 - [ ] 8.4 Implement UI: Play/Pause (Space), Stop, Home/End, click-to-seek, loop toggle, volume slider, playhead line with interpolated drawing and auto-scroll suppressed after manual scroll; verify manually against every audio-playback scenario, including 96 kHz file on 48 kHz device
 

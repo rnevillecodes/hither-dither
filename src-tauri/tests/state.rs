@@ -175,3 +175,26 @@ fn stats_and_clip_runs_commands() {
     assert_eq!(runs.channels[0][0].start, 10_000);
     assert!(!runs.capped);
 }
+
+#[test]
+fn detects_file_changed_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(
+        &dir,
+        "x.wav",
+        WavBuilder::new(Encoding::Pcm, 16, 1, 8_000),
+        &[0.1; 100],
+    );
+    let state = AppState::default();
+    state.open(&p, |_, _| {}).unwrap();
+    assert!(!state.current().unwrap().changed_on_disk());
+    // Appending changes the size (and on most systems the mtime).
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&p)
+        .unwrap()
+        .write_all(&[0; 10])
+        .unwrap();
+    assert!(state.current().unwrap().changed_on_disk());
+}

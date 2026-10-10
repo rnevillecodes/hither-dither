@@ -103,3 +103,52 @@ interface ClipRuns {
   capped: boolean; // some channel had more than 10 000 runs; only the first 10 000 are listed
 }
 ```
+
+## Playback
+
+Playback runs on the system's default output device. The file is mapped to the device's channels (mono to both sides, extra channels down-mixed with a soft limiter) and resampled when the device cannot run at the file's rate. None of this affects displayed waveforms or statistics.
+
+### `playback_info`
+
+No arguments. Returns:
+
+```ts
+interface PlaybackInfo {
+  available: boolean;
+  reason: string | null;   // why playback is unavailable (e.g. no output device)
+  device: { name: string; sample_rate: number; channels: number } | null;
+}
+```
+
+### `play`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `start` | number | First frame to play |
+| `end` | number | Frame to stop at (exclusive); the file length for "play to end" |
+| `looping` | boolean | Repeat `[start, end)` until stopped |
+| `onEvent` | `Channel<PlaybackEvent>` | Position updates for this playback |
+
+Replaces any current playback. Rejects if no device is available, the output can't be opened, or the file changed on disk since it was loaded.
+
+```ts
+type PlaybackEvent =
+  | { kind: "position"; frame: number } // audible file frame, about every 16 ms, latency-compensated
+  | { kind: "ended"; frame: number };   // reached `end` (not sent when looping or stopped)
+```
+
+### `stop_playback`
+
+No arguments. Stops output and returns the audible frame at that moment (`number | null` if nothing was playing). Used for both Pause (keep the returned position) and Stop (the frontend returns the playhead to where playback began).
+
+### `set_volume`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `volume` | number | Linear gain 0.0 to 1.0, applied immediately |
+
+### `set_loop`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `enabled` | boolean | Toggle looping of the current playback range |
