@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "hither-dither",
+        "title": "HitherDither",
         "width": 1200,
         "height": 760,
         "minWidth": 640,
