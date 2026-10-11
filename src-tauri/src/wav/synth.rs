@@ -184,8 +184,10 @@ mod tests {
         );
         let off = info.data_offset as usize;
         let raw: Vec<i16> = bytes[off..]
-            .chunks_exact(2)
-            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&b| i16::from_le_bytes(b))
             .collect();
         assert_eq!(raw, [0, 16384, -16384, 32767, -32768, 8192]);
     }

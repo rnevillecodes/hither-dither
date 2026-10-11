@@ -1,0 +1,21 @@
+# Checks and test installers for every pull request and push to main.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request or branch cancels the older run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      retention-days: 14
