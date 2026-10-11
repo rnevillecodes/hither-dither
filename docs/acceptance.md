@@ -1,6 +1,6 @@
 # Acceptance checklist
 
-Manual acceptance pass over every scenario in the four v1 specs (`openspec/changes/add-wav-analyser-app/specs/`), plus the multi-file tabs and app icon change (`openspec/changes/add-multi-file-tabs/specs/`; sections file-tabs, audio-stats: details panel, app-branding, and rows I2b–I13) and the dark theme change (section app-theme).
+Manual acceptance pass over every scenario in the four v1 specs (`openspec/changes/add-wav-analyser-app/specs/`), plus the multi-file tabs and app icon change (`openspec/changes/add-multi-file-tabs/specs/`; sections file-tabs, audio-stats: details panel, app-branding, and rows I2b–I13) the dark theme change (section app-theme), and the session restore, tab reordering and window change (`openspec/changes/tab-session-and-window-fit/specs/`; sections app-window, tab-reorder and session-restore).
 
 **Setup:** generate fixtures with `cd src-tauri && cargo run --release --example gen_fixtures -- ../fixtures --large`, then run `npm run tauri dev`. Fixture names below refer to files in `fixtures/`.
 
@@ -25,7 +25,7 @@ Environment for this pass: _fill in (OS, webview, audio device)_.
 | I9b | One bad file among several | Drop `not-a-wav.wav` together with `u8-mono.wav` and `float64-mono.wav` | One error naming `not-a-wav.wav`; the two valid files each open in a tab | | ⏳ |
 | I10 | Unsupported encoding | Open `ima-adpcm.wav` (also `mu-law.wav`) | Error names "IMA ADPCM" (or "µ-law") | Auto: `parser::rejects_unsupported_encodings_by_name` | ⏳ |
 | I11 | Large file load | Open `large-1gb.wav`, then move the window and open a menu while it loads | Progress bar appears (load > 500 ms); window stays interactive | | ⏳ |
-| I12 | No toolbar Open button, nothing open | Start the app | Toolbar has no Open… button; the empty screen's Open… button opens the dialog | | ⏳ |
+| I12 | No toolbar Open button, nothing open | Start the app | No toolbar is shown at all; the empty screen's Open… button opens the dialog | | ⏳ |
 | I13 | No toolbar Open button, files open | Open any file | Toolbar still has no Open… button; File › Open… works | | ⏳ |
 
 ## waveform-view
@@ -134,3 +134,47 @@ From `openspec/changes/teal-slate-dark-theme/specs/app-theme/`. Run with the OS 
 | C9 | Tabbing through the toolbar | Press Tab repeatedly, then click a button with the mouse | A teal ring moves across toolbar buttons, tabs and the volume slider; the mouse click shows no ring | | ⏳ |
 | C10 | Windows title bar | On Windows with the OS in light mode, run `npm run tauri dev` | The title bar is dark | | ⏳ |
 | C11 | Shadows | Trigger a notice (open `not-a-wav.wav`) and a long load (`large-1gb.wav`) | The notice and the progress box are visibly lifted off the background | | ⏳ |
+
+## app-window
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| WN1 | Laptop screen | Start the app on a 1366×768 (or similar small) display | The window opens maximized above the taskbar; title bar and menu visible; nothing cut off at the bottom | | ⏳ |
+| WN2 | Restore down | Click the window's restore button | A normal, resizable window centred on screen, no smaller than 640×420 | | ⏳ |
+| WN3 | App starts with nothing open | Start the app with no remembered session | No toolbar strip above the empty screen; the empty screen fills the window below the menu | | ⏳ |
+| WN4 | Toolbar returns with a file | From the empty screen, open A | Toolbar and tab strip appear; once A loads the toolbar shows transport, zoom and selection controls | | ⏳ |
+| WN5 | Last tab closed | With only A open, close its tab | Toolbar and tab strip disappear; the empty screen fills the window | | ⏳ |
+
+## tab-reorder
+
+Open three files first; below they are "a", "b" and "c" in that order.
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| R1 | Move the last tab to the front | Drag tab c to the left of a and release | Order is c, a, b | Auto: `tabOrder.test.ts` (move) | ⏳ |
+| R2 | Drop indicator while dragging | Drag a over the gap between b and c, don't release | A teal bar marks the gap between b and c; the dragged tab is dimmed | | ⏳ |
+| R3 | Reorder during playback | Play a, then drag a's tab to a new position | Playback continues uninterrupted; a stays active | | ⏳ |
+| R4 | Reorder an inactive tab | With a selection and zoom in a, activate b, drag a past b | Order changes; b stays active; switching to a shows the same selection and zoom | | ⏳ |
+| R5 | Small jitter is a click | Press on an inactive tab, move 1–2 px, release | That tab becomes active; order unchanged | | ⏳ |
+| R5b | Close still works | Click a tab's ×, and middle-click another tab | Both close; neither starts a drag | | ⏳ |
+| R6 | Escape cancels | Start dragging a tab, press Escape, then release | Order unchanged; the waveform selection (if any) is kept | | ⏳ |
+| R6b | Release away from the strip | Drag a tab well down into the waveform and release | Drop bar disappears while away; order unchanged | | ⏳ |
+| R7 | Cycle after reordering | Drag c to the front (c, a, b), activate c, press Ctrl+Tab | a becomes active | Auto: `tabOrder.test.ts` | ⏳ |
+| R8 | Close after reordering | With c, a, b and a active, close a | b becomes active | Auto: `tabOrder.test.ts` | ⏳ |
+| R9 | Many tabs | With about 15 tabs open, drag a tab towards either end of the strip | The strip scrolls so off-screen positions can be reached | | ⏳ |
+
+## session-restore
+
+Below, "A" is `cd-16bit-stereo-10s.wav` and "B" is `beep-every-second-mono-60s.wav`. To start from no session, clear the app's webview data (or close every tab before quitting).
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| S1 | Session updated on open | Open A then B, quit, relaunch | Tabs A, B restored in that order; B active | Auto: `session.test.ts` (round-trip) | ⏳ |
+| S2 | Session updated on close | Open A and B, close B, end the process from Task Manager, relaunch | Only A is restored | | ⏳ |
+| S3 | Failed load not remembered | Open `not-a-wav.wav` (error shown) together with A, quit, relaunch | Only A is restored; no error on launch | | ⏳ |
+| S4 | Restore two files | Open A and B, activate A, quit, relaunch | A and B restored in order; after loading A is active | | ⏳ |
+| S5 | Nothing to restore | Close every tab, quit, relaunch | Empty "Open a WAV file" screen | Auto: `session.test.ts` (missing/malformed) | ⏳ |
+| S6 | One file deleted between runs | Open copies of A and B, quit, rename the A copy, relaunch; then quit and relaunch again | One "Could not open file" notice for A; B opens and is active; the second relaunch restores only B with no notice | | ⏳ |
+| S7 | Close a restoring tab | Open `large-1gb.wav`, quit, relaunch and close its tab while it loads; quit and relaunch again | Load stops with no error; the second relaunch doesn't restore it | | ⏳ |
+| S8 | Selection not restored | Select 1.0–2.0 s in A and zoom in, quit, relaunch | A reopens zoomed to fit, no selection, "Whole file" stats | | ⏳ |
+| S9 | Reordered tabs | Drag B before A, quit, relaunch | Restored in the order B, A | | ⏳ |

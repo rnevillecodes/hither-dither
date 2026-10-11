@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cycle, neighbourAfterClose, samePath } from "./tabOrder";
+import { cycle, move, neighbourAfterClose, samePath } from "./tabOrder";
 
 describe("neighbourAfterClose", () => {
   it("activates the tab to the right when closing the active middle tab", () => {
@@ -52,5 +52,34 @@ describe("samePath", () => {
 
   it("distinguishes different files", () => {
     expect(samePath("/audio/a.wav", "/audio/b.wav", true)).toBe(false);
+  });
+});
+
+describe("move", () => {
+  it("moves the last tab to the front", () => {
+    expect(move(["a", "b", "c"], "c", 0)).toEqual(["c", "a", "b"]);
+  });
+
+  it("moves the first tab to the back", () => {
+    expect(move(["a", "b", "c"], "a", 3)).toEqual(["b", "c", "a"]);
+  });
+
+  it("moves a tab into a middle gap", () => {
+    expect(move(["a", "b", "c", "d"], "a", 2)).toEqual(["b", "a", "c", "d"]);
+    expect(move(["a", "b", "c", "d"], "d", 1)).toEqual(["a", "d", "b", "c"]);
+  });
+
+  it("leaves the order unchanged when dropped next to itself", () => {
+    expect(move(["a", "b", "c"], "b", 1)).toEqual(["a", "b", "c"]);
+    expect(move(["a", "b", "c"], "b", 2)).toEqual(["a", "b", "c"]);
+  });
+
+  it("ignores an unknown id", () => {
+    expect(move(["a", "b"], "x", 0)).toEqual(["a", "b"]);
+  });
+
+  it("clamps an out-of-range gap", () => {
+    expect(move(["a", "b", "c"], "b", -5)).toEqual(["b", "a", "c"]);
+    expect(move(["a", "b", "c"], "b", 99)).toEqual(["a", "c", "b"]);
   });
 });
