@@ -3,7 +3,6 @@
   import { layout, toggleDetails } from "../lib/layout.svelte";
   import { app } from "../lib/app.svelte";
   import { formatSeconds } from "../lib/format";
-  import { tabs } from "../lib/tabs.svelte";
   import { times } from "../lib/selection";
   import { view, zoomIn, zoomOut, zoomToFit } from "../lib/view.svelte";
   import { canZoomIn, canZoomOut } from "../lib/viewport";
@@ -35,23 +34,22 @@
     </div>
   {/if}
 
-  {#if tabs.list.length > 0}
-    <button
-      class="panel-toggle"
-      class:active={layout.detailsOpen}
-      onclick={toggleDetails}
-      aria-pressed={layout.detailsOpen}
-      aria-controls="details-panel"
-      aria-label="Details panel"
-      title={layout.detailsOpen ? "Hide details panel" : "Show details panel"}
-    >
-      <svg viewBox="0 0 16 16" aria-hidden="true">
-        <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
-        <path d="M10 2.5v11" />
-        <path class="fill" d="M10 3h3.5a.5.5 0 0 1 .5.5v9a.5.5 0 0 1-.5.5H10z" />
-      </svg>
-    </button>
-  {/if}
+  <!-- The toolbar is only shown while tabs exist. -->
+  <button
+    class="panel-toggle"
+    class:active={layout.detailsOpen}
+    onclick={toggleDetails}
+    aria-pressed={layout.detailsOpen}
+    aria-controls="details-panel"
+    aria-label="Details panel"
+    title={layout.detailsOpen ? "Hide details panel" : "Show details panel"}
+  >
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
+      <path d="M10 2.5v11" />
+      <path class="fill" d="M10 3h3.5a.5.5 0 0 1 .5.5v9a.5.5 0 0 1-.5.5H10z" />
+    </svg>
+  </button>
 </header>
 
 <style>

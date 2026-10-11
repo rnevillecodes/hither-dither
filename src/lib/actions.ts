@@ -3,7 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { cancelOpen, closeFile } from "./api";
 import { forgetStats, loadIntoTab, setSelection } from "./app.svelte";
 import { notify } from "./notices.svelte";
-import { cycle, neighbourAfterClose, samePath } from "./tabOrder";
+import { cycle, move, neighbourAfterClose, samePath } from "./tabOrder";
 import { type Tab, activeTab, findTab, newTab, overviewCache, tabs } from "./tabs.svelte";
 import { haltPlayback, transport } from "./transport.svelte";
 import { view } from "./view.svelte";
@@ -125,6 +125,20 @@ export function cycleTab(step: 1 | -1) {
     step,
   );
   if (next !== null) activateTab(next);
+}
+
+/**
+ * Move a tab into the gap before position `to` (0..length) of the tab strip. Only the
+ * order changes: the active tab, playback and every tab's view state are left alone.
+ */
+export function moveTab(id: number, to: number) {
+  const order = move(
+    tabs.list.map((t) => t.id),
+    id,
+    to,
+  );
+  const byId = new Map(tabs.list.map((t) => [t.id, t]));
+  tabs.list.splice(0, tabs.list.length, ...order.map((i) => byId.get(i)!));
 }
 
 /** Close a tab, cancelling its load or releasing its file in the backend. */

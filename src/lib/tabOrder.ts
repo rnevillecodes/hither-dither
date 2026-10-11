@@ -16,6 +16,21 @@ export function cycle<T>(ids: readonly T[], active: T | null, step: 1 | -1): T |
   return ids[(i + step + ids.length) % ids.length];
 }
 
+/**
+ * `ids` with `id` moved into the gap before `ids[to]` (`to` counts gaps in the original
+ * list, 0..length, and is clamped). Unknown ids leave the order unchanged.
+ */
+export function move<T>(ids: readonly T[], id: T, to: number): T[] {
+  const out = [...ids];
+  const from = out.indexOf(id);
+  if (from < 0) return out;
+  const gap = Math.max(0, Math.min(out.length, Math.round(to)));
+  out.splice(from, 1);
+  // Removing the tab shifts the gaps after it one to the left.
+  out.splice(gap > from ? gap - 1 : gap, 0, id);
+  return out;
+}
+
 /** Normalise a path for comparison: forward slashes, no trailing slash, optionally lower case. */
 export function pathKey(path: string, caseInsensitive: boolean): string {
   const p = path.replace(/[\\/]+/g, "/").replace(/(.)\/$/, "$1");

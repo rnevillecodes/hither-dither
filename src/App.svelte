@@ -7,18 +7,38 @@
   import Toolbar from "./components/Toolbar.svelte";
   import Transport from "./components/Transport.svelte";
   import Waveform from "./components/Waveform.svelte";
-  import { closeActiveTab, cycleTab, openDialog } from "./lib/actions";
+  import { activateTab, closeActiveTab, cycleTab, openDialog, openPaths } from "./lib/actions";
   import { app, setSelection } from "./lib/app.svelte";
   import logoShadow from "./assets/logo-shadow.svg";
   import { dropHover } from "./lib/dropHover.svelte";
   import { layout } from "./lib/layout.svelte";
   import { setCloseTabEnabled } from "./lib/menu";
   import { runScrollBenchmark } from "./lib/perf";
+  import { readSession, writeSession } from "./lib/session";
+  import { samePath } from "./lib/tabOrder";
   import { activeTab, tabs } from "./lib/tabs.svelte";
   import { initTransport, seek, togglePlay, transport } from "./lib/transport.svelte";
   import { zoomIn, zoomOut, zoomToFit } from "./lib/view.svelte";
 
   void initTransport();
+
+  // Reopen the last session. This pushes its tabs synchronously, so the save effect
+  // below never sees an empty list first and overwrites the remembered session.
+  const saved = readSession();
+  if (saved.paths.length > 0) {
+    void openPaths(saved.paths).then(() => {
+      const { active } = saved;
+      const tab = active === null ? undefined : tabs.list.find((t) => samePath(t.path, active));
+      if (tab?.status === "ready") activateTab(tab.id);
+    });
+  }
+
+  $effect(() => {
+    writeSession(
+      tabs.list.map((t) => t.path),
+      activeTab()?.path ?? null,
+    );
+  });
 
   const active = $derived(activeTab());
   const showDetails = $derived(tabs.list.length > 0 && layout.detailsOpen);
@@ -90,11 +110,10 @@
 <svelte:window onkeydown={onKeydown} />
 
 <div class="app">
-  <Toolbar>
-    {#snippet transport()}<Transport />{/snippet}
-  </Toolbar>
-
   {#if tabs.list.length > 0}
+    <Toolbar>
+      {#snippet transport()}<Transport />{/snippet}
+    </Toolbar>
     <TabBar />
   {/if}
 
