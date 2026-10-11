@@ -99,10 +99,9 @@ pub fn parse_header(bytes: &[u8]) -> Result<WavInfo, WavError> {
                 }
                 fmt = Some(parse_fmt(&bytes[body as usize..(body + size) as usize])?);
             }
-            b"data" => {
-                if data.is_none() {
-                    data = Some((body, size));
-                }
+            // Only the first `data` chunk counts.
+            b"data" if data.is_none() => {
+                data = Some((body, size));
             }
             _ => {}
         }

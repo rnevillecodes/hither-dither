@@ -1,0 +1,54 @@
+# Pushing a version tag (v1.2.3, or v1.2.3-1 for a pre-release) builds every platform and creates a draft
+# GitHub Release with all installers. Nothing is released unless every platform builds.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version-check:
+    name: Tag matches app version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: node scripts/check-version.mjs "$GITHUB_REF_NAME"
+
+  build:
+    needs: version-check
+    uses: ./.github/workflows/build.yml
+    with:
+      # Only the release job below needs these copies.
+      retention-days: 1
+
+  release:
+    name: Draft release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: installers
+          merge-multiple: true
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          mapfile -t files < <(find installers -type f | sort)
+          printf 'Attaching %s\n' "${files[@]}"
+          prerelease=()
+          if [[ "$TAG" == *-* ]]; then prerelease=(--prerelease); fi
+          gh release create "$TAG" "${files[@]}" \
+            --draft --title "HitherDither $TAG" --generate-notes "${prerelease[@]}"

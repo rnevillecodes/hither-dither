@@ -172,7 +172,7 @@ fn decode_int<const N: usize>(
     out: &mut Vec<f32>,
     fs: Option<&mut Vec<bool>>,
 ) {
-    let samples = bytes.chunks_exact(N).map(|c| get(c.try_into().unwrap()));
+    let samples = bytes.as_chunks::<N>().0.iter().map(&get);
     match fs {
         None => out.extend(samples.map(|v| v as f32 * scale)),
         Some(fs) => {
@@ -192,7 +192,7 @@ fn decode_float<const N: usize>(
     out: &mut Vec<f32>,
     fs: Option<&mut Vec<bool>>,
 ) {
-    let samples = bytes.chunks_exact(N).map(|c| get(c.try_into().unwrap()));
+    let samples = bytes.as_chunks::<N>().0.iter().map(&get);
     match fs {
         None => out.extend(samples),
         Some(fs) => {
