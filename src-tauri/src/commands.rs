@@ -5,11 +5,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
 use tauri::ipc::{Channel, Response};
+use tauri::{AppHandle, Emitter, Runtime, State};
 
 use crate::peaks::query_edited;
 use crate::playback::{PlayRequest, PlaybackInfo, Player};
+use crate::plugins::ClassId;
+use crate::plugins::cache::{Folders, PluginCache, PluginList, StartupNotice, standard_folders};
+use crate::plugins::scan::Scanner;
 use crate::state::{
     AppState, ClipInfo, ClipRuns, ClipSettings, EditOp, EditOutcome, FadeSetting, FileId,
     LoadedFile, Metadata, Preview,
@@ -419,4 +422,76 @@ pub fn encode_peaks(file: &LoadedFile, start: u64, end: u64, columns: u32) -> Ve
         out.extend_from_slice(&v.to_le_bytes());
     }
     out
+}
+
+// --- Plugins -------------------------------------------------------------------------------
+
+pub type SharedPlugins = Arc<PluginCache>;
+
+/// Sent with the scan progress whenever the plugin list changes.
+pub const PLUGINS_CHANGED: &str = "plugins-changed";
+
+/// Opens the plugin cache in the app data directory, scanning with this executable.
+pub fn open_plugin_cache(dir: PathBuf) -> std::io::Result<SharedPlugins> {
+    let scanner = Scanner::new(std::env::current_exe()?);
+    Ok(Arc::new(PluginCache::open(
+        dir,
+        standard_folders(),
+        scanner,
+    )))
+}
+
+/// Rescans in the background, emitting `plugins-changed` as results arrive.
+pub fn start_plugin_scan<R: Runtime>(app: &AppHandle<R>, plugins: &SharedPlugins, all: bool) {
+    let app = app.clone();
+    plugins.start_rescan(all, move |progress| {
+        let _ = app.emit(PLUGINS_CHANGED, progress);
+    });
+}
+
+#[tauri::command]
+pub fn list_plugins(plugins: State<'_, SharedPlugins>) -> PluginList {
+    plugins.list()
+}
+
+#[tauri::command]
+pub fn plugin_folders(plugins: State<'_, SharedPlugins>) -> Folders {
+    plugins.folders()
+}
+
+#[tauri::command]
+pub fn set_plugin_folders<R: Runtime>(
+    app: AppHandle<R>,
+    plugins: State<'_, SharedPlugins>,
+    extra: Vec<PathBuf>,
+) -> Result<Folders, String> {
+    plugins
+        .set_extra_folders(extra)
+        .map_err(|e| format!("Couldn't save the plugin folders: {e}"))?;
+    start_plugin_scan(&app, &plugins, false);
+    Ok(plugins.folders())
+}
+
+#[tauri::command]
+pub fn rescan_plugins<R: Runtime>(app: AppHandle<R>, plugins: State<'_, SharedPlugins>, all: bool) {
+    start_plugin_scan(&app, &plugins, all);
+}
+
+#[tauri::command]
+pub fn set_plugin_enabled<R: Runtime>(
+    app: AppHandle<R>,
+    plugins: State<'_, SharedPlugins>,
+    class_id: ClassId,
+    enabled: bool,
+) -> Result<(), String> {
+    plugins
+        .set_enabled(class_id, enabled)
+        .map_err(|e| format!("Couldn't save the plugin settings: {e}"))?;
+    let _ = app.emit(PLUGINS_CHANGED, plugins.progress());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn take_startup_notices(plugins: State<'_, SharedPlugins>) -> Vec<StartupNotice> {
+    plugins.take_notices()
 }

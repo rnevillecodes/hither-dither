@@ -22,14 +22,14 @@
 
 ## 3. Plugin discovery and management
 
-- [ ] 3.1 Add the `--vst3-scan <bundle>` mode to `main.rs` and `plugins/scan.rs`. It enumerates effect classes only, probes the layouts listed in design.md, records whether each class has an editor, and prints JSON. The parent side adds the architecture check, up to 4 concurrent scans, a 20 s timeout (overridable in tests) and crash detection. Add tests:
+- [x] 3.1 Add the `--vst3-scan <bundle>` mode to `main.rs` and `plugins/scan.rs`. It enumerates effect classes only, probes the layouts listed in design.md, records whether each class has an editor, and prints JSON. The parent side adds the architecture check, up to 4 concurrent scans, a 20 s timeout (overridable in tests) and crash detection. Add tests:
   - HD Test Synth is not offered;
   - HD Test Stereo's layouts are stereo only;
   - `hd-test-crash` is "Crashed while being scanned";
   - `hd-test-hang` times out while the other plugins still scan.
 
   Verify `npm run test:rust` passes.
-- [ ] 3.2 Implement `plugins/cache.rs`:
+- [x] 3.2 Implement `plugins/cache.rs`:
   - standard folders per OS and extra folders;
   - `plugins.json`, keyed by path with size and modification time;
   - `plugin-settings.json` (extra folders, disabled class IDs);
@@ -43,7 +43,7 @@
   - a missing standard folder is skipped silently.
 
   Verify `npm run test:rust` passes.
-- [ ] 3.3 Implement the crash marker (`plugin-loading.json` written around first-time instance creation and view opening) and startup handling that disables the class and queues a notice. Add the commands `list_plugins`, `plugin_folders`, `set_plugin_folders`, `rescan_plugins`, `set_plugin_enabled` and `take_startup_notices`. Add tests: a leftover marker disables that class and yields one notice; enabling it again clears the disabled entry. Document the commands and the `plugins-changed` event in `docs/ipc.md`. Verify `npm run lint:rust` and `npm run test:rust` pass.
+- [x] 3.3 Implement the crash marker (`plugin-loading.json` written around first-time instance creation and view opening) and startup handling that disables the class and queues a notice. Add the commands `list_plugins`, `plugin_folders`, `set_plugin_folders`, `rescan_plugins`, `set_plugin_enabled` and `take_startup_notices`. Add tests: a leftover marker disables that class and yields one notice; enabling it again clears the disabled entry. Document the commands and the `plugins-changed` event in `docs/ipc.md`. Verify `npm run lint:rust` and `npm run test:rust` pass.
 
 ## 4. Chain state, history and dirtiness
 

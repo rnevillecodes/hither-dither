@@ -9,10 +9,19 @@ pub mod wav;
 
 use std::sync::Arc;
 
+use tauri::Manager;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    plugins::main_thread::mark_main_thread();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let plugins = commands::open_plugin_cache(app.path().app_data_dir()?)?;
+            app.manage(plugins.clone());
+            commands::start_plugin_scan(app.handle(), &plugins, false);
+            Ok(())
+        })
         .manage::<commands::SharedState>(Arc::new(state::AppState::default()))
         .manage::<commands::SharedPlayer>(Arc::new(playback::Player::new()))
         .invoke_handler(tauri::generate_handler![
@@ -38,6 +47,12 @@ pub fn run() {
             commands::wait_analysis,
             commands::preview_edits,
             commands::set_play_range,
+            commands::list_plugins,
+            commands::plugin_folders,
+            commands::set_plugin_folders,
+            commands::rescan_plugins,
+            commands::set_plugin_enabled,
+            commands::take_startup_notices,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -120,6 +120,18 @@ pub struct Instance {
 unsafe impl Send for Instance {}
 unsafe impl Sync for Instance {}
 
+const AUDIO: MediaType = MediaTypes_::kAudio as MediaType;
+const INPUT: BusDirection = BusDirections_::kInput as BusDirection;
+const OUTPUT: BusDirection = BusDirections_::kOutput as BusDirection;
+
+/// The view platform type native editors are attached with on this OS.
+#[cfg(windows)]
+const PLATFORM_TYPE: FIDString = kPlatformTypeHWND;
+#[cfg(target_os = "macos")]
+const PLATFORM_TYPE: FIDString = kPlatformTypeNSView;
+#[cfg(not(any(windows, target_os = "macos")))]
+const PLATFORM_TYPE: FIDString = kPlatformTypeX11EmbedWindowID;
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -260,49 +272,22 @@ impl Instance {
         proc.config = None;
 
         let arrangement = speaker_arrangement(config.channels, config.channel_mask);
-        let audio = MediaTypes_::kAudio as MediaType;
-        let (input, output) = (
-            BusDirections_::kInput as BusDirection,
-            BusDirections_::kOutput as BusDirection,
-        );
-        let ins = unsafe { self.component.getBusCount(audio, input) };
-        let outs = unsafe { self.component.getBusCount(audio, output) };
-        if ins < 1 || outs < 1 {
-            return Err(InstanceError::NotAnEffect);
-        }
-        let current = |dir, index| {
-            let mut arr: SpeakerArrangement = 0;
-            unsafe { self.processor.getBusArrangement(dir, index, &mut arr) };
-            arr
-        };
-        let mut in_arr: Vec<_> = (0..ins).map(|i| current(input, i)).collect();
-        let mut out_arr: Vec<_> = (0..outs).map(|i| current(output, i)).collect();
-        in_arr[0] = arrangement;
-        out_arr[0] = arrangement;
-        unsafe {
-            self.processor
-                .setBusArrangements(in_arr.as_mut_ptr(), ins, out_arr.as_mut_ptr(), outs)
-        };
-        // Plugins may answer kResultFalse yet adapt, or kResultTrue and keep another layout,
-        // so the main buses are checked rather than the result.
-        if current(input, 0) != arrangement || current(output, 0) != arrangement {
-            return Err(InstanceError::Layout);
-        }
+        let (ins, outs) = self.negotiate(arrangement)?;
         proc.aux_in = (1..ins)
-            .map(|i| current(input, i).count_ones() as i32)
+            .map(|i| self.arrangement(INPUT, i).count_ones() as i32)
             .collect();
         proc.aux_out = (1..outs)
-            .map(|i| current(output, i).count_ones() as i32)
+            .map(|i| self.arrangement(OUTPUT, i).count_ones() as i32)
             .collect();
 
         unsafe {
-            for (dir, count) in [(input, ins), (output, outs)] {
+            for (dir, count) in [(INPUT, ins), (OUTPUT, outs)] {
                 for i in 0..count {
-                    self.component.activateBus(audio, dir, i, (i == 0) as TBool);
+                    self.component.activateBus(AUDIO, dir, i, (i == 0) as TBool);
                 }
             }
             let event = MediaTypes_::kEvent as MediaType;
-            for dir in [input, output] {
+            for dir in [INPUT, OUTPUT] {
                 for i in 0..self.component.getBusCount(event, dir) {
                     self.component.activateBus(event, dir, i, 0);
                 }
@@ -335,6 +320,59 @@ impl Instance {
         proc.scratch = vec![0.0; config.max_block];
         proc.config = Some(config);
         Ok(self.latency())
+    }
+
+    /// Tries `arrangement` on the main input and output buses: fails with `Layout` when the
+    /// plugin refuses it, or `NotAnEffect` when it has no audio input or output. Leaves the
+    /// instance deactivated and unconfigured. UI thread.
+    pub fn try_arrangement(&self, arrangement: SpeakerArrangement) -> Result<(), InstanceError> {
+        let mut proc = lock(&self.proc);
+        self.deactivate(&mut proc);
+        proc.config = None;
+        self.negotiate(arrangement).map(|_| ())
+    }
+
+    /// Whether the controller creates an editor view that can be attached on this platform.
+    /// UI thread.
+    pub fn has_editor(&self) -> bool {
+        let Some(c) = &self.controller else {
+            return false;
+        };
+        let view = unsafe { c.createView(ViewType::kEditor) };
+        let Some(view) = (unsafe { ComPtr::<IPlugView>::from_raw(view) }) else {
+            return false;
+        };
+        unsafe { view.isPlatformTypeSupported(PLATFORM_TYPE) == kResultTrue }
+    }
+
+    fn arrangement(&self, dir: BusDirection, index: int32) -> SpeakerArrangement {
+        let mut arr: SpeakerArrangement = 0;
+        unsafe { self.processor.getBusArrangement(dir, index, &mut arr) };
+        arr
+    }
+
+    /// Sets `arrangement` on the main buses, keeping the others as they are, and returns the
+    /// audio input and output bus counts. The plugin must be inactive.
+    fn negotiate(&self, arrangement: SpeakerArrangement) -> Result<(int32, int32), InstanceError> {
+        let ins = unsafe { self.component.getBusCount(AUDIO, INPUT) };
+        let outs = unsafe { self.component.getBusCount(AUDIO, OUTPUT) };
+        if ins < 1 || outs < 1 {
+            return Err(InstanceError::NotAnEffect);
+        }
+        let mut in_arr: Vec<_> = (0..ins).map(|i| self.arrangement(INPUT, i)).collect();
+        let mut out_arr: Vec<_> = (0..outs).map(|i| self.arrangement(OUTPUT, i)).collect();
+        in_arr[0] = arrangement;
+        out_arr[0] = arrangement;
+        unsafe {
+            self.processor
+                .setBusArrangements(in_arr.as_mut_ptr(), ins, out_arr.as_mut_ptr(), outs)
+        };
+        // Plugins may answer kResultFalse yet adapt, or kResultTrue and keep another layout,
+        // so the main buses are checked rather than the result.
+        if self.arrangement(INPUT, 0) != arrangement || self.arrangement(OUTPUT, 0) != arrangement {
+            return Err(InstanceError::Layout);
+        }
+        Ok((ins, outs))
     }
 
     /// The plugin's current latency in frames.

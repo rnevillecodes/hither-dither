@@ -338,3 +338,92 @@ type Preview =
 ```
 
 If `fileId` is playing, playback switches to the current edits with `preview` applied, exactly as `set_clip`, `set_crossfade` or `apply_edit` would apply it. Nothing else changes: not the history, the revision, the unsaved state, the peaks or the stats. Used while a handle is dragged and while the fade curve dialog is open. The committing command (or `null`, on cancel) follows. Does nothing if the file isn't playing. Rejects for a `fade` with another `op`, or a crossfade `join` that isn't a join.
+
+## Plugins
+
+VST3 effect plugins are found in the standard folders and the user's extra folders, then scanned in the background, each in its own process. The scan starts when the app starts. Results are remembered in `plugins.json` in the app data folder, so on later launches only new or changed plugins are scanned. `plugin-settings.json` holds the extra folders and the disabled plugins.
+
+### Event `plugins-changed`
+
+A Tauri event (listen with `listen` from `@tauri-apps/api/event`), sent as scan results arrive and when a plugin is enabled or disabled. The payload is the scan progress; call `list_plugins` for the list.
+
+```ts
+interface ScanProgress {
+  done: number;   // bundles scanned so far in the current or last scan
+  total: number;  // bundles that scan is checking; scanning while done < total
+}
+```
+
+### `list_plugins`
+
+No arguments. Returns every plugin found, sorted by name, and the scan progress. Plugins already scanned are listed while a scan is still running.
+
+```ts
+interface PluginList {
+  plugins: PluginEntry[];
+  progress: ScanProgress;
+}
+
+interface PluginEntry {
+  path: string;              // the .vst3 bundle
+  classId: string | null;    // 32 hex digits; null for a bundle that failed, is incompatible or has no effects
+  name: string;              // the effect, or the bundle's file name when classId is null
+  vendor: string;
+  version: string;
+  subCategories: string;     // e.g. "Fx|EQ"
+  hasEditor: boolean;        // the plugin has its own editor for this platform
+  layouts: Layout[];         // channel layouts it accepts; empty unless ready or disabled
+  status: "ready" | "failed" | "incompatible" | "disabled" | "noEffects";
+  reason: string | null;     // why it failed or is incompatible, e.g. "Crashed while being scanned",
+                             // "Timed out while being scanned", "No version for this Mac's processor",
+                             // or "No usable effects" (status "noEffects", e.g. an instrument)
+}
+
+interface Layout {
+  channels: number;
+  arrangement: number;       // VST3 speaker arrangement bits
+}
+```
+
+A file can use an effect when one of its layouts has the file's arrangement: mono for one channel, the WAV channel mask when it has one bit per channel (5.x with side surrounds counts as back surrounds), stereo for two channels, otherwise the lowest `channels` bits. Only `ready` effects are offered in Add Effect. A bundle with several effects has one entry per effect.
+
+### `plugin_folders`
+
+No arguments. Returns `{ standard: string[]; extra: string[] }`: the standard folders for this OS, which can't be removed (folders that don't exist are listed but skipped), and the user's extra folders.
+
+### `set_plugin_folders`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `extra` | `string[]` | The new list of extra folders; duplicates and standard folders are dropped |
+
+Saves the folders, starts a rescan and returns the new `{ standard, extra }`. Plugins in a removed folder disappear from the list once the rescan finishes; effects already in a chain keep working. Rejects if the settings can't be saved.
+
+### `rescan_plugins`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `all` | boolean | `true` scans every plugin again (Rescan All); `false` only new and changed ones |
+
+Starts a rescan in the background and returns at once. A rescan requested while one runs starts when it finishes.
+
+### `set_plugin_enabled`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `classId` | string | The effect |
+| `enabled` | boolean | |
+
+Enables or disables an effect, remembered across restarts. Disabling doesn't remove the effect from chains it is already in. Sends `plugins-changed`. Rejects if the settings can't be saved.
+
+### `take_startup_notices`
+
+No arguments. Returns the plugins disabled at startup because the app closed unexpectedly while loading one of them into a chain or opening its editor. Each notice is returned once.
+
+```ts
+interface StartupNotice {
+  classId: string;
+  name: string;
+  message: string;  // e.g. "X was disabled because HitherDither closed unexpectedly while loading it. You can enable it again in Manage Plugins."
+}
+```

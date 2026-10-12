@@ -4,10 +4,12 @@
 //! UI thread (see [`main_thread`]); only `setProcessing` and `process` run on the thread that
 //! holds a slot's processing lock.
 
+pub mod cache;
 pub mod host;
 pub mod instance;
 pub mod main_thread;
 pub mod module;
+pub mod scan;
 
 use std::fmt;
 
