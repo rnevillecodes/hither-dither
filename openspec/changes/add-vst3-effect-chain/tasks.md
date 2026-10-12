@@ -47,8 +47,8 @@
 
 ## 4. Chain state, history and dirtiness
 
-- [ ] 4.1 Add `fx/chain.rs` (slots, order, per-slot bypass via `kIsBypass` or host skip, `bypass_all`, total latency). Extend `LoadedFile` with slots and chain, and change history entries to `Snapshot { edits, chain }`. Release unreferenced slots on the UI thread when history is truncated or cleared and when the file closes. Update the existing history tests in `tests/state.rs` so they still pass. Verify `npm run test:rust` passes.
-- [ ] 4.2 Add the commands `get_chain`, `add_effect` (channel compatibility check, cap of 8, crash marker), `remove_effect`, `move_effect`, `set_effect_bypass` and `set_bypass_all`. They return `EditOutcome` with `chain` and `audioChanged: false`, and the revision is unchanged. Use the new dirtiness rule. Add `tests/state.rs` cases for these spec scenarios:
+- [x] 4.1 Add `fx/chain.rs` (slots, order, per-slot bypass via `kIsBypass` or host skip, `bypass_all`, total latency). Extend `LoadedFile` with slots and chain, and change history entries to `Snapshot { edits, chain }`. Release unreferenced slots on the UI thread when history is truncated or cleared and when the file closes. Update the existing history tests in `tests/state.rs` so they still pass. Verify `npm run test:rust` passes.
+- [x] 4.2 Add the commands `get_chain`, `add_effect` (channel compatibility check, cap of 8, crash marker), `remove_effect`, `move_effect`, `set_effect_bypass` and `set_bypass_all`. They return `EditOutcome` with `chain` and `audioChanged: false`, and the revision is unchanged. Use the new dirtiness rule. Add `tests/state.rs` cases for these spec scenarios:
   - "Undo a removal" (same gain after undo);
   - "Edits and effects in one history";
   - "Effect alone marks the tab";

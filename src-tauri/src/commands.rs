@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::{Channel, Response};
 use tauri::{AppHandle, Emitter, Runtime, State};
 
+use crate::fx::chain::{ChainInfo, SlotId};
 use crate::peaks::query_edited;
 use crate::playback::{PlayRequest, PlaybackInfo, Player};
 use crate::plugins::ClassId;
@@ -494,4 +495,69 @@ pub fn set_plugin_enabled<R: Runtime>(
 #[tauri::command]
 pub fn take_startup_notices(plugins: State<'_, SharedPlugins>) -> Vec<StartupNotice> {
     plugins.take_notices()
+}
+
+// --- Effect chains -------------------------------------------------------------------------
+
+/// Run a chain change to `file_id` on a worker thread: plugin calls wait for the UI thread.
+async fn chain_change(
+    state: State<'_, SharedState>,
+    change: impl FnOnce(&AppState) -> Result<EditOutcome, String> + Send + 'static,
+) -> Result<EditOutcome, String> {
+    let state = state.inner().clone();
+    blocking(move || change(&state)).await?
+}
+
+#[tauri::command]
+pub fn get_chain(state: State<'_, SharedState>, file_id: FileId) -> Option<ChainInfo> {
+    state.get_chain(file_id)
+}
+
+#[tauri::command]
+pub async fn add_effect(
+    state: State<'_, SharedState>,
+    plugins: State<'_, SharedPlugins>,
+    file_id: FileId,
+    class_id: ClassId,
+) -> Result<EditOutcome, String> {
+    let plugins = plugins.inner().clone();
+    chain_change(state, move |s| s.add_effect(file_id, &plugins, class_id)).await
+}
+
+#[tauri::command]
+pub async fn remove_effect(
+    state: State<'_, SharedState>,
+    file_id: FileId,
+    slot_id: SlotId,
+) -> Result<EditOutcome, String> {
+    chain_change(state, move |s| s.remove_effect(file_id, slot_id)).await
+}
+
+#[tauri::command]
+pub async fn move_effect(
+    state: State<'_, SharedState>,
+    file_id: FileId,
+    slot_id: SlotId,
+    index: usize,
+) -> Result<EditOutcome, String> {
+    chain_change(state, move |s| s.move_effect(file_id, slot_id, index)).await
+}
+
+#[tauri::command]
+pub async fn set_effect_bypass(
+    state: State<'_, SharedState>,
+    file_id: FileId,
+    slot_id: SlotId,
+    on: bool,
+) -> Result<EditOutcome, String> {
+    chain_change(state, move |s| s.set_effect_bypass(file_id, slot_id, on)).await
+}
+
+#[tauri::command]
+pub async fn set_bypass_all(
+    state: State<'_, SharedState>,
+    file_id: FileId,
+    on: bool,
+) -> Result<EditOutcome, String> {
+    chain_change(state, move |s| s.set_bypass_all(file_id, on)).await
 }

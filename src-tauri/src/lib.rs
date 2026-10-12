@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod edit;
+pub mod fx;
 pub mod peaks;
 pub mod playback;
 pub mod plugins;
@@ -20,9 +21,10 @@ pub fn run() {
             let plugins = commands::open_plugin_cache(app.path().app_data_dir()?)?;
             app.manage(plugins.clone());
             commands::start_plugin_scan(app.handle(), &plugins, false);
+            let ui = Arc::new(app.handle().clone());
+            app.manage::<commands::SharedState>(Arc::new(state::AppState::new(ui)));
             Ok(())
         })
-        .manage::<commands::SharedState>(Arc::new(state::AppState::default()))
         .manage::<commands::SharedPlayer>(Arc::new(playback::Player::new()))
         .invoke_handler(tauri::generate_handler![
             commands::open_file,
@@ -53,6 +55,12 @@ pub fn run() {
             commands::rescan_plugins,
             commands::set_plugin_enabled,
             commands::take_startup_notices,
+            commands::get_chain,
+            commands::add_effect,
+            commands::remove_effect,
+            commands::move_effect,
+            commands::set_effect_bypass,
+            commands::set_bypass_all,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

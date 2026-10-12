@@ -213,15 +213,21 @@ interface EditOutcome {
   metadata: Metadata;      // frames and duration_secs reflect the edited audio
   edit_state: EditState;
   clip: ClipInfo;          // what the clip handles show (see get_clip)
+  chain: ChainInfo;        // the file's effect chain (see get_chain)
+  audioChanged: boolean;   // false for chain changes: the revision, peaks and analysis are unchanged,
+                           // so don't invalidate peaks or call wait_analysis
 }
 
 interface EditState {
   can_undo: boolean;
   can_redo: boolean;
-  dirty: boolean;          // the audio differs from the file on disk
+  dirty: boolean;          // unsaved: the audio is edited, or an effect that isn't bypassed is in the
+                           // chain while Bypass All is off
   revision: number;        // increases whenever the audio changes; invalidate cached peaks
 }
 ```
+
+The undo history holds edits and chain changes (adding, removing and moving effects) as one list of steps.
 
 ### `wait_analysis`
 
@@ -262,7 +268,7 @@ Step back or forward one edit. Rejects with `Nothing to undo` / `Nothing to redo
 
 This is the only command that renders the edited audio. If the current edit state hasn't been analysed yet, it is analysed first, so the saved tab has exact peaks and stats; progress then covers both passes (`totalFrames` is twice the length). Only one save can run per file at a time. Writes the current audio as a WAV file: the source's `fmt ` chunk followed by a `data` chunk, and no other chunks. Unedited samples are copied byte for byte. Scaled samples are converted in the file's own format (integers rounded to nearest and clamped). The file is written to a temporary file next to the target and then renamed over it, so a failure never leaves a partial file. If the file is playing, playback stops first.
 
-Returns an `EditOutcome`. Afterwards the file is served from the saved copy (its `metadata.path` and `name` are the target's), the history is empty, and the peaks and stats are unchanged.
+Returns an `EditOutcome`. Afterwards the file is served from the saved copy (its `metadata.path` and `name` are the target's), the history is empty apart from the current effect chain, and the peaks and stats are unchanged.
 
 Rejects, leaving any existing file at the target and the edits as they were:
 - with `“x.wav” changed on disk since it was opened…` when overwriting a file that changed since it was loaded;
@@ -427,3 +433,87 @@ interface StartupNotice {
   message: string;  // e.g. "X was disabled because HitherDither closed unexpectedly while loading it. You can enable it again in Manage Plugins."
 }
 ```
+
+## Effect chains
+
+Each open file has a chain of up to 8 effects, processed in order. The chain is non-destructive: it doesn't change the edited audio, its revision, peaks or statistics. Adding, removing and moving effects are undo steps, in the same history as edits (see *Editing*); undoing a removal brings back the same effect with its settings. Bypassing is not an undo step. Effects kept only for undo are released when a new step discards them, and all of a file's effects are released when it closes.
+
+The chain commands below return an `EditOutcome` with `audioChanged: false` and an unchanged `edit_state.revision`, and reject with `The file is being saved` during a save, or `That effect isn't in the chain` for a `slotId` that isn't in the chain.
+
+```ts
+interface ChainInfo {
+  effects: EffectInfo[];   // in processing order
+  bypassAll: boolean;
+  latency: number;         // total processing delay in frames of the effects that process
+}
+
+interface EffectInfo {
+  slotId: number;          // identifies this effect in the chain commands
+  classId: string;
+  name: string;
+  vendor: string;
+  hasEditor: boolean;
+  bypassed: boolean;       // its own bypass switch (Bypass All is separate)
+}
+```
+
+### `get_chain`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+
+Returns `ChainInfo | null` (`null` if `fileId` isn't open).
+
+### `add_effect`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `classId` | string | A `ready` effect from `list_plugins` |
+
+Loads the effect with its default settings and adds it to the end of the chain. Rejects, leaving the chain unchanged:
+- with `The effect chain is full` when the chain has 8 effects;
+- with `That effect isn't available. …` for a class that isn't in the plugin list or failed its scan, or `X is disabled. …` for a disabled one;
+- with `X doesn't support 5.1 audio` (or `mono`, `stereo`, `quad`, `5.0`, `7.1`, `n-channel`) when none of its layouts matches the file's channels;
+- with `“X” could not be loaded: …` when the plugin fails to load or set up.
+
+Loading writes the crash marker the first time a plugin is loaded in a session (see `take_startup_notices`).
+
+### `remove_effect`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `slotId` | number | |
+
+Removes the effect from the chain. It is kept for undo.
+
+### `move_effect`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `slotId` | number | |
+| `index` | number | Its new position; past the end means last |
+
+Moves the effect within the chain. Moving it to where it already is adds no undo step.
+
+### `set_effect_bypass`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `slotId` | number | |
+| `on` | boolean | |
+
+Bypasses one effect, keeping its settings. A plugin with a bypass parameter bypasses itself, keeping its latency; otherwise the effect is skipped. Not an undo step.
+
+### `set_bypass_all`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `on` | boolean | |
+
+Bypasses the whole chain, keeping each effect's own bypass switch. Not an undo step.

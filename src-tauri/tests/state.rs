@@ -1,8 +1,17 @@
 //! Integration tests for loading files and the command-level response shapes.
 
+mod common;
+
+use std::sync::Arc;
+
+use common::test_plugins::{self, TestPlugin};
 use hither_dither_lib::commands::{
     PEAKS_HEADER_BYTES, PEAKS_KIND_MINMAX, PEAKS_KIND_SAMPLES, encode_peaks,
 };
+use hither_dither_lib::fx::chain::{ChainInfo, MAX_EFFECTS, SlotId};
+use hither_dither_lib::plugins::ClassId;
+use hither_dither_lib::plugins::cache::PluginCache;
+use hither_dither_lib::plugins::scan::Scanner;
 use hither_dither_lib::state::{AppState, ClipSettings, EditOp, FadeSetting, OpenError, Preview};
 use hither_dither_lib::stats::Loudness;
 use hither_dither_lib::wav::synth::{Encoding, WavBuilder, interleave, sine};
@@ -780,4 +789,283 @@ fn previews_change_nothing() {
         bend: 0.0,
     };
     assert!(state.preview(1, &crop).is_err());
+}
+
+// --- Effect chains -------------------------------------------------------------------------
+
+/// The test plugins, scanned into a plugin cache of their own.
+struct Effects {
+    _data: tempfile::TempDir,
+    _folder: tempfile::TempDir,
+    plugins: Arc<PluginCache>,
+    /// HD Test Gain: any layout, 64 frames of latency, no bypass parameter.
+    gain: ClassId,
+    /// HD Test Stereo: stereo only.
+    stereo: ClassId,
+}
+
+fn effects() -> Effects {
+    let data = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    test_plugins::bundle(folder.path(), TestPlugin::Fx);
+    let scanner = Scanner::new(env!("CARGO_BIN_EXE_hither-dither").into());
+    let plugins = Arc::new(PluginCache::open(
+        data.path().to_path_buf(),
+        vec![folder.path().to_path_buf()],
+        scanner,
+    ));
+    plugins.rescan(false, |_| {});
+    let class = |name: &str| {
+        let list = plugins.list().plugins;
+        list.iter()
+            .find(|p| p.name == name)
+            .unwrap()
+            .class_id
+            .unwrap()
+    };
+    let (gain, stereo) = (class("HD Test Gain"), class("HD Test Stereo"));
+    Effects {
+        _data: data,
+        _folder: folder,
+        plugins,
+        gain,
+        stereo,
+    }
+}
+
+fn slot_ids(chain: &ChainInfo) -> Vec<SlotId> {
+    chain.effects.iter().map(|e| e.slot_id).collect()
+}
+
+const GAIN_PARAM: u32 = 0;
+
+/// HD Test Gain's normalised value for +6.02 dB (it maps 0..1 onto ±24 dB).
+fn plus_6db() -> f64 {
+    (20.0 * 2f64.log10() + 24.0) / 48.0
+}
+
+fn gain_of(state: &AppState, id: u32, slot: SlotId) -> f64 {
+    use vst3::Steinberg::Vst::IEditControllerTrait;
+    let slot = state.slot(id, slot).unwrap();
+    let controller = slot.instance().controller().unwrap();
+    unsafe { controller.getParamNormalized(GAIN_PARAM) }
+}
+
+#[test]
+fn undo_a_removal_brings_the_effect_back_with_its_settings() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let eq = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[0];
+    let both = state.add_effect(1, &fx.plugins, fx.gain).unwrap();
+    assert_eq!(both.chain.effects.len(), 2);
+    let slot = state.slot(1, eq).unwrap();
+    slot.instance().set_param(GAIN_PARAM, plus_6db());
+    drop(slot);
+
+    let out = state.remove_effect(1, eq).unwrap();
+    assert_eq!(out.chain.effects.len(), 1);
+    let out = state.undo(1).unwrap();
+    // Back in its place, and not an audio change.
+    assert_eq!(slot_ids(&out.chain), slot_ids(&both.chain));
+    assert!(!out.audio_changed);
+    // The same instance, with the gain it had when removed.
+    assert_eq!(gain_of(&state, 1, eq), plus_6db());
+}
+
+#[test]
+fn edits_and_effects_share_one_history() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let silenced = state.apply_edit(1, EditOp::Silence, 0, 100, 0.0).unwrap();
+    assert!(silenced.audio_changed);
+    let added = state.add_effect(1, &fx.plugins, fx.gain).unwrap();
+    assert_eq!(added.chain.effects[0].name, "HD Test Gain");
+    assert_eq!(added.edit_state.revision, silenced.edit_state.revision);
+
+    // The first undo removes the effect and leaves the silence.
+    let out = state.undo(1).unwrap();
+    assert!(out.chain.effects.is_empty() && !out.audio_changed);
+    assert_eq!(out.edit_state.revision, silenced.edit_state.revision);
+    assert!(out.edit_state.dirty && out.edit_state.can_undo && out.edit_state.can_redo);
+    // The second removes the silence.
+    let out = state.undo(1).unwrap();
+    assert!(out.audio_changed && out.edit_state.revision > silenced.edit_state.revision);
+    assert!(!out.edit_state.dirty && !out.edit_state.can_undo);
+
+    // Redo brings both back in order.
+    assert!(state.redo(1).unwrap().audio_changed);
+    let out = state.redo(1).unwrap();
+    assert_eq!(slot_ids(&out.chain), slot_ids(&added.chain));
+}
+
+#[test]
+fn an_effect_alone_marks_the_file_unsaved() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let out = state.add_effect(1, &fx.plugins, fx.gain).unwrap();
+    assert!(out.edit_state.dirty && out.edit_state.can_undo);
+    assert!(!out.audio_changed);
+    assert_eq!(out.edit_state.revision, 0);
+    assert_eq!(out.metadata.frames, 8_000);
+    assert_eq!(out.chain.latency, 64);
+    assert_eq!(state.get_chain(1), Some(out.chain));
+    assert!(state.edit_state(1).unwrap().dirty);
+}
+
+#[test]
+fn everything_bypassed_is_not_unsaved() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let slot = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[0];
+
+    let out = state.set_effect_bypass(1, slot, true).unwrap();
+    assert!(out.chain.effects[0].bypassed && !out.edit_state.dirty);
+    // Skipped by the host, so its latency no longer counts.
+    assert_eq!(out.chain.latency, 0);
+    assert!(state.get(1).unwrap().chain.processed().next().is_none());
+    let out = state.set_effect_bypass(1, slot, false).unwrap();
+    assert!(out.edit_state.dirty && out.chain.latency == 64);
+
+    let out = state.set_bypass_all(1, true).unwrap();
+    assert!(out.chain.bypass_all && !out.edit_state.dirty);
+    assert!(!state.get(1).unwrap().chain.is_active());
+    // Bypassing isn't an undo step: undo removes the effect, and Bypass All stays on.
+    let out = state.undo(1).unwrap();
+    assert!(out.chain.effects.is_empty() && out.chain.bypass_all);
+    assert!(!out.edit_state.dirty && !out.edit_state.can_undo);
+    assert!(state.set_effect_bypass(1, slot, true).is_err());
+    let out = state.redo(1).unwrap();
+    assert_eq!(slot_ids(&out.chain), [slot]);
+    assert!(!out.edit_state.dirty);
+    assert!(state.set_bypass_all(1, false).unwrap().edit_state.dirty);
+}
+
+#[test]
+fn a_full_chain_refuses_another_effect() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    for _ in 0..MAX_EFFECTS {
+        state.add_effect(1, &fx.plugins, fx.gain).unwrap();
+    }
+    let before = state.get_chain(1).unwrap();
+    assert_eq!(before.effects.len(), 8);
+    let err = state.add_effect(1, &fx.plugins, fx.gain).unwrap_err();
+    assert!(err.contains("full"), "{err}");
+    assert_eq!(state.get_chain(1).unwrap(), before);
+    // The last step is still the eighth effect.
+    assert_eq!(state.undo(1).unwrap().chain.effects.len(), 7);
+}
+
+#[test]
+fn stereo_only_plugin_is_refused_for_a_5_1_file() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let s = sine(440.0, 0.5, 8_000, 1_000);
+    let path = write(
+        &dir,
+        "surround.wav",
+        WavBuilder::new(Encoding::Pcm, 16, 6, 8_000).extensible(true),
+        &interleave(&vec![s; 6]),
+    );
+    let state = AppState::default();
+    state.open(1, &path, |_, _| {}).unwrap();
+    let err = state.add_effect(1, &fx.plugins, fx.stereo).unwrap_err();
+    assert_eq!(err, "HD Test Stereo doesn't support 5.1 audio");
+    assert!(state.get_chain(1).unwrap().effects.is_empty());
+    let st = state.edit_state(1).unwrap();
+    assert!(!st.can_undo && !st.dirty);
+    // An effect that supports any layout is fine.
+    assert!(state.add_effect(1, &fx.plugins, fx.gain).is_ok());
+}
+
+#[test]
+fn chain_changes_do_not_start_an_analysis() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let edited = state.apply_edit(1, EditOp::FadeIn, 0, 1_000, 0.0).unwrap();
+    assert!(state.wait_analysis(1, edited.edit_state.revision));
+    let analysed = state.completed_analyses();
+    let stats = whole_stats(&state, 1);
+
+    let a = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[0];
+    let b = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[1];
+    let outcomes = [
+        state.move_effect(1, b, 0).unwrap(),
+        state.set_effect_bypass(1, a, true).unwrap(),
+        state.set_bypass_all(1, true).unwrap(),
+        state.remove_effect(1, a).unwrap(),
+        state.undo(1).unwrap(),
+    ];
+    assert_eq!(slot_ids(&outcomes[0].chain), [b, a]);
+    for out in &outcomes {
+        assert!(!out.audio_changed);
+        assert_eq!(out.edit_state.revision, edited.edit_state.revision);
+    }
+    // The analysis of the edited audio still applies, and none is scheduled.
+    assert!(state.get(1).unwrap().analysis.is_some());
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(state.completed_analyses(), analysed);
+    assert_eq!(whole_stats(&state, 1), stats);
+}
+
+#[test]
+fn moving_an_effect_reorders_the_chain() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    for _ in 0..3 {
+        state.add_effect(1, &fx.plugins, fx.gain).unwrap();
+    }
+    let ids = slot_ids(&state.get_chain(1).unwrap());
+    let out = state.move_effect(1, ids[2], 0).unwrap();
+    assert_eq!(slot_ids(&out.chain), [ids[2], ids[0], ids[1]]);
+    // Past the end means last.
+    let out = state.move_effect(1, ids[2], 99).unwrap();
+    assert_eq!(slot_ids(&out.chain), ids);
+    // Where it already is adds no undo step.
+    let out = state.move_effect(1, ids[2], 2).unwrap();
+    assert!(!out.edit_state.can_redo);
+    let out = state.undo(1).unwrap();
+    assert_eq!(slot_ids(&out.chain), [ids[2], ids[0], ids[1]]);
+    assert!(state.move_effect(1, 999, 0).is_err());
+}
+
+#[test]
+fn effects_no_longer_in_the_history_are_released() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let a = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[0];
+    let kept = Arc::downgrade(&state.slot(1, a).unwrap());
+    state.remove_effect(1, a).unwrap();
+    // Still kept for undo.
+    assert!(kept.upgrade().is_some());
+    state.undo(1).unwrap();
+    state.undo(1).unwrap();
+    // A new step discards the redo history, and with it the effect.
+    state.apply_edit(1, EditOp::Silence, 0, 10, 0.0).unwrap();
+    assert!(state.slot(1, a).is_none());
+    assert!(kept.upgrade().is_none());
+
+    // Closing the file releases its effects, including those kept for undo.
+    let b = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[0];
+    let c = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[1];
+    state.remove_effect(1, c).unwrap();
+    let weak = [b, c].map(|s| Arc::downgrade(&state.slot(1, s).unwrap()));
+    drop(state.close(1));
+    assert!(weak.iter().all(|w| w.upgrade().is_none()));
 }
