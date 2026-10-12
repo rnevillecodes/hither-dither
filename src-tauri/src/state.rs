@@ -9,8 +9,10 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::edit::{Audio, ClipFade, Crossfade, Curve, EditList};
+use crate::fx;
 use crate::fx::chain::{Chain, ChainInfo, LIVE_BLOCK, MAX_EFFECTS, Slot, SlotId, layout_name};
 use crate::fx::live::LiveChain;
+use crate::fx::render::Render;
 use crate::peaks::{PeakPyramid, PyramidBuilder};
 use crate::plugins::cache::{LoadStep, PluginCache};
 use crate::plugins::host::HandlerEvent;
@@ -19,7 +21,8 @@ use crate::plugins::main_thread::{self, Inline, UiThread};
 use crate::plugins::{ClassId, module};
 use crate::stats::{self, Analysis, ClipRun, MAX_STORED_RUNS, Stats, StatsRunner, map_runs};
 use crate::wav::{
-    SampleFormat, SampleSource, WavError, WavInfo, check_size, write_wav_with_progress,
+    NativeFrames, SampleFormat, SampleSource, WavError, WavInfo, check_size,
+    write_wav_with_progress,
 };
 
 /// Everything known about one open file.
@@ -266,6 +269,10 @@ pub struct EditOutcome {
     /// which leave the peaks and analysis as they are.
     #[serde(rename = "audioChanged")]
     pub audio_changed: bool,
+    /// Processed samples a save had to clamp to fit the file's integer format. Zero for
+    /// everything else.
+    #[serde(rename = "clampedSamples")]
+    pub clamped_samples: u64,
 }
 
 /// One step of a file's history: its edits and the effects in its chain, in order.
@@ -334,17 +341,6 @@ impl History {
     fn release_unreferenced(&mut self) {
         let used: HashSet<SlotId> = self.states.iter().flat_map(|s| &s.chain).copied().collect();
         self.slots.retain(|id, _| used.contains(id));
-    }
-
-    /// A history whose only state has `edits` and this history's current chain and bypass.
-    fn restart(&self, edits: Arc<EditList>) -> History {
-        let mut fresh = History::new(edits);
-        fresh.states[0].chain = self.current().chain.clone();
-        fresh.slots = self.slots.clone();
-        fresh.bypass_all = self.bypass_all;
-        fresh.revision = self.revision;
-        fresh.release_unreferenced();
-        fresh
     }
 }
 
@@ -627,6 +623,7 @@ impl AppState {
             clip: ClipInfo::of(&h.current().edits),
             chain: h.chain().info(),
             audio_changed,
+            clamped_samples: 0,
         }
     }
 
@@ -1004,30 +1001,45 @@ impl AppState {
         let fail = |e: &dyn std::fmt::Display| format!("Could not save “{target_name}”: {e}");
         check_size(&file.audio).map_err(|e| fail(&e))?;
 
-        // Analyse first if the background pass hasn't finished, then write.
         let frames = file.audio.frames();
-        let (analysis, written_from, total) = match &file.analysis {
-            Some(a) => (a.clone(), 0, frames),
-            None => {
-                let a = analyse_audio(&file.audio, file.revision, cancel, |done| {
-                    progress(done, 2 * frames)
-                })
-                .ok_or(CANCELLED)?;
-                (a, frames, 2 * frames)
+        let chain = file.chain.clone();
+        // With effects, the saved audio is analysed as it is written: the edited audio's
+        // analysis would be thrown away.
+        let effects = chain.is_active();
+        let temp = temp_path(&target);
+        let written = if effects {
+            self.render_file(&file, &chain, &temp, cancel, |done| progress(done, frames))
+        } else {
+            // Analyse first if the background pass hasn't finished, then write.
+            let (analysis, written_from, total) = match &file.analysis {
+                Some(a) => (a.clone(), 0, frames),
+                None => {
+                    let a = analyse_audio(&file.audio, file.revision, cancel, |done| {
+                        progress(done, 2 * frames)
+                    })
+                    .ok_or(CANCELLED)?;
+                    (a, frames, 2 * frames)
+                }
+            };
+            let written = write_file(&*file.audio, &temp, |done| {
+                progress(written_from + done, total)
+            });
+            written.map(|()| (analysis, 0)).map_err(|e| e.to_string())
+        };
+        let (analysis, clamped) = match written {
+            Ok(done) if !cancel.load(Ordering::Relaxed) => done,
+            failed => {
+                let _ = std::fs::remove_file(&temp);
+                if effects {
+                    // Keep the chain playable as it was.
+                    let _ = fx::render::realtime(&*self.ui, &chain);
+                }
+                return Err(match failed {
+                    Err(e) if !cancel.load(Ordering::Relaxed) => fail(&e),
+                    _ => CANCELLED.to_string(),
+                });
             }
         };
-        let temp = temp_path(&target);
-        let written = write_file(&file.audio, &temp, |done| {
-            progress(written_from + done, total)
-        });
-        if let Err(e) = written {
-            let _ = std::fs::remove_file(&temp);
-            return Err(fail(&e));
-        }
-        if cancel.load(Ordering::Relaxed) {
-            let _ = std::fs::remove_file(&temp);
-            return Err(CANCELLED.to_string());
-        }
 
         let mut history = self.history.lock().unwrap();
         let mut files = self.files.write().unwrap();
@@ -1040,29 +1052,34 @@ impl AppState {
         let old_revision = file.revision;
         let (old_pyramid, old_whole) = (file.source_pyramid.clone(), file.source_whole.clone());
         let edits = file.audio.edits().clone();
-        let chain = file.chain.clone();
+        // What was written was processed, so it doesn't describe the edited audio.
+        let edited_analysis = if effects {
+            file.analysis.clone()
+        } else {
+            Some(analysis.clone())
+        };
         drop(file);
 
         if let Err(e) = rename_with_retry(&temp, &target) {
             let _ = std::fs::remove_file(&temp);
+            let mut reopened = None;
             if overwrite {
                 // The original is unchanged: map it again with the same edits.
                 match SampleSource::open(&old_meta.path) {
                     Ok(src) => {
                         let audio = Arc::new(Audio::with_edits(Arc::new(src), edits));
-                        files.insert(
-                            id,
-                            Arc::new(LoadedFile {
-                                metadata: old_meta,
-                                disk_stamp: old_stamp,
-                                audio,
-                                revision: old_revision,
-                                source_pyramid: old_pyramid,
-                                source_whole: old_whole,
-                                analysis: Some(analysis),
-                                chain,
-                            }),
-                        );
+                        let file = Arc::new(LoadedFile {
+                            metadata: old_meta,
+                            disk_stamp: old_stamp,
+                            audio,
+                            revision: old_revision,
+                            source_pyramid: old_pyramid,
+                            source_whole: old_whole,
+                            analysis: edited_analysis,
+                            chain: chain.clone(),
+                        });
+                        files.insert(id, file.clone());
+                        reopened = Some(file);
                     }
                     Err(_) => {
                         history.remove(&id);
@@ -1070,6 +1087,13 @@ impl AppState {
                 }
             }
             drop((files, history));
+            if let Some(file) = reopened {
+                // Only starts one if the edited audio wasn't analysed yet.
+                self.restart_analysis(id, &file);
+            }
+            if effects {
+                let _ = fx::render::realtime(&*self.ui, &chain);
+            }
             self.signal.notify();
             return Err(fail(&e));
         }
@@ -1092,20 +1116,16 @@ impl AppState {
         let audio = Arc::new(Audio::new(Arc::new(src)));
         let size = fs_meta.len();
         let metadata = Metadata::new(&target, target_name, size, audio.info());
-        // The history starts again from the saved file, keeping the chain.
-        let mut fresh = match history.get(&id) {
-            Some(h) => h.restart(audio.edits().clone()),
-            None => {
-                let mut h = History::new(audio.edits().clone());
-                h.revision = old_revision;
-                h
-            }
-        };
-        fresh.revision += 1;
+        // The history starts again from the saved file. The effects are in it now, so the
+        // chain is emptied, and the slots are released on the UI thread as the last
+        // references to them go.
+        let mut fresh = History::new(audio.edits().clone());
+        fresh.revision = history.get(&id).map_or(old_revision, |h| h.revision) + 1;
         let revision = fresh.revision;
-        let outcome = Self::outcome(&metadata, &fresh, true);
+        let mut outcome = Self::outcome(&metadata, &fresh, true);
+        outcome.clamped_samples = clamped;
         history.insert(id, fresh);
-        // Saving doesn't change the audio, so its analysis becomes the source's.
+        // The analysis of what was written becomes the source's.
         files.insert(
             id,
             Arc::new(
@@ -1117,7 +1137,7 @@ impl AppState {
                     source_pyramid: analysis.pyramid,
                     source_whole: analysis.whole,
                     analysis: None,
-                    chain,
+                    chain: Arc::default(),
                 }
                 .seeded(),
             ),
@@ -1125,6 +1145,31 @@ impl AppState {
         drop((files, history));
         self.signal.notify();
         Ok(outcome)
+    }
+
+    /// Write `file`'s audio through its active `chain` to a new file at `path`, analysing what
+    /// is written in the same pass. Returns that analysis and the number of samples clamped.
+    /// Leaves the chain's slots set up for offline rendering.
+    fn render_file(
+        &self,
+        file: &LoadedFile,
+        chain: &Chain,
+        path: &Path,
+        cancel: &AtomicBool,
+        progress: impl FnMut(u64),
+    ) -> Result<(EditAnalysis, u64), String> {
+        fx::render::offline(&*self.ui, chain)?;
+        // Built after going offline, which may change the slots' latency.
+        let live = LiveChain::of(chain).ok_or("No effect processes the audio")?;
+        let render = Render::new(&file.audio, live, cancel);
+        write_file(&render, path, progress).map_err(|e| e.to_string())?;
+        let rendered = render.finish().ok_or(CANCELLED)?;
+        let analysis = EditAnalysis {
+            revision: file.revision,
+            pyramid: Arc::new(rendered.pyramid),
+            whole: Arc::new(rendered.whole),
+        };
+        Ok((analysis, rendered.clamped))
     }
 
     /// Stats for `[start, end)` of file `id`, or its whole-file stats when `range` is
@@ -1296,7 +1341,7 @@ fn temp_path(target: &Path) -> PathBuf {
 
 /// Write `audio` to a new file at `path` and flush it to disk.
 fn write_file(
-    audio: &Audio,
+    audio: &impl NativeFrames,
     path: &Path,
     progress: impl FnMut(u64),
 ) -> Result<(), crate::wav::WriteError> {

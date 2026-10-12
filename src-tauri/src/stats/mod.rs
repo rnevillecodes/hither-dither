@@ -15,6 +15,7 @@ use serde::Serialize;
 
 use crate::edit::Audio;
 use crate::peaks::PyramidBuilder;
+use crate::wav::WavInfo;
 use clipping::ClipDetector;
 use levels::LevelAccumulator;
 use loudness::LoudnessMeter;
@@ -46,6 +47,70 @@ pub struct Analysis {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cancelled;
 
+/// Statistics of frames fed to it in order, from frame `start`.
+pub struct Accumulator {
+    channels: usize,
+    start: u64,
+    pos: u64,
+    levels: Vec<LevelAccumulator>,
+    clips: Vec<ClipDetector>,
+    meter: LoudnessMeter,
+}
+
+impl Accumulator {
+    /// Prepares to analyse `frames` frames of audio in `info`'s format, starting at `start`.
+    pub fn new(info: &WavInfo, start: u64, frames: u64) -> Accumulator {
+        let ch = info.channels as usize;
+        Accumulator {
+            channels: ch,
+            start,
+            pos: start,
+            levels: vec![LevelAccumulator::default(); ch],
+            clips: vec![ClipDetector::default(); ch],
+            meter: LoudnessMeter::new(info, frames),
+        }
+    }
+
+    /// Adds the next interleaved frames, with `full_scale[i]` set when sample `i` is at full
+    /// scale.
+    pub fn push(&mut self, chunk: &[f32], full_scale: &[bool]) {
+        let ch = self.channels;
+        for (frame, flags) in chunk.chunks_exact(ch).zip(full_scale.chunks_exact(ch)) {
+            for c in 0..ch {
+                self.levels[c].add(frame[c]);
+                self.clips[c].add(self.pos, flags[c]);
+            }
+            self.pos += 1;
+        }
+        self.meter.add(chunk);
+    }
+
+    /// The statistics of the frames pushed so far.
+    pub fn finish(mut self) -> Analysis {
+        let channels = self
+            .levels
+            .iter()
+            .zip(self.clips.iter_mut())
+            .map(|(l, c)| {
+                c.finish();
+                ChannelStats {
+                    levels: l.finish(),
+                    clip_runs: c.count,
+                }
+            })
+            .collect();
+        Analysis {
+            stats: Stats {
+                start: self.start,
+                end: self.pos,
+                channels,
+                loudness: self.meter.finish(),
+            },
+            clip_runs: self.clips.into_iter().map(|c| c.runs).collect(),
+        }
+    }
+}
+
 /// Analyse frames `[start, end)` in one pass. If `pyramid` is given it is fed the same
 /// frames. `progress` receives the number of frames processed so far.
 pub fn analyse(
@@ -58,10 +123,7 @@ pub fn analyse(
 ) -> Result<Analysis, Cancelled> {
     let end = end.min(src.frames());
     let start = start.min(end);
-    let ch = src.channels();
-    let mut levels = vec![LevelAccumulator::default(); ch];
-    let mut clips = vec![ClipDetector::default(); ch];
-    let mut meter = LoudnessMeter::new(src.info(), end - start);
+    let mut acc = Accumulator::new(src.info(), start, end - start);
     let (mut buf, mut fs) = (Vec::new(), Vec::new());
 
     let mut pos = start;
@@ -71,41 +133,14 @@ pub fn analyse(
         }
         let count = (end - pos).min(BLOCK_FRAMES as u64) as usize;
         src.read_with_full_scale(pos, count, &mut buf, &mut fs);
-        for (i, (frame, flags)) in buf.chunks_exact(ch).zip(fs.chunks_exact(ch)).enumerate() {
-            let f = pos + i as u64;
-            for c in 0..ch {
-                levels[c].add(frame[c]);
-                clips[c].add(f, flags[c]);
-            }
-        }
-        meter.add(&buf);
+        acc.push(&buf, &fs);
         if let Some(p) = pyramid.as_deref_mut() {
             p.push(&buf);
         }
         pos += count as u64;
         progress(pos - start);
     }
-
-    let channels = levels
-        .iter()
-        .zip(clips.iter_mut())
-        .map(|(l, c)| {
-            c.finish();
-            ChannelStats {
-                levels: l.finish(),
-                clip_runs: c.count,
-            }
-        })
-        .collect();
-    Ok(Analysis {
-        stats: Stats {
-            start,
-            end,
-            channels,
-            loudness: meter.finish(),
-        },
-        clip_runs: clips.into_iter().map(|c| c.runs).collect(),
-    })
+    Ok(acc.finish())
 }
 
 /// Runs range analyses on worker threads; starting a new one cancels the previous one.

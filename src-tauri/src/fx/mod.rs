@@ -3,3 +3,4 @@
 
 pub mod chain;
 pub mod live;
+pub mod render;

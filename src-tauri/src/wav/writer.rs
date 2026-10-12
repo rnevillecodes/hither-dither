@@ -32,23 +32,96 @@ pub fn check_size(audio: &Audio) -> Result<(), WriteError> {
         .ok_or(WriteError::TooLarge)
 }
 
-/// Write `audio` as a complete WAV file. Unchanged samples are copied byte for byte;
-/// changed ones (edits, fades, crossfades) are rendered in the file's own units and
-/// encoded, integers rounded and clamped.
-pub fn write_wav(audio: &Audio, out: impl Write) -> Result<(), WriteError> {
+/// Frames as the writer takes them.
+pub enum Frames<'a> {
+    /// The source file's own bytes, copied as they are.
+    Bytes(&'a [u8]),
+    /// Interleaved samples in the file's own units (see `Audio::render_native`), encoded with
+    /// integers rounded and clamped.
+    Native(&'a [f64]),
+}
+
+/// Audio the writer can save: its format, and its frames in the file's own units.
+pub trait NativeFrames {
+    /// The format, with `frames` the number of frames to write.
+    fn info(&self) -> &WavInfo;
+
+    /// The body of the `fmt ` chunk to write.
+    fn fmt_bytes(&self) -> &[u8];
+
+    /// Hands every frame to `sink`, in order, stopping at its first error.
+    fn emit(
+        &self,
+        sink: &mut dyn FnMut(Frames<'_>) -> Result<(), WriteError>,
+    ) -> Result<(), WriteError>;
+}
+
+/// Unchanged samples are copied byte for byte; changed ones (edits, fades, crossfades) are
+/// rendered in the file's own units.
+impl NativeFrames for Audio {
+    fn info(&self) -> &WavInfo {
+        Audio::info(self)
+    }
+
+    fn fmt_bytes(&self) -> &[u8] {
+        self.source().fmt_bytes()
+    }
+
+    fn emit(
+        &self,
+        sink: &mut dyn FnMut(Frames<'_>) -> Result<(), WriteError>,
+    ) -> Result<(), WriteError> {
+        let src = self.source();
+        let mut rendered = Vec::new();
+        for span in self.spans().iter().copied() {
+            let mut done = 0;
+            while done < span.len {
+                let n = (span.len - done).min(CHUNK_FRAMES);
+                match span.src {
+                    Some(from) => sink(Frames::Bytes(src.frame_bytes(from + done, n as usize)))?,
+                    None => {
+                        self.render_native(span.start + done, n as usize, &mut rendered);
+                        sink(Frames::Native(&rendered))?;
+                    }
+                }
+                done += n;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<T: NativeFrames + ?Sized> NativeFrames for std::sync::Arc<T> {
+    fn info(&self) -> &WavInfo {
+        (**self).info()
+    }
+
+    fn fmt_bytes(&self) -> &[u8] {
+        (**self).fmt_bytes()
+    }
+
+    fn emit(
+        &self,
+        sink: &mut dyn FnMut(Frames<'_>) -> Result<(), WriteError>,
+    ) -> Result<(), WriteError> {
+        (**self).emit(sink)
+    }
+}
+
+/// Write `audio` as a complete WAV file.
+pub fn write_wav(audio: &impl NativeFrames, out: impl Write) -> Result<(), WriteError> {
     write_wav_with_progress(audio, out, |_| {})
 }
 
 /// Like [`write_wav`], calling `progress` with the number of frames written so far.
 pub fn write_wav_with_progress(
-    audio: &Audio,
+    audio: &impl NativeFrames,
     out: impl Write,
     mut progress: impl FnMut(u64),
 ) -> Result<(), WriteError> {
-    let src = audio.source();
     let info = audio.info();
-    let fmt = src.fmt_bytes();
-    let data_bytes = audio.frames() * info.block_align() as u64;
+    let fmt = audio.fmt_bytes();
+    let data_bytes = info.frames * info.block_align() as u64;
     let riff = riff_size(fmt.len() as u64, data_bytes).ok_or(WriteError::TooLarge)?;
 
     let mut out = io::BufWriter::with_capacity(1 << 20, out);
@@ -64,29 +137,85 @@ pub fn write_wav_with_progress(
     out.write_all(b"data")?;
     out.write_all(&(data_bytes as u32).to_le_bytes())?;
 
-    let (mut rendered, mut encoded) = (Vec::new(), Vec::new());
-    for span in audio.spans().iter().copied() {
-        let mut done = 0;
-        while done < span.len {
-            let n = (span.len - done).min(CHUNK_FRAMES);
-            match span.src {
-                Some(from) => out.write_all(src.frame_bytes(from + done, n as usize))?,
-                None => {
-                    audio.render_native(span.start + done, n as usize, &mut rendered);
-                    encoded.clear();
-                    encode(info, &rendered, &mut encoded);
-                    out.write_all(&encoded)?;
-                }
+    let (block, channels) = (info.block_align(), info.channels as usize);
+    let mut encoded = Vec::new();
+    let mut written = 0;
+    audio.emit(&mut |frames| {
+        match frames {
+            Frames::Bytes(bytes) => {
+                out.write_all(bytes)?;
+                written += (bytes.len() / block) as u64;
             }
-            done += n;
-            progress(span.start + done);
+            Frames::Native(samples) => {
+                encoded.clear();
+                encode(info, samples, &mut encoded);
+                out.write_all(&encoded)?;
+                written += (samples.len() / channels) as u64;
+            }
         }
-    }
+        progress(written);
+        Ok(())
+    })?;
     if data_bytes % 2 == 1 {
         out.write_all(&[0])?;
     }
     out.flush()?;
     Ok(())
+}
+
+/// Converts normalised samples to the values a file's format stores, and back.
+#[derive(Debug, Clone, Copy)]
+pub struct Quantiser {
+    float: bool,
+    /// Native units per full scale.
+    scale: f64,
+    /// Native units per step of the significant bits.
+    step: f64,
+    /// Range of the significant bits, in steps.
+    min: f64,
+    max: f64,
+}
+
+impl Quantiser {
+    pub fn new(info: &WavInfo) -> Quantiser {
+        let container = (info.format.bytes() as u32 * 8).min(32);
+        let valid = (info.valid_bits as u32).clamp(1, container);
+        let max = ((1i64 << (valid - 1)) - 1) as f64;
+        Quantiser {
+            float: info.format.is_float(),
+            scale: (1u64 << (container - 1)) as f64,
+            step: (1u64 << (container - valid)) as f64,
+            min: -max - 1.0,
+            max,
+        }
+    }
+
+    /// Normalised sample `x` in the file's own units as it will be stored (integers rounded
+    /// on the grid of significant bits and clamped), and whether it had to be clamped. NaN is
+    /// stored as silence.
+    pub fn quantise(&self, x: f32) -> (f64, bool) {
+        if self.float {
+            return (x as f64, false);
+        }
+        let q = (x as f64 * self.scale / self.step).round();
+        if q.is_nan() {
+            return (0.0, false);
+        }
+        let clamped = q.clamp(self.min, self.max);
+        (clamped * self.step, clamped != q)
+    }
+
+    /// A stored value as reading the file gives it back: normalised, and whether it is at
+    /// full scale.
+    pub fn normalise(&self, v: f64) -> (f32, bool) {
+        if self.float {
+            let x = v as f32;
+            return (x, x.abs() >= 1.0);
+        }
+        let q = v / self.step;
+        let x = (v as i32) as f32 * (1.0 / self.scale) as f32;
+        (x, q >= self.max || q <= self.min)
+    }
 }
 
 /// Encode samples in the file's own units (see `Audio::render_native`). Integers are

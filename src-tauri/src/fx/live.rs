@@ -90,6 +90,8 @@ impl LiveChain {
 pub struct Live {
     chain: Arc<LiveChain>,
     channels: usize,
+    /// Most frames passed to a stage at once.
+    block: usize,
     /// Planar input and output of a stage; swapped after each stage that processed.
     a: Vec<Vec<f32>>,
     b: Vec<Vec<f32>>,
@@ -100,12 +102,18 @@ pub struct Live {
 impl Live {
     /// Prepares to process `channels`-channel audio through `chain`, from a fresh start.
     pub fn new(chain: Arc<LiveChain>, channels: usize) -> Live {
+        Live::with_block(chain, channels, LIVE_BLOCK)
+    }
+
+    /// Like [`Live::new`], passing the stages at most `block` frames at once.
+    pub fn with_block(chain: Arc<LiveChain>, channels: usize, block: usize) -> Live {
         let discard = chain.latency as usize;
         Live {
             chain,
             channels,
-            a: vec![vec![0.0; LIVE_BLOCK]; channels],
-            b: vec![vec![0.0; LIVE_BLOCK]; channels],
+            block,
+            a: vec![vec![0.0; block]; channels],
+            b: vec![vec![0.0; block]; channels],
             discard,
         }
     }
@@ -124,14 +132,14 @@ impl Live {
     /// the output that lines up with the input fed so far to `out`.
     pub fn process(&mut self, input: &[f32], position: u64, out: &mut Vec<f32>) {
         let ch = self.channels;
-        for (k, block) in input.chunks(LIVE_BLOCK * ch).enumerate() {
+        for (k, block) in input.chunks(self.block * ch).enumerate() {
             let n = block.len() / ch;
             for (c, plane) in self.a.iter_mut().enumerate() {
                 for (dst, frame) in plane.iter_mut().zip(block.chunks_exact(ch)) {
                     *dst = frame[c];
                 }
             }
-            self.run(n, position + (k * LIVE_BLOCK) as u64, out);
+            self.run(n, position + (k * self.block) as u64, out);
         }
     }
 
@@ -141,7 +149,7 @@ impl Live {
         let mut left = self.chain.latency as usize;
         let mut at = position;
         while left > 0 {
-            let n = left.min(LIVE_BLOCK);
+            let n = left.min(self.block);
             for plane in &mut self.a {
                 plane[..n].fill(0.0);
             }

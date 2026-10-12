@@ -223,6 +223,8 @@ interface EditOutcome {
   chain: ChainInfo;        // the file's effect chain (see get_chain)
   audioChanged: boolean;   // false for chain changes: the revision, peaks and analysis are unchanged,
                            // so don't invalidate peaks or call wait_analysis
+  clampedSamples: number;  // from save_file: processed samples clamped to fit an integer format
+                           // (0 otherwise); show a notice when above 0
 }
 
 interface EditState {
@@ -273,11 +275,19 @@ Step back or forward one edit. Rejects with `Nothing to undo` / `Nothing to redo
 | `path` | `string | null` | Where to write; `null` overwrites the file's own path |
 | `onProgress` | `Channel<LoadProgress>` | Progress of the save, as for `open_file` |
 
-This is the only command that renders the edited audio. If the current edit state hasn't been analysed yet, it is analysed first, so the saved tab has exact peaks and stats; progress then covers both passes (`totalFrames` is twice the length). Only one save can run per file at a time. Writes the current audio as a WAV file: the source's `fmt ` chunk followed by a `data` chunk, and no other chunks. Unedited samples are copied byte for byte. Scaled samples are converted in the file's own format (integers rounded to nearest and clamped). The file is written to a temporary file next to the target and then renamed over it, so a failure never leaves a partial file. If the file is playing, playback stops first.
+This is the only command that renders the edited audio. Without effects, if the current edit state hasn't been analysed yet, it is analysed first, so the saved tab has exact peaks and stats; progress then covers both passes (`totalFrames` is twice the length). Only one save can run per file at a time. Writes the current audio as a WAV file: the source's `fmt ` chunk followed by a `data` chunk, and no other chunks. Unedited samples are copied byte for byte. Scaled samples are converted in the file's own format (integers rounded to nearest and clamped). The file is written to a temporary file next to the target and then renamed over it, so a failure never leaves a partial file. If the file is playing, playback stops first.
 
-Returns an `EditOutcome`. Afterwards the file is served from the saved copy (its `metadata.path` and `name` are the target's), the history is empty apart from the current effect chain, and the peaks and stats are unchanged.
+With an active effect chain (an effect that isn't bypassed, and Bypass All off), the audio is rendered through the effects instead:
+- the effects are switched to offline rendering, and parameter changes not yet heard reach them first;
+- the chain's latency is removed, so every frame lines up with the input and the length is unchanged;
+- every sample is the effects' output, converted to the file's format: integers are rounded and clamped, and `clampedSamples` counts the clamped samples, while floats are written as they are, above full scale included;
+- the written samples are analysed in the same pass, so there is no separate analysis and progress covers one pass (`totalFrames` is the length).
 
-Rejects, leaving any existing file at the target and the edits as they were:
+With a bypassed chain, the save is the same as with no effects, so unedited samples stay bit-exact.
+
+Returns an `EditOutcome`. Afterwards the file is served from the saved copy (its `metadata.path` and `name` are the target's), and the history and the effect chain are empty: the effects are released, and their editors closed. Without effects, the peaks and stats are unchanged. With effects, `audioChanged` is true as always for a save, and the new revision's peaks, stats and clip runs, which describe the processed audio, are already exact.
+
+Rejects, leaving any existing file at the target, the edits, and the chain with its settings as they were (effects go back to real-time processing):
 - with `“x.wav” changed on disk since it was opened…` when overwriting a file that changed since it was loaded;
 - with `Could not save “x.wav”: the result is too large for a WAV file (over 4 GiB)`;
 - with `Could not save “x.wav”: …` for I/O errors such as a read-only folder.

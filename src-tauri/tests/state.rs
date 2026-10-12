@@ -15,7 +15,7 @@ use hither_dither_lib::plugins::scan::Scanner;
 use hither_dither_lib::state::{AppState, ClipSettings, EditOp, FadeSetting, OpenError, Preview};
 use hither_dither_lib::stats::Loudness;
 use hither_dither_lib::wav::synth::{Encoding, WavBuilder, interleave, sine};
-use hither_dither_lib::wav::write_wav;
+use hither_dither_lib::wav::{SampleSource, write_wav};
 
 fn write(
     dir: &tempfile::TempDir,
@@ -1068,4 +1068,222 @@ fn effects_no_longer_in_the_history_are_released() {
     let weak = [b, c].map(|s| Arc::downgrade(&state.slot(1, s).unwrap()));
     drop(state.close(1));
     assert!(weak.iter().all(|w| w.upgrade().is_none()));
+}
+
+// --- Saving through effects ----------------------------------------------------------------
+
+/// A 10 s stereo 440 Hz tone peaking at `peak`, opened as file `id`.
+fn open_tone(
+    state: &AppState,
+    dir: &tempfile::TempDir,
+    id: u32,
+    builder: WavBuilder,
+    peak: f64,
+) -> std::path::PathBuf {
+    let s = sine(440.0, peak, 8_000, 80_000);
+    let path = write(
+        dir,
+        &format!("tone{id}.wav"),
+        builder,
+        &interleave(&[s.clone(), s]),
+    );
+    state.open(id, &path, |_, _| {}).unwrap();
+    path
+}
+
+/// Adds HD Test Gain to file `id`, set to +6.02 dB.
+fn add_double(state: &AppState, fx: &Effects, id: u32) -> SlotId {
+    let slot = slot_ids(&state.add_effect(id, &fx.plugins, fx.gain).unwrap().chain)[0];
+    state
+        .slot(id, slot)
+        .unwrap()
+        .instance()
+        .set_param(GAIN_PARAM, plus_6db());
+    slot
+}
+
+/// Every sample of the file at `path`, in the file's own units.
+fn native_samples(path: &std::path::Path) -> Vec<f64> {
+    let src = SampleSource::open(path).unwrap();
+    let mut out = Vec::new();
+    src.read_native(0, src.frames() as usize, &mut out);
+    out
+}
+
+#[test]
+fn effects_are_applied_with_latency_removed() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    let source = open_tone(
+        &state,
+        &dir,
+        1,
+        WavBuilder::new(Encoding::Pcm, 16, 2, 8_000),
+        0.4,
+    );
+    add_double(&state, &fx, 1);
+    assert_eq!(state.get_chain(1).unwrap().latency, 64);
+
+    let copy = dir.path().join("doubled.wav");
+    let mut last = (0, 0);
+    let out = state
+        .save(1, Some(&copy), |done, total| last = (done, total))
+        .unwrap();
+    // Rendering, writing and analysing are one pass.
+    assert_eq!(last, (80_000, 80_000));
+    assert_eq!(out.clamped_samples, 0);
+    assert_eq!(frames_on_disk(&copy), 80_000);
+    let (src, saved) = (native_samples(&source), native_samples(&copy));
+    assert_eq!(saved.len(), src.len());
+    for (i, (s, d)) in src.iter().zip(&saved).enumerate() {
+        assert_eq!(*d, (s * 2.0).clamp(-32_768.0, 32_767.0), "sample {i}");
+    }
+}
+
+#[test]
+fn a_bypassed_chain_saves_bit_exact() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    let source = open_tone(
+        &state,
+        &dir,
+        1,
+        WavBuilder::new(Encoding::Pcm, 24, 2, 8_000),
+        0.4,
+    );
+    add_double(&state, &fx, 1);
+    state.set_bypass_all(1, true).unwrap();
+
+    let copy = dir.path().join("bypassed.wav");
+    let out = state.save(1, Some(&copy), |_, _| {}).unwrap();
+    let frames = |p: &std::path::Path| {
+        let src = SampleSource::open(p).unwrap();
+        src.frame_bytes(0, src.frames() as usize).to_vec()
+    };
+    assert_eq!(frames(&copy), frames(&source));
+    // Saving empties the chain all the same.
+    assert!(out.chain.effects.is_empty());
+}
+
+#[test]
+fn too_much_gain_counts_the_clamped_samples() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    // -3 dBFS.
+    let peak = 10f64.powf(-3.0 / 20.0);
+    open_tone(
+        &state,
+        &dir,
+        1,
+        WavBuilder::new(Encoding::Pcm, 16, 2, 8_000),
+        peak,
+    );
+    add_double(&state, &fx, 1);
+    let copy = dir.path().join("clipped.wav");
+    let out = state.save(1, Some(&copy), |_, _| {}).unwrap();
+    assert!(out.clamped_samples > 0);
+    let saved = native_samples(&copy);
+    let at_limit = saved
+        .iter()
+        .filter(|&&v| v == 32_767.0 || v == -32_768.0)
+        .count() as u64;
+    assert_eq!(at_limit, out.clamped_samples);
+}
+
+#[test]
+fn a_float_file_keeps_its_overs() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    let peak = 10f64.powf(-3.0 / 20.0);
+    open_tone(
+        &state,
+        &dir,
+        1,
+        WavBuilder::new(Encoding::Float, 32, 2, 8_000),
+        peak,
+    );
+    add_double(&state, &fx, 1);
+    let copy = dir.path().join("overs.wav");
+    let out = state.save(1, Some(&copy), |_, _| {}).unwrap();
+    assert_eq!(out.clamped_samples, 0);
+    let max = native_samples(&copy)
+        .iter()
+        .fold(0f64, |m, v| m.max(v.abs()));
+    assert!(max > 1.4, "peak {max}");
+}
+
+#[test]
+fn effects_are_baked_in() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_tone(
+        &state,
+        &dir,
+        1,
+        WavBuilder::new(Encoding::Pcm, 16, 2, 8_000),
+        0.4,
+    );
+    let slot = add_double(&state, &fx, 1);
+    let weak = Arc::downgrade(&state.slot(1, slot).unwrap());
+    let dry = whole_stats(&state, 1);
+
+    let copy = dir.path().join("baked.wav");
+    let out = state.save(1, Some(&copy), |_, _| {}).unwrap();
+    assert!(out.chain.effects.is_empty() && out.audio_changed);
+    assert!(!out.edit_state.dirty && !out.edit_state.can_undo);
+    assert_eq!(state.get_chain(1).unwrap().effects.len(), 0);
+    // The effect has been released.
+    assert!(weak.upgrade().is_none());
+
+    // The statistics and clip markers describe the saved, processed audio, and are exact.
+    let baked = whole_stats(&state, 1);
+    assert!(!state.clip_runs(1).unwrap().pending);
+    state.open(2, &copy, |_, _| {}).unwrap();
+    assert_eq!(baked, whole_stats(&state, 2));
+    let peak = |s: &hither_dither_lib::stats::Stats| s.channels[0].levels.peak_dbfs.unwrap();
+    assert!((peak(&baked) - peak(&dry) - 6.02).abs() < 0.01);
+    assert_eq!(
+        encode_peaks(&state.get(1).unwrap(), 0, 80_000, 300),
+        encode_peaks(&state.get(2).unwrap(), 0, 80_000, 300)
+    );
+}
+
+#[test]
+fn a_failed_save_with_effects_keeps_the_chain() {
+    use hither_dither_lib::fx::chain::LIVE_BLOCK;
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_tone(
+        &state,
+        &dir,
+        1,
+        WavBuilder::new(Encoding::Pcm, 16, 2, 8_000),
+        0.4,
+    );
+    state.apply_edit(1, EditOp::FadeIn, 0, 1_000, 0.0).unwrap();
+    let slot = add_double(&state, &fx, 1);
+    let before = state.get_chain(1).unwrap();
+
+    // The folder can't be written to.
+    let target = dir.path().join("missing-dir").join("x.wav");
+    let err = state.save(1, Some(&target), |_, _| {}).unwrap_err();
+    assert!(err.starts_with("Could not save “x.wav”"), "{err}");
+    // The chain, the effect's settings and the edits are kept.
+    assert_eq!(state.get_chain(1).unwrap(), before);
+    assert_eq!(gain_of(&state, 1, slot), plus_6db());
+    let st = state.edit_state(1).unwrap();
+    assert!(st.dirty && st.can_undo);
+    // The effect is back to processing for playback.
+    let config = state.slot(1, slot).unwrap().instance().config().unwrap();
+    assert!(!config.offline && config.max_block == LIVE_BLOCK);
+    // And a later save still applies it.
+    let copy = dir.path().join("retry.wav");
+    state.save(1, Some(&copy), |_, _| {}).unwrap();
+    assert!(native_samples(&copy).iter().any(|v| v.abs() > 16_384.0));
 }

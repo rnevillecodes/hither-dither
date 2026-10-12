@@ -84,8 +84,8 @@
 
 ## 6. Saving through the chain
 
-- [ ] 6.1 Split `stats::analyse` into a streaming accumulator plus the existing driver, and change the writer to take a `NativeFrames` source, with `Audio` implementing it. Verify that all existing stats, writer and `tests/state.rs` save tests still pass unchanged with `npm run test:rust`.
-- [ ] 6.2 Implement `fx/render.rs` and the chain path in `save_inner`:
+- [x] 6.1 Split `stats::analyse` into a streaming accumulator plus the existing driver, and change the writer to take a `NativeFrames` source, with `Audio` implementing it. Verify that all existing stats, writer and `tests/state.rs` save tests still pass unchanged with `npm run test:rust`.
+- [x] 6.2 Implement `fx/render.rs` and the chain path in `save_inner`:
   - skip the dry analysis;
   - switch slots to offline mode and deliver pending parameters;
   - render with latency removed and the length unchanged;
