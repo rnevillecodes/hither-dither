@@ -2,8 +2,8 @@
 
 ## 1. Dependencies and test plugins
 
-- [ ] 1.1 Add the `vst3` bindings crate, pinned after checking its licence (MIT/Apache-2.0) and that it exposes `IRunLoop`, `IPlugViewContentScaleSupport` and the component and controller interfaces. Also add `libloading`, plus target-specific `windows`, `objc2`/`objc2-app-kit`/`core-foundation`, and `x11rb`/`glib` (matching the version Tauri uses) to `src-tauri/Cargo.toml`. Verify `cargo build` succeeds on the host and `npm run lint:rust` passes.
-- [ ] 1.2 Turn `src-tauri` into a Cargo workspace with `test-plugins/hd-test-fx` (HD Test Gain: a dB gain parameter, a 64-sample delay reported as latency, 1–8 channels, no editor; HD Test Stereo: stereo only; HD Test Synth: an instrument class) and the `hd-test-crash` and `hd-test-hang` bundles from design.md. Add a test helper that builds them and assembles `.vst3` bundle directories in a temp folder. Verify with a Rust test that the helper produces bundles with the per-OS `Contents/<arch>-<os>/` layout, and that `npm run test:rust` passes.
+- [x] 1.1 Add the `vst3` bindings crate, pinned after checking its licence (MIT/Apache-2.0) and that it exposes `IRunLoop`, `IPlugViewContentScaleSupport` and the component and controller interfaces. Also add `libloading`, plus target-specific `windows`, `objc2`/`objc2-app-kit`/`core-foundation`, and `x11rb`/`glib` (matching the version Tauri uses) to `src-tauri/Cargo.toml`. Verify `cargo build` succeeds on the host and `npm run lint:rust` passes.
+- [x] 1.2 Turn `src-tauri` into a Cargo workspace with `test-plugins/hd-test-fx` (HD Test Gain: a dB gain parameter, a 64-sample delay reported as latency, 1–8 channels, no editor; HD Test Stereo: stereo only; HD Test Synth: an instrument class) and the `hd-test-crash` and `hd-test-hang` bundles from design.md. Add a test helper that builds them and assembles `.vst3` bundle directories in a temp folder. Verify with a Rust test that the helper produces bundles with the per-OS `Contents/<arch>-<os>/` layout, and that `npm run test:rust` passes.
 
 ## 2. Loading and driving a plugin
 

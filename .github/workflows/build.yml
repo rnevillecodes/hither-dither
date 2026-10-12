@@ -81,9 +81,8 @@ jobs:
       - name: Frontend tests
         run: npm test
 
-      # Formatting and clippy don't depend on the OS, so run them once.
+      # Plugin hosting has per-OS code, so clippy runs on every platform.
       - name: Rust format and clippy
-        if: matrix.os == 'linux'
         run: npm run lint:rust
 
       - name: Rust tests
