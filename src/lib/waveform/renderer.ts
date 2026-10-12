@@ -26,6 +26,14 @@ export interface Scene {
   preview: ClipInfo | null;
   /** Text shown next to the pointer while dragging (CSS px). */
   label: { x: number; y: number; text: string } | null;
+  /** A fade being tried out in the curve dialog, drawn over the rendered audio. */
+  rangeFade: { start: number; end: number; dir: "in" | "out"; bend: number } | null;
+}
+
+/** Gain the curve dialog's fade would apply at frame `f`. */
+function rangeFadeGain(fade: NonNullable<Scene["rangeFade"]>) {
+  return (f: number) =>
+    f < fade.start || f >= fade.end ? 1 : gain(fade.dir, fade.bend, (f - fade.start) / (fade.end - fade.start));
 }
 
 /**
@@ -122,7 +130,9 @@ export function drawWaveform(ctx: CanvasRenderingContext2D, scene: Scene, theme:
   }
 
   const mapping = previewMapping(scene);
-  const gainAt = mapping ? (f: number) => mapping.gainAt(f) : null;
+  const fadeAt = scene.rangeFade ? rangeFadeGain(scene.rangeFade) : null;
+  const gainAt =
+    mapping || fadeAt ? (f: number) => (mapping ? mapping.gainAt(f) : 1) * (fadeAt ? fadeAt(f) : 1) : null;
   if (scene.tile) {
     if (scene.tile.kind === PEAKS_KIND_MINMAX) drawMinMax(ctx, scene, ls, theme, gainAt);
     else drawSamples(ctx, scene, ls, theme, gainAt);
@@ -130,6 +140,7 @@ export function drawWaveform(ctx: CanvasRenderingContext2D, scene: Scene, theme:
 
   drawLaneLabels(ctx, scene, ls, theme);
   drawClip(ctx, scene, theme, mapping?.offset ?? 0);
+  if (scene.rangeFade) drawRangeFade(ctx, scene, theme, scene.rangeFade);
 
   if (scene.playhead !== null) {
     const x = Math.round(xAtFrame(vp, scene.playhead) * dpr);
@@ -352,6 +363,32 @@ function drawClip(ctx: CanvasRenderingContext2D, scene: Scene, theme: Theme, off
     ctx.fillStyle = theme.text;
     ctx.fillText(text, lx + 5 * dpr, ly + h / 2);
   }
+}
+
+/** The curve dialog's fade line over its range. */
+function drawRangeFade(
+  ctx: CanvasRenderingContext2D,
+  scene: Scene,
+  theme: Theme,
+  fade: NonNullable<Scene["rangeFade"]>,
+) {
+  const { vp, dpr } = scene;
+  const W = ctx.canvas.width;
+  const cssH = ctx.canvas.height / dpr;
+  const x0 = xAtFrame(vp, fade.start) * dpr;
+  const x1 = xAtFrame(vp, fade.end) * dpr;
+  if (x1 < 0 || x0 > W) return;
+  const steps = Math.max(2, Math.min(256, Math.ceil(Math.abs(x1 - x0) / (3 * dpr))));
+  ctx.strokeStyle = theme.selectionEdge;
+  ctx.lineWidth = Math.max(1, 1.5 * dpr);
+  ctx.beginPath();
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const y = envY(gain(fade.dir, fade.bend, t), cssH) * dpr;
+    if (i === 0) ctx.moveTo(x0 + (x1 - x0) * t, y);
+    else ctx.lineTo(x0 + (x1 - x0) * t, y);
+  }
+  ctx.stroke();
 }
 
 function drawLaneLabels(ctx: CanvasRenderingContext2D, scene: Scene, ls: Lane[], theme: Theme) {

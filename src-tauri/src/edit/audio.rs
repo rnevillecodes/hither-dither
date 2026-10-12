@@ -33,6 +33,8 @@ pub struct Audio {
     /// Untrimmed position at which each segment starts.
     starts: Vec<u64>,
     identity: bool,
+    /// The output as verbatim copies and changed runs (see [`spans`](Self::spans)).
+    spans: Vec<Span>,
 }
 
 impl Audio {
@@ -50,12 +52,15 @@ impl Audio {
     pub fn with_edits(source: Arc<SampleSource>, edits: Arc<EditList>) -> Self {
         let mut info = source.info().clone();
         info.frames = edits.frames();
+        let starts = edits.starts();
+        let spans = compute_spans(&edits, &starts);
         Self {
             identity: edits.is_identity(),
-            starts: edits.starts(),
+            starts,
             source,
             edits,
             info,
+            spans,
         }
     }
 
@@ -123,57 +128,8 @@ impl Audio {
     }
 
     /// The output as runs of verbatim source copies and changed frames, in order.
-    pub fn spans(&self) -> Vec<Span> {
-        let edits = &self.edits;
-        let trim = edits.trim();
-        // Untrimmed ranges whose frames are computed, not copied.
-        let mut changed: Vec<(u64, u64)> = Vec::new();
-        for (seg, &s) in edits.segments().iter().zip(&self.starts) {
-            if !seg.is_plain() {
-                changed.push((s, s + seg.len));
-            }
-            if let Some(x) = seg.xfade.filter(|x| x.len > 0) {
-                changed.push((s - x.len / 2, s + x.len / 2));
-            }
-        }
-        let (fi, fo) = (edits.fade_in().len, edits.fade_out().len);
-        if fi > 0 {
-            changed.push((trim.start, trim.start + fi));
-        }
-        if fo > 0 {
-            changed.push((trim.end - fo, trim.end));
-        }
-        // Cut the trim window at every segment start and changed-range bound.
-        let mut cuts: Vec<u64> = self.starts.clone();
-        cuts.extend(changed.iter().flat_map(|&(a, b)| [a, b]));
-        cuts.extend([trim.start, trim.end]);
-        cuts.retain(|c| (trim.start..=trim.end).contains(c));
-        cuts.sort_unstable();
-        cuts.dedup();
-
-        let mut out: Vec<Span> = Vec::new();
-        for w in cuts.windows(2) {
-            let (p, q) = (w[0], w[1]);
-            let i = self.starts.partition_point(|&s| s <= p) - 1;
-            let seg = &edits.segments()[i];
-            let copied = seg.is_plain() && !changed.iter().any(|&(a, b)| a <= p && q <= b);
-            let span = Span {
-                start: p - trim.start,
-                len: q - p,
-                src: copied.then(|| seg.src_start + (p - self.starts[i])),
-            };
-            let joins_last = out.last().is_some_and(|last| match (last.src, span.src) {
-                (None, None) => true,
-                (Some(a), Some(b)) => a + last.len == b,
-                _ => false,
-            });
-            if joins_last {
-                out.last_mut().unwrap().len += span.len;
-            } else {
-                out.push(span);
-            }
-        }
-        out
+    pub fn spans(&self) -> &[Span] {
+        &self.spans
     }
 
     /// Source frames `[start, start + n)` in `units`, replacing `out` (and `fs`).
@@ -323,6 +279,59 @@ impl Audio {
             apply(frames - fade_out.len, frames, Dir::Out, fade_out.curve);
         }
     }
+}
+
+/// Split the output of `edits` into verbatim source copies and changed runs.
+fn compute_spans(edits: &EditList, starts: &[u64]) -> Vec<Span> {
+    let trim = edits.trim();
+    // Untrimmed ranges whose frames are computed, not copied.
+    let mut changed: Vec<(u64, u64)> = Vec::new();
+    for (seg, &s) in edits.segments().iter().zip(starts) {
+        if !seg.is_plain() {
+            changed.push((s, s + seg.len));
+        }
+        if let Some(x) = seg.xfade.filter(|x| x.len > 0) {
+            changed.push((s - x.len / 2, s + x.len / 2));
+        }
+    }
+    let (fi, fo) = (edits.fade_in().len, edits.fade_out().len);
+    if fi > 0 {
+        changed.push((trim.start, trim.start + fi));
+    }
+    if fo > 0 {
+        changed.push((trim.end - fo, trim.end));
+    }
+    // Cut the trim window at every segment start and changed-range bound.
+    let mut cuts: Vec<u64> = starts.to_vec();
+    cuts.extend(changed.iter().flat_map(|&(a, b)| [a, b]));
+    cuts.extend([trim.start, trim.end]);
+    cuts.retain(|c| (trim.start..=trim.end).contains(c));
+    cuts.sort_unstable();
+    cuts.dedup();
+
+    let mut out: Vec<Span> = Vec::new();
+    for w in cuts.windows(2) {
+        let (p, q) = (w[0], w[1]);
+        let i = starts.partition_point(|&s| s <= p) - 1;
+        let seg = &edits.segments()[i];
+        let copied = seg.is_plain() && !changed.iter().any(|&(a, b)| a <= p && q <= b);
+        let span = Span {
+            start: p - trim.start,
+            len: q - p,
+            src: copied.then(|| seg.src_start + (p - starts[i])),
+        };
+        let joins_last = out.last().is_some_and(|last| match (last.src, span.src) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a + last.len == b,
+            _ => false,
+        });
+        if joins_last {
+            out.last_mut().unwrap().len += span.len;
+        } else {
+            out.push(span);
+        }
+    }
+    out
 }
 
 #[cfg(test)]

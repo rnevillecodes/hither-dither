@@ -181,12 +181,18 @@
   <main class:with-details={showDetails}>
     <section class="wave-area">
       {#if active && app.meta}
-        <!-- Remount when the audio changes, so cached peaks are dropped. -->
-        {#key `${active.id}:${active.revision}`}
-          <Waveform fileId={active.id} meta={app.meta} playhead={transport.playhead} onseek={seek} />
+        <!-- Remount per file; edits refetch peaks in place (keyed by peaksVersion). -->
+        {#key active.id}
+          <Waveform
+            fileId={active.id}
+            meta={app.meta}
+            peaksVersion={active.peaksVersion}
+            playhead={transport.playhead}
+            onseek={seek}
+          />
         {/key}
         {#if active.editing && active.progress.visible}
-          <ProgressOverlay name={active.name} fraction={active.progress.fraction} verb="Updating" />
+          <ProgressOverlay name={active.name} fraction={active.progress.fraction} verb="Saving" />
         {/if}
       {:else if active}
         <!-- Still loading. The progress box appears once the load has lasted a moment. -->
@@ -212,6 +218,7 @@
             labels={app.meta.channel_labels}
             scope={app.selection ? "Selection" : "Whole file"}
             pending={app.statsPending}
+            updating={!app.selection && app.analysing}
           />
         {:else}
           <p class="dim">File details and level statistics appear here.</p>

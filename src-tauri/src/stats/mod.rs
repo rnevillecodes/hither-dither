@@ -4,7 +4,7 @@ mod clipping;
 mod levels;
 mod loudness;
 
-pub use clipping::{ClipRun, MAX_STORED_RUNS, MIN_RUN};
+pub use clipping::{ClipRun, MAX_STORED_RUNS, MIN_RUN, map_runs};
 pub use levels::Levels;
 pub use loudness::Loudness;
 

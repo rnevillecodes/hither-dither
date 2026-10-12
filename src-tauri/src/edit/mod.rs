@@ -89,6 +89,23 @@ impl Segment {
         self.ramps.iter().map(|r| r.at(u)).product()
     }
 
+    /// Bounds `(lo, hi)` of [`gain`](Self::gain) over local frames `[l0, l1)`. Each ramp
+    /// is monotonic, so its extremes are at the ends, and the product's bounds are the
+    /// products of the ramps' bounds (gains are never negative).
+    pub fn gain_range(&self, l0: u64, l1: u64) -> (f64, f64) {
+        if self.silent {
+            return (0.0, 0.0);
+        }
+        let (u0, u1) = (
+            l0 as f64 / self.len as f64,
+            (l1 - 1) as f64 / self.len as f64,
+        );
+        self.ramps.iter().fold((1.0, 1.0), |(lo, hi), r| {
+            let (a, b) = (r.at(u0), r.at(u1));
+            (lo * a.min(b), hi * a.max(b))
+        })
+    }
+
     /// Split before local frame `at` (0 < at < len); each half keeps its share of the
     /// ramps, and the crossfade stays with the left half (it belongs to the start).
     fn split(&self, at: u64) -> (Segment, Segment) {
@@ -136,6 +153,15 @@ pub struct JoinInfo {
     pub xfade: Crossfade,
     /// Longest crossfade the audio on both sides allows.
     pub max_len: u64,
+}
+
+/// Where a source frame ended up in the edited audio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Located {
+    /// Heard at this output frame.
+    At(u64),
+    /// Not heard; the audio after it starts at `next`, if any is heard.
+    Removed { next: Option<u64> },
 }
 
 /// The edited audio, as segments of a source with `source_frames` frames.
@@ -361,6 +387,81 @@ impl EditList {
                 })
             })
             .collect()
+    }
+
+    /// Gain of the clip fades at output frame `f`.
+    pub fn clip_gain(&self, f: u64) -> f64 {
+        let (fi, fo, frames) = (self.fade_in, self.fade_out, self.frames());
+        let mut g = 1.0;
+        if f < fi.len {
+            g *= fi.curve.gain(Dir::In, f as f64 / fi.len as f64);
+        }
+        if fo.len > 0 && f >= frames - fo.len {
+            let from = frames - fo.len;
+            g *= fo.curve.gain(Dir::Out, (f - from) as f64 / fo.len as f64);
+        }
+        g
+    }
+
+    /// Bounds `(lo, hi)` of [`clip_gain`](Self::clip_gain) over output frames `[o0, o1)`.
+    /// The gain rises through the fade-in, holds, then falls through the fade-out, so the
+    /// least is at an end and the most at an end or where a fade meets the middle.
+    pub fn clip_gain_range(&self, o0: u64, o1: u64) -> (f64, f64) {
+        let last = o1 - 1;
+        let (a, b) = (self.clip_gain(o0), self.clip_gain(last));
+        let lo = a.min(b);
+        let peak_from = self.fade_in.len.clamp(o0, last);
+        let peak_to = (self.frames() - self.fade_out.len)
+            .saturating_sub(1)
+            .clamp(o0, last);
+        let hi = a
+            .max(b)
+            .max(self.clip_gain(peak_from))
+            .max(self.clip_gain(peak_to));
+        (lo, hi)
+    }
+
+    // --- Position mapping ---------------------------------------------------------------
+
+    /// Source frame heard at output frame `out` (`None` past the end). Inside a crossfade
+    /// this is the frame of the segment that owns the position, not the blended neighbour.
+    pub fn source_at(&self, out: u64) -> Option<u64> {
+        if out >= self.frames() {
+            return None;
+        }
+        let u = self.trim.start + out;
+        let starts = self.starts();
+        let i = starts.partition_point(|&s| s <= u) - 1;
+        Some(self.segments[i].src_start + (u - starts[i]))
+    }
+
+    /// Where source frame `src` is heard. A source frame appears at most once, so this is
+    /// unambiguous; if it was removed, `next` is where the audio that followed it now
+    /// starts (the join that replaced it), or `None` if nothing after it is heard.
+    pub fn output_of(&self, src: u64) -> Located {
+        let starts = self.starts();
+        // Segments are in source order, so the first one ending past `src` holds it or,
+        // if it starts after `src`, is the audio that followed it.
+        let Some(i) = self.segments.iter().position(|s| s.src_start + s.len > src) else {
+            return Located::Removed { next: None };
+        };
+        let seg = &self.segments[i];
+        let (u, kept) = if seg.src_start <= src {
+            (starts[i] + (src - seg.src_start), true)
+        } else {
+            (starts[i], false)
+        };
+        let next = if u < self.trim.start {
+            Some(0)
+        } else if u < self.trim.end {
+            Some(u - self.trim.start)
+        } else {
+            None
+        };
+        match next {
+            Some(out) if kept && u >= self.trim.start => Located::At(out),
+            next => Located::Removed { next },
+        }
     }
 
     // --- Internals ----------------------------------------------------------------------
@@ -660,6 +761,58 @@ mod tests {
         assert_eq!(list.fade_in().len, 50);
         let list = list.set_trim(170, 200);
         assert_eq!(list.fade_in().len, 30);
+    }
+
+    #[test]
+    fn delete_before_the_playhead_keeps_the_audio() {
+        // Playing at 30.0 s (1 kHz frames) when 10.0–20.0 s is deleted: same audio, at 20.0 s.
+        let old = EditList::identity(60_000);
+        let new = old.delete(10_000, 20_000, 0).unwrap();
+        let src = old.source_at(30_000).unwrap();
+        assert_eq!(new.output_of(src), Located::At(20_000));
+        assert_eq!(new.source_at(20_000), Some(src));
+    }
+
+    #[test]
+    fn deleted_audio_continues_from_the_join() {
+        let old = EditList::identity(60_000);
+        let new = old.delete(10_000, 20_000, 400).unwrap();
+        let src = old.source_at(15_000).unwrap();
+        assert_eq!(new.output_of(src), Located::Removed { next: Some(10_000) });
+        // Inside the crossfade each side maps by its own frames.
+        assert_eq!(new.source_at(9_999), Some(9_999));
+        assert_eq!(new.source_at(10_000), Some(20_000));
+        assert_eq!(new.output_of(9_900), Located::At(9_900));
+        assert_eq!(new.output_of(20_100), Located::At(10_100));
+    }
+
+    #[test]
+    fn mapping_through_trims_and_crops() {
+        let list = EditList::identity(100).set_trim(10, 80);
+        assert_eq!(list.source_at(0), Some(10));
+        assert_eq!(list.source_at(70), None);
+        assert_eq!(list.output_of(10), Located::At(0));
+        // Before the trim window: the audio after it starts at 0.
+        assert_eq!(list.output_of(5), Located::Removed { next: Some(0) });
+        // An end trim before a position: nothing after it is heard.
+        assert_eq!(list.output_of(85), Located::Removed { next: None });
+        let cropped = EditList::identity(100).crop(20, 60).unwrap();
+        assert_eq!(cropped.output_of(10), Located::Removed { next: Some(0) });
+        assert_eq!(cropped.output_of(30), Located::At(10));
+        assert_eq!(cropped.output_of(60), Located::Removed { next: None });
+        // A delete followed by a trim that starts after the join.
+        let list = EditList::identity(100)
+            .delete(40, 50, 0)
+            .unwrap()
+            .set_trim(45, 90);
+        assert_eq!(list.output_of(45), Located::Removed { next: Some(0) });
+        assert_eq!(list.output_of(60), Located::At(5));
+        for out in 0..list.frames() {
+            assert_eq!(
+                list.output_of(list.source_at(out).unwrap()),
+                Located::At(out)
+            );
+        }
     }
 
     #[test]

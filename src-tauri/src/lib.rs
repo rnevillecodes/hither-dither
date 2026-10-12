@@ -34,6 +34,9 @@ pub fn run() {
             commands::set_clip,
             commands::set_crossfade,
             commands::get_clip,
+            commands::wait_analysis,
+            commands::preview_edits,
+            commands::set_play_range,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

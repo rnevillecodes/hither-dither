@@ -7,7 +7,7 @@ mod writer;
 
 pub use parser::{WavInfo, parse_header};
 pub use source::SampleSource;
-pub use writer::{WriteError, check_size, write_wav};
+pub use writer::{WriteError, check_size, write_wav, write_wav_with_progress};
 
 use serde::Serialize;
 

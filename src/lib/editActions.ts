@@ -3,13 +3,14 @@ import { message, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
 import { PROGRESS_DELAY_MS, setSelection } from "./app.svelte";
 import { askFadeCurve, curveDialog } from "./curveDialog.svelte";
-import { type EditKind, afterEdit, canApply } from "./editRules";
+import { type EditKind, afterEdit, canApply, remapFrame } from "./editRules";
 import { notify } from "./notices.svelte";
 import { samePath } from "./tabOrder";
-import { type Tab, activeTab, findTab, overviewCache, tabs } from "./tabs.svelte";
-import { haltPlayback, transport } from "./transport.svelte";
+import { type Tab, activeTab, findTab, tabs } from "./tabs.svelte";
+import { prefetchPeaks } from "./waveform/prefetch";
+import { haltPlayback, playback, transport } from "./transport.svelte";
 import { view } from "./view.svelte";
-import { clamp } from "./viewport";
+import { clamp, fit } from "./viewport";
 
 const TITLES: Record<EditKind, string> = {
   crop: "Could not crop",
@@ -22,7 +23,7 @@ const TITLES: Record<EditKind, string> = {
   redo: "Could not redo",
 };
 
-/** The active tab, if it can be edited now (loaded, not busy, no dialog open). */
+/** The active tab, if it can be edited now (loaded, not saving, no dialog open). */
 function editableTab(): Tab | null {
   const tab = activeTab();
   return tab && tab.status === "ready" && tab.meta && !tab.editing && !curveDialog.open ? tab : null;
@@ -45,71 +46,97 @@ export function canRedo(): boolean {
 /** Apply `op` to the active tab's selection; `bend` shapes fades (0 = linear). */
 export function applyEdit(op: api.EditOp, bend = 0): Promise<void> {
   const tab = editableTab();
-  const sel = tab?.selection;
-  if (!tab || !sel || !canApply(op, sel, tab.meta!.frames)) return Promise.resolve();
-  return run(tab, op, sel, (p) => api.applyEdit(tab.id, op, sel.start, sel.end, bend, p));
+  if (!tab || !canApply(op, tab.selection, tab.meta!.frames)) return Promise.resolve();
+  return run(tab, op, (sel) =>
+    sel && canApply(op, sel, tab.meta!.frames) ? api.applyEdit(tab.id, op, sel.start, sel.end, bend) : null,
+  );
 }
 
-/** Edit › Fade In / Fade Out: ask for the curve, then fade the selection with it. */
+/** Edit › Fade In / Fade Out: ask for the curve (heard while playing), then fade with it. */
 export async function fadeWithCurve(op: "fadeIn" | "fadeOut"): Promise<void> {
-  if (!canEdit(op)) return;
-  const bend = await askFadeCurve(op === "fadeIn" ? "in" : "out");
-  if (bend !== null) await applyEdit(op, bend);
+  const tab = editableTab();
+  const sel = tab?.selection;
+  if (!tab || !sel || !canEdit(op)) return;
+  const bend = await askFadeCurve(op === "fadeIn" ? "in" : "out", tab.id, sel);
+  try {
+    if (bend !== null) await applyEdit(op, bend);
+  } finally {
+    // The applied fade was drawn until now; the edited peaks show it from here.
+    curveDialog.applied = null;
+  }
 }
 
 /** Commit a trim / end-fade handle drag on the active tab. */
 export function setClip(clip: api.ClipInfo): Promise<void> {
   const tab = editableTab();
   if (!tab) return Promise.resolve();
-  return run(tab, "clip", tab.selection, (p) => api.setClip(tab.id, clip, p));
+  return run(tab, "clip", () => api.setClip(tab.id, clip));
 }
 
 /** Commit a crossfade handle drag on the active tab. */
 export function setCrossfade(join: number, xfade: api.FadeSetting): Promise<void> {
   const tab = editableTab();
   if (!tab) return Promise.resolve();
-  return run(tab, "clip", tab.selection, (p) => api.setCrossfade(tab.id, join, xfade, p));
+  return run(tab, "clip", () => api.setCrossfade(tab.id, join, xfade));
 }
 
 export function undo(): Promise<void> {
   const tab = editableTab();
   if (!tab?.canUndo) return Promise.resolve();
-  return run(tab, "undo", tab.selection, (p) => api.undoEdit(tab.id, p));
+  return run(tab, "undo", () => (tab.canUndo ? api.undoEdit(tab.id) : null));
 }
 
 export function redo(): Promise<void> {
   const tab = editableTab();
   if (!tab?.canRedo) return Promise.resolve();
-  return run(tab, "redo", tab.selection, (p) => api.redoEdit(tab.id, p));
+  return run(tab, "redo", () => (tab.canRedo ? api.redoEdit(tab.id) : null));
 }
 
-/** Run a backend edit on `tab`, showing progress once it has lasted a moment. */
-async function run(
+/** Peaks versions, increasing across tabs, so a newer tile always wins over an older one. */
+let lastPeaksVersion = 0;
+function nextPeaksVersion(): number {
+  return ++lastPeaksVersion;
+}
+
+/** Changes per tab, chained so each starts from the outcome of the one before. */
+const queues = new Map<number, Promise<void>>();
+
+function enqueue(tab: Tab, job: () => Promise<void>): Promise<void> {
+  const next = (queues.get(tab.id) ?? Promise.resolve()).then(job);
+  queues.set(tab.id, next);
+  void next.finally(() => {
+    if (queues.get(tab.id) === next) queues.delete(tab.id);
+  });
+  return next;
+}
+
+/**
+ * Run a change on `tab` and show its result straight away. `call` gets the selection as
+ * it is when the change runs (after any queued before it), and returns null if the change
+ * no longer applies. The edited audio is analysed in the background (see `watchAnalysis`).
+ */
+function run(
   tab: Tab,
   kind: EditKind,
-  selection: Tab["selection"],
-  call: (onProgress: (p: api.LoadProgress) => void) => Promise<api.EditOutcome>,
+  call: (selection: Tab["selection"]) => Promise<api.EditOutcome> | null,
 ): Promise<void> {
-  if (tabs.activeId === tab.id) haltPlayback();
-  tab.editing = true;
-  tab.progress = { fraction: 0, visible: false };
-  const timer = setTimeout(() => (tab.progress.visible = true), PROGRESS_DELAY_MS);
-  const oldFrames = tab.meta!.frames;
-  try {
-    const outcome = await call((p) => {
-      tab.progress.fraction = p.totalFrames ? p.doneFrames / p.totalFrames : 1;
-    });
-    if (!findTab(tab.id)) return;
-    const after = afterEdit(kind, selection, playheadOf(tab), oldFrames, outcome.metadata.frames);
-    await showOutcome(tab, outcome, after);
-  } catch (e) {
-    // Closing the tab cancels the edit; there is nothing to report.
-    if (findTab(tab.id)) notify("error", TITLES[kind], String(e));
-  } finally {
-    clearTimeout(timer);
-    tab.editing = false;
-    tab.progress.visible = false;
-  }
+  return enqueue(tab, async () => {
+    if (!findTab(tab.id) || tab.editing || !tab.meta) return;
+    const selection = tab.selection;
+    const oldFrames = tab.meta.frames;
+    const oldClip = tab.clip;
+    try {
+      const pending = call(selection);
+      if (!pending) return;
+      const outcome = await pending;
+      if (!findTab(tab.id)) return;
+      const after = afterEdit(kind, selection, playheadOf(tab), oldFrames, outcome.metadata.frames);
+      await showOutcome(tab, kind, selection, oldClip, outcome, after);
+    } catch (e) {
+      // Closing the tab cancels the edit; there is nothing to report.
+      if (findTab(tab.id)) notify("error", TITLES[kind], String(e));
+    }
+  });
 }
 
 /** The tab's playhead: live in `transport` while active, saved on the tab otherwise. */
@@ -117,45 +144,97 @@ function playheadOf(tab: Tab): number {
   return tabs.activeId === tab.id ? transport.playhead : tab.playhead;
 }
 
-/** Show the audio `outcome` describes in `tab`: metadata, stats, clip markers and view. */
+/** Show the audio `outcome` describes in `tab`: metadata, clip markers, view and playback. */
 async function showOutcome(
   tab: Tab,
+  kind: EditKind,
+  selection: Tab["selection"],
+  oldClip: api.ClipInfo | null,
   outcome: api.EditOutcome,
   after: { selection: Tab["selection"]; playhead: number; fit: boolean },
 ): Promise<void> {
-  const [whole, clipRuns] = await Promise.all([api.computeStats(tab.id, null), api.getClipRuns(tab.id)]);
-  if (!findTab(tab.id)) return;
   const frames = outcome.metadata.frames;
-  tab.meta = outcome.metadata;
-  tab.wholeStats = whole;
-  tab.clipRuns = clipRuns;
-  tab.clip = outcome.clip;
-  setEditState(tab, outcome.edit_state);
-
   const active = tabs.activeId === tab.id;
   const vp = active ? view.vp : tab.vp;
-  const nextVp = after.fit || !vp ? null : clamp({ ...vp, totalFrames: frames });
+  const nextVp = !vp ? null : after.fit ? fit(frames, vp.width) : clamp({ ...vp, totalFrames: frames });
+  const version = nextPeaksVersion();
+  // Markers in changed audio go at once; exact ones follow with the analysis. The waveform
+  // gets its tile for the result first, so it changes over in one go.
+  const [clipRuns] = await Promise.all([
+    api.getClipRuns(tab.id).catch(() => null),
+    active ? prefetchPeaks(tab.id, nextVp, version) : null,
+  ]);
+  if (!findTab(tab.id)) return;
+  tab.meta = outcome.metadata;
+  if (clipRuns) tab.clipRuns = clipRuns;
+  tab.clip = outcome.clip;
+  setEditState(tab, outcome.edit_state);
+  tab.revision = outcome.edit_state.revision;
+  tab.peaksVersion = version;
+
   if (active) {
     view.vp = nextVp;
-    transport.playhead = after.playhead;
-    transport.playStart = after.playhead;
+    if (transport.playing) {
+      // The playhead follows playback, which follows the edit. Stop returns to the same
+      // audio as before, or the join that replaced it.
+      transport.playStart = remapFrame(kind, selection, transport.playStart, frames, oldClip, outcome.clip);
+      const changed = after.selection?.start !== selection?.start || after.selection?.end !== selection?.end;
+      if (playback.fromSelection && changed) {
+        // The selection being played was cleared or changed: play what is selected now.
+        const range = after.selection ?? { start: 0, end: frames };
+        playback.fromSelection = !!after.selection;
+        void api.setPlayRange(range.start, range.end).catch(() => {});
+      }
+    } else {
+      transport.playhead = after.playhead;
+      transport.playStart = after.playhead;
+    }
   } else {
     tab.vp = nextVp;
     tab.playhead = after.playhead;
     tab.playStart = after.playhead;
   }
-  overviewCache.delete(tab.id);
-  // Remounts the waveform, which picks up the viewport set above.
-  tab.revision = outcome.edit_state.revision;
 
   if (active) {
     void setSelection(after.selection);
   } else {
     // Selection stats are fetched when the tab is next activated.
     tab.selection = after.selection;
-    tab.stats = whole;
+    tab.stats = tab.wholeStats;
     tab.statsPending = !!after.selection;
   }
+  watchAnalysis(tab, outcome.edit_state.revision);
+}
+
+/**
+ * Mark `tab`'s whole-file stats as updating until revision `revision` has been analysed,
+ * then show the exact stats, clip markers and peaks (unless a newer change came first).
+ */
+function watchAnalysis(tab: Tab, revision: number) {
+  tab.analysing = true;
+  void api
+    .waitAnalysis(tab.id, revision)
+    .then(async (done) => {
+      if (!done) return;
+      const [whole, clipRuns] = await Promise.all([api.computeStats(tab.id, null), api.getClipRuns(tab.id)]);
+      if (findTab(tab.id) && tab.revision === revision && whole) await showAnalysis(tab, whole, clipRuns);
+    })
+    .catch(() => {});
+}
+
+/** Show exact whole-file results for `tab`'s current audio. */
+async function showAnalysis(tab: Tab, whole: api.Stats, clipRuns: api.ClipRuns) {
+  const version = nextPeaksVersion();
+  if (tabs.activeId === tab.id) await prefetchPeaks(tab.id, view.vp, version);
+  // A newer change may have been shown meanwhile.
+  if (!findTab(tab.id) || tab.peaksVersion >= version) return;
+  tab.wholeStats = whole;
+  tab.clipRuns = clipRuns;
+  tab.analysing = false;
+  tab.peaksVersion = version;
+  if (!tab.selection) tab.stats = whole;
+  // Fetching the whole-file stats cancels a selection request still running: ask again.
+  else if (tab.statsPending && tabs.activeId === tab.id) void setSelection(tab.selection);
 }
 
 function setEditState(tab: Tab, state: api.EditState) {
@@ -235,25 +314,40 @@ export async function confirmClose(tab: Tab): Promise<boolean> {
   return choice === "Don't Save";
 }
 
-/** Write `tab` to `path` (its own file when null). Resolves whether it was saved. */
+/**
+ * Write `tab` to `path` (its own file when null), rendering its edits. Shows progress once
+ * it has lasted a moment, and keeps the tab from being edited meanwhile. Resolves whether
+ * it was saved.
+ */
 async function saveTab(tab: Tab, path: string | null): Promise<boolean> {
   if (tab.editing) return false;
-  if (tabs.activeId === tab.id) haltPlayback();
   tab.editing = true;
+  // Let changes already on their way land first.
+  await queues.get(tab.id);
+  if (tabs.activeId === tab.id) haltPlayback();
+  tab.progress = { fraction: 0, visible: false };
+  const timer = setTimeout(() => (tab.progress.visible = true), PROGRESS_DELAY_MS);
   try {
-    const outcome = await api.saveFile(tab.id, path);
+    const outcome = await api.saveFile(tab.id, path, (p) => {
+      tab.progress.fraction = p.totalFrames ? p.doneFrames / p.totalFrames : 1;
+    });
     if (!findTab(tab.id)) return true;
-    // Same audio and analysis, so the waveform and stats stay as they are.
+    // Same audio, now analysed exactly: refresh anything drawn from estimates.
     tab.meta = outcome.metadata;
     tab.path = outcome.metadata.path;
     tab.name = outcome.metadata.name;
     tab.clip = outcome.clip;
+    tab.revision = outcome.edit_state.revision;
     setEditState(tab, outcome.edit_state);
+    const [whole, clipRuns] = await Promise.all([api.computeStats(tab.id, null), api.getClipRuns(tab.id)]);
+    if (findTab(tab.id) && whole) await showAnalysis(tab, whole, clipRuns);
     return true;
   } catch (e) {
     if (findTab(tab.id)) notify("error", "Could not save", String(e));
     return false;
   } finally {
+    clearTimeout(timer);
     tab.editing = false;
+    tab.progress.visible = false;
   }
 }

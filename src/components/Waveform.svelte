@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { type ClipInfo, type Metadata, type PeakTile, getPeaks } from "../lib/api";
+  import { type ClipInfo, type Metadata, type PeakTile, type Preview, getPeaks } from "../lib/api";
   import { app, setSelection } from "../lib/app.svelte";
   import {
     HANDLE_NAMES,
@@ -11,7 +11,9 @@
     hitTest,
     resetBend,
   } from "../lib/clipHandles";
+  import { curveDialog } from "../lib/curveDialog.svelte";
   import { setClip, setCrossfade } from "../lib/editActions";
+  import { PreviewSender } from "../lib/preview";
   import { formatSeconds } from "../lib/format";
   import { activeTab, overviewCache } from "../lib/tabs.svelte";
   import { DRAG_THRESHOLD_PX, between, extend } from "../lib/selection";
@@ -27,6 +29,7 @@
   } from "../lib/viewport";
   import { recordDraw } from "../lib/perf";
   import { PeakLoader } from "../lib/waveform/peakLoader";
+  import { setPrefetch } from "../lib/waveform/prefetch";
   import { drawOverview, drawRuler, drawWaveform } from "../lib/waveform/renderer";
   import { type Theme, readTheme } from "../lib/waveform/theme";
 
@@ -34,11 +37,13 @@
     /** Backend id of the file shown. The component is remounted when it changes. */
     fileId: number;
     meta: Metadata;
+    /** Increases when fetched peaks are stale (the audio changed, or was analysed). */
+    peaksVersion: number;
     /** Interpolated playhead frame, or null when there is none to show. */
     playhead: number | null;
     onseek: (frame: number) => void;
   }
-  let { fileId, meta, playhead, onseek }: Props = $props();
+  let { fileId, meta, peaksVersion, playhead, onseek }: Props = $props();
 
   let root: HTMLDivElement;
   let waveArea: HTMLDivElement;
@@ -56,6 +61,9 @@
   // The parent remounts this component when the file changes, so `fileId` is fixed.
   // svelte-ignore state_referenced_locally
   const loader = new PeakLoader(fileId, () => invalidate());
+  // svelte-ignore state_referenced_locally
+  let shownVersion = peaksVersion;
+  loader.setVersion(shownVersion);
 
   /** Coalesce redraws into one per animation frame. */
   function invalidate() {
@@ -80,7 +88,9 @@
       playhead,
       clip: app.clip,
       preview: clipDrag?.preview ?? null,
-      label: clipDrag ? { x: clipDrag.px, y: clipDrag.py, text: dragLabel(clipDrag) } : null,
+      label:
+        clipDrag && !clipDrag.released ? { x: clipDrag.px, y: clipDrag.py, text: dragLabel(clipDrag) } : null,
+      rangeFade: curveDialog.shown,
     };
     drawWaveform(waveCanvas.getContext("2d")!, scene, theme);
     drawRuler(rulerCanvas.getContext("2d")!, vp, dpr, meta.sample_rate, theme, playhead);
@@ -106,8 +116,9 @@
   /** Fetch the whole-file overview at the strip's width, reusing the tab's cached one. */
   async function fetchOverview() {
     const columns = Math.max(1, Math.min(16_384, overviewCanvas.width));
+    const version = peaksVersion;
     const cached = overviewCache.get(fileId);
-    if (cached && cached.columns === columns) {
+    if (cached && cached.columns === columns && cached.version === version) {
       overviewTile = cached.tile;
       invalidate();
       return;
@@ -118,13 +129,21 @@
       const tile = await getPeaks(fileId, 0, meta.frames, columns, meta.frames);
       if (token !== overviewToken || destroyed) return;
       overviewTile = tile;
-      overviewCache.set(fileId, { columns, tile });
+      overviewCache.set(fileId, { columns, version, tile });
       invalidate();
     } catch {
       // The file was closed meanwhile.
     } finally {
       if (token === overviewToken) overviewLoading = false;
     }
+  }
+
+  /** Fetch the overview an edit will need (`frames` long, at `version`) into the cache. */
+  async function prefetchOverview(frames: number, version: number) {
+    const columns = Math.max(1, Math.min(16_384, overviewCanvas.width));
+    const tile = await getPeaks(fileId, 0, frames, columns, frames);
+    const cached = overviewCache.get(fileId);
+    if (!destroyed && (!cached || cached.version <= version)) overviewCache.set(fileId, { columns, version, tile });
   }
 
   function layout() {
@@ -149,6 +168,16 @@
     void app.clipRuns;
     void app.clip;
     void playhead;
+    void curveDialog.shown;
+    invalidate();
+  });
+
+  // After an edit, fetch new peaks and overview, drawing the old ones until they arrive.
+  $effect(() => {
+    if (peaksVersion === shownVersion) return;
+    shownVersion = peaksVersion;
+    loader.setVersion(peaksVersion);
+    if (overviewCanvas) void fetchOverview();
     invalidate();
   });
 
@@ -160,8 +189,13 @@
     // Wheel listeners must be non-passive to prevent page scrolling.
     root.addEventListener("wheel", onWheel, { passive: false });
     layout();
+    // Edits fetch the tile for their result before showing it (see prefetch.ts).
+    setPrefetch(fileId, async (vp, version) => {
+      await Promise.all([loader.prefetch(vp, dpr, version), prefetchOverview(vp.totalFrames, version)]);
+    });
     return () => {
       destroyed = true;
+      setPrefetch(fileId, null);
       ro.disconnect();
       root.removeEventListener("wheel", onWheel);
       window.removeEventListener("keydown", onClipDragKey, true);
@@ -201,8 +235,19 @@
     /** Pointer, for the label (CSS px). */
     px: number;
     py: number;
+    /** Let go: the preview stays drawn until the change it commits is shown. */
+    released?: boolean;
   }
   let clipDrag: ClipDrag | null = null;
+  /** Plays the dragged setting while the file is playing. */
+  let dragSender: PreviewSender | null = null;
+
+  /** What dragging `handle` to `preview` sounds like. */
+  function previewOf(handle: Handle, preview: ClipInfo): Preview {
+    if (handle.join === undefined) return { kind: "clip", clip: preview };
+    const j = preview.joins[handle.join];
+    return { kind: "crossfade", join: j.index, xfade: { len: j.len, bend: j.bend } };
+  }
 
   function localY(e: { clientY: number }) {
     return e.clientY - waveCanvas.getBoundingClientRect().top;
@@ -255,19 +300,21 @@
     waveCanvas.setPointerCapture(e.pointerId);
     const x = localX(e, waveCanvas);
     clipDrag = { origin: app.clip!, handle, x0: x, preview: app.clip!, px: x, py: localY(e) };
+    dragSender = new PreviewSender(fileId);
     window.addEventListener("keydown", onClipDragKey, true);
     invalidate();
   }
 
   function moveClipDrag(e: PointerEvent) {
     const vp = view.vp;
-    if (!clipDrag || !vp) return;
+    if (!clipDrag || clipDrag.released || !vp) return;
     const x = localX(e, waveCanvas);
     const y = localY(e);
     const height = waveCanvas.getBoundingClientRect().height;
     clipDrag.preview = dragHandle(clipDrag.origin, clipDrag.handle, vp, height, clipDrag.x0, x, y);
     clipDrag.px = x;
     clipDrag.py = y;
+    dragSender?.send(previewOf(clipDrag.handle, clipDrag.preview));
     invalidate();
   }
 
@@ -277,15 +324,45 @@
     invalidate();
   }
 
-  /** Send the change `preview` makes to `origin`, if any (one undo step). */
-  function commitClip(origin: ClipInfo, handle: Handle, preview: ClipInfo) {
+  /**
+   * Send the change `preview` makes to `origin`, if any (one undo step). Resolves once it
+   * is shown; null if nothing changed.
+   */
+  function commitClip(origin: ClipInfo, handle: Handle, preview: ClipInfo): Promise<void> | null {
     if (handle.join !== undefined) {
       const was = origin.joins[handle.join];
       const now = preview.joins[handle.join];
-      if (now.len !== was.len || now.bend !== was.bend) void setCrossfade(now.index, { len: now.len, bend: now.bend });
-    } else if (clipChanged(origin, preview)) {
-      void setClip(preview);
+      if (now.len === was.len && now.bend === was.bend) return null;
+      return setCrossfade(now.index, { len: now.len, bend: now.bend });
     }
+    return clipChanged(origin, preview) ? setClip(preview) : null;
+  }
+
+  /**
+   * Let go of a handle: commit once the last preview has been sent (or go back if nothing
+   * changed), keeping the preview drawn until the committed change is shown, so the view
+   * never falls back to how it was before the drag.
+   */
+  async function releaseClipDrag() {
+    const d = clipDrag;
+    if (!d) return;
+    d.released = true;
+    window.removeEventListener("keydown", onClipDragKey, true);
+    invalidate();
+    const sender = dragSender;
+    dragSender = null;
+    await sender?.settle();
+    const committed = commitClip(d.origin, d.handle, d.preview);
+    if (committed) await committed;
+    else await sender?.cancel();
+    if (clipDrag === d) endClipDrag();
+  }
+
+  /** Escape or a lost pointer: put back what was heard before the drag. */
+  function cancelClipDrag() {
+    void dragSender?.cancel();
+    dragSender = null;
+    endClipDrag();
   }
 
   function onClipDragKey(e: KeyboardEvent) {
@@ -293,12 +370,12 @@
     // Cancel the drag without also clearing the selection.
     e.preventDefault();
     e.stopPropagation();
-    endClipDrag();
+    cancelClipDrag();
   }
 
   function onLaneDoubleClick(e: MouseEvent) {
     const h = handleAt(e);
-    if (h?.kind.endsWith("Bend")) commitClip(app.clip!, h, resetBend(app.clip!, h));
+    if (h?.kind.endsWith("Bend")) void commitClip(app.clip!, h, resetBend(app.clip!, h));
   }
 
   // --- Selection and seeking on the lanes -------------------------------------------------
@@ -316,7 +393,7 @@
   }
 
   function onLanePointerMove(e: PointerEvent) {
-    if (clipDrag) return moveClipDrag(e);
+    if (clipDrag && !clipDrag.released) return moveClipDrag(e);
     if (!drag) showHover(e);
     const vp = view.vp;
     if (!drag || !vp || drag.shift) return;
@@ -332,11 +409,7 @@
   }
 
   function onLanePointerUp(e: PointerEvent) {
-    if (clipDrag) {
-      const { origin, handle, preview } = clipDrag;
-      endClipDrag();
-      return commitClip(origin, handle, preview);
-    }
+    if (clipDrag) return void releaseClipDrag();
     const vp = view.vp;
     if (!drag || !vp) return;
     const frame = frameIndexAtX(vp, localX(e, waveCanvas));
@@ -422,7 +495,7 @@
       onpointerup={onLanePointerUp}
       onpointercancel={() => {
         drag = null;
-        if (clipDrag) endClipDrag();
+        if (clipDrag) cancelClipDrag();
       }}
       ondblclick={onLaneDoubleClick}
     ></canvas>

@@ -28,9 +28,13 @@ export interface Tab {
   dirty: boolean;
   canUndo: boolean;
   canRedo: boolean;
-  /** Increases whenever the audio changes; keys the waveform and its caches. */
+  /** Backend revision of the audio shown; increases whenever the audio changes. */
   revision: number;
-  /** An edit, undo, redo or save is in progress. */
+  /** Increases whenever fetched peaks go stale (an edit, or its analysis finishing). */
+  peaksVersion: number;
+  /** The whole-file stats and clip markers are being brought up to date. */
+  analysing: boolean;
+  /** A save is in progress: the tab can't be edited until it finishes. */
   editing: boolean;
   /** The user has agreed to Save overwriting this file. */
   overwriteConfirmed: boolean;
@@ -44,7 +48,7 @@ export const tabs = $state({
 });
 
 /** Overview tiles per tab, kept outside reactive state (they hold large typed arrays). */
-export const overviewCache = new Map<number, { columns: number; tile: PeakTile }>();
+export const overviewCache = new Map<number, { columns: number; version: number; tile: PeakTile }>();
 
 let nextId = 1;
 
@@ -69,6 +73,8 @@ export function newTab(path: string): Tab {
     canUndo: false,
     canRedo: false,
     revision: 0,
+    peaksVersion: 0,
+    analysing: false,
     editing: false,
     overwriteConfirmed: false,
     clip: null,

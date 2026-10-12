@@ -38,6 +38,10 @@ export const app = {
   get statsPending() {
     return activeTab()?.statsPending ?? false;
   },
+  /** The whole-file stats and clip markers are being brought up to date after an edit. */
+  get analysing() {
+    return activeTab()?.analysing ?? false;
+  },
 };
 
 /**

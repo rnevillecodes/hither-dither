@@ -1,6 +1,6 @@
 <script lang="ts">
   import { bendFromPoint, bendPointHeight, gain } from "../lib/curve";
-  import { closeCurveDialog, curveDialog } from "../lib/curveDialog.svelte";
+  import { closeCurveDialog, curveDialog, previewCurve } from "../lib/curveDialog.svelte";
 
   // Graph size and inset (CSS px).
   const W = 160;
@@ -26,6 +26,12 @@
   const bendText = $derived(
     curveDialog.bend === 0 ? "Linear" : `${curveDialog.bend > 0 ? "+" : "−"}${Math.abs(curveDialog.bend).toFixed(2)}`,
   );
+
+  // Draw and (while playing) play the fade with each curve shown.
+  $effect(() => {
+    void curveDialog.bend;
+    if (curveDialog.open) previewCurve();
+  });
 
   // Focus the dialog's first button when it opens.
   $effect(() => {

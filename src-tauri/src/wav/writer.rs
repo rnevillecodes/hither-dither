@@ -36,6 +36,15 @@ pub fn check_size(audio: &Audio) -> Result<(), WriteError> {
 /// changed ones (edits, fades, crossfades) are rendered in the file's own units and
 /// encoded, integers rounded and clamped.
 pub fn write_wav(audio: &Audio, out: impl Write) -> Result<(), WriteError> {
+    write_wav_with_progress(audio, out, |_| {})
+}
+
+/// Like [`write_wav`], calling `progress` with the number of frames written so far.
+pub fn write_wav_with_progress(
+    audio: &Audio,
+    out: impl Write,
+    mut progress: impl FnMut(u64),
+) -> Result<(), WriteError> {
     let src = audio.source();
     let info = audio.info();
     let fmt = src.fmt_bytes();
@@ -56,7 +65,7 @@ pub fn write_wav(audio: &Audio, out: impl Write) -> Result<(), WriteError> {
     out.write_all(&(data_bytes as u32).to_le_bytes())?;
 
     let (mut rendered, mut encoded) = (Vec::new(), Vec::new());
-    for span in audio.spans() {
+    for span in audio.spans().iter().copied() {
         let mut done = 0;
         while done < span.len {
             let n = (span.len - done).min(CHUNK_FRAMES);
@@ -70,6 +79,7 @@ pub fn write_wav(audio: &Audio, out: impl Write) -> Result<(), WriteError> {
                 }
             }
             done += n;
+            progress(span.start + done);
         }
     }
     if data_bytes % 2 == 1 {

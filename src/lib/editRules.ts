@@ -1,5 +1,5 @@
 // Pure rules for the selection, playhead and view after an edit, undo or redo.
-import type { EditOp } from "./api";
+import type { ClipInfo, EditOp } from "./api";
 import type { Selection } from "./selection";
 
 /** An edit, undo/redo, or a clip-handle change (trim, end fades, crossfade). */
@@ -52,4 +52,30 @@ export function canApply(op: EditOp, selection: Selection | null, frames: number
   // Cropping to the whole file changes nothing; deleting it would leave no audio.
   if ((op === "crop" || op === "delete") && whole) return false;
   return true;
+}
+
+/**
+ * Where frame `frame` of the audio before `kind` is afterwards: the same audio if it is
+ * still there, else the join that replaced it (or the nearest end). `selection` is the
+ * range the edit acted on; `oldClip`/`newClip` locate trim changes.
+ */
+export function remapFrame(
+  kind: EditKind,
+  selection: Selection | null,
+  frame: number,
+  newFrames: number,
+  oldClip: ClipInfo | null,
+  newClip: ClipInfo | null,
+): number {
+  let f = frame;
+  if ((kind === "crop" || kind === "delete") && selection) {
+    const { start, end } = selection;
+    if (kind === "crop") f = f < start ? 0 : f - start;
+    else if (f >= end) f -= end - start;
+    else if (f > start) f = start;
+  } else if ((kind === "clip" || kind === "undo" || kind === "redo") && oldClip && newClip) {
+    // A trim moves the start; other changes keep positions (beyond that, clamp).
+    if (oldClip.untrimmed_frames === newClip.untrimmed_frames) f += oldClip.trim_start - newClip.trim_start;
+  }
+  return Math.max(0, Math.min(f, newFrames));
 }

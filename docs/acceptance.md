@@ -1,6 +1,6 @@
 # Acceptance checklist
 
-Manual acceptance pass over every scenario in the four v1 specs (`openspec/changes/add-wav-analyser-app/specs/`), plus the multi-file tabs and app icon change (`openspec/changes/add-multi-file-tabs/specs/`; sections file-tabs, audio-stats: details panel, app-branding, and rows I2b–I13) the dark theme change (section app-theme), and the session restore, tab reordering and window change (`openspec/changes/tab-session-and-window-fit/specs/`; sections app-window, tab-reorder and session-restore), and the audio editing change (`openspec/changes/add-audio-editing/specs/`; sections transport-controls, audio-editing and wav-export), and the clip fades change (`openspec/changes/add-clip-fades-and-crossfades/specs/`; section clip-fades, plus rows E4b, E8b, E8c and X8b).
+Manual acceptance pass over every scenario in the four v1 specs (`openspec/changes/add-wav-analyser-app/specs/`), plus the multi-file tabs and app icon change (`openspec/changes/add-multi-file-tabs/specs/`; sections file-tabs, audio-stats: details panel, app-branding, and rows I2b–I13) the dark theme change (section app-theme), and the session restore, tab reordering and window change (`openspec/changes/tab-session-and-window-fit/specs/`; sections app-window, tab-reorder and session-restore), and the audio editing change (`openspec/changes/add-audio-editing/specs/`; sections transport-controls, audio-editing and wav-export), and the clip fades change (`openspec/changes/add-clip-fades-and-crossfades/specs/`; section clip-fades, plus rows E4b, E8b, E8c and X8b), and the live editing change (`openspec/changes/add-live-editing/specs/`; section live-editing, plus rows E9, E10b, F14, F14b, F19, X13b and X13c, and E11 removed).
 
 **Setup:** generate fixtures with `cd src-tauri && cargo run --release --example gen_fixtures -- ../fixtures --large`, then run `npm run tauri dev`. Fixture names below refer to files in `fixtures/`.
 
@@ -205,10 +205,9 @@ Below, "A" is `cd-16bit-stereo-10s.wav`. Shortcuts: Delete, Ctrl/Cmd+T (Crop), C
 | E8 | Fade twice | Apply the same linear Fade Out to a range twice | Visibly steeper (squared) taper | Auto: `edit::tests::fading_twice_squares_the_gain` | ⏳ |
 | E8b | Curved fade in | Edit › Fade In…, drag the point fully up, Apply | Gain rises quickly then levels off, matching the dialog's curve | Auto: `edit::tests::curved_fades_follow_the_curve`, `curve.test.ts` | ⏳ |
 | E8c | Cancel the dialog | Edit › Fade Out…, then Cancel (also Escape) | Audio and undo history unchanged | | ⏳ |
-| E9 | Clipping removed | Open `two-clip-runs.wav`, select a clipped run, Silence | Its clip markers disappear; whole-file clip count drops | Auto: `edit::audio::tests::full_scale_survives_only_at_unity_gain` | ⏳ |
+| E9 | Clipping removed | Open `two-clip-runs.wav`, select a clipped run, Silence | Its clip markers disappear at once; once the stats stop updating, the whole-file clip count has dropped | Auto: `edit::audio::tests::full_scale_survives_only_unchanged`, `stats::clipping::tests::runs_in_changed_audio_vanish` | ⏳ |
 | E10 | Playback of an edited file | Delete 4.0–5.0 s, play from 3.5 s | Goes straight from the 4.0 s audio to the 5.0 s audio, no gap | Auto: `edit::audio::tests::reads_every_kind_of_edit` | ⏳ |
-| E10b | Long re-analysis | Open `large-1gb.wav`, crop it, switch to another tab during the update | "Updating …" progress box after a moment; other tabs usable; edit menu greyed out for that tab until done | | ⏳ |
-| E11 | Edit during playback | Play A, select a range, Fade In | Playback stops; fade applied | | ⏳ |
+| E10b | No wait after an edit | Open `large-1gb.wav`, crop it, switch to another tab and back | Cropped waveform at once, no progress box; Edit menu available straight away; whole-file stats marked "Updating…" until done; other tabs usable | Auto: `tests/state.rs::edits_apply_back_to_back_without_analysis` | ⏳ |
 | E12 | Undo a delete | Delete 4.0–5.0 s, Ctrl/Cmd+Z | 10.0 s again with the original audio; Redo enabled | Auto: `tests/state.rs::edit_then_undo_restores_frames_and_stats` | ⏳ |
 | E13 | Several undos | Crop, Silence, Fade In, then Undo ×3 | Identical to the file as opened; Undo greyed out | Auto: `tests/state.rs::edit_then_undo_restores_frames_and_stats` | ⏳ |
 | E14 | New edit clears redo | Undo an edit, then apply a different one | Redo greyed out | Auto: `tests/state.rs::new_edit_after_undo_clears_redo` | ⏳ |
@@ -234,6 +233,8 @@ Below, "A" is `cd-16bit-stereo-10s.wav`. Shortcuts: Delete, Ctrl/Cmd+T (Crop), C
 | X11 | Read-only target | Save As into a read-only folder | Error notice; original intact; edits kept | Auto: `tests/state.rs::failed_save_keeps_the_edits` | ⏳ |
 | X12 | File changed by another program | Open a copy of A, edit it in another program and save there, then edit and Save in HitherDither | Nothing written; notice says it changed on disk and suggests Save As | Auto: `tests/state.rs::save_refuses_when_the_original_changed` | ⏳ |
 | X13 | Keep working after save | Zoom in, select 1.0–2.0 s, Fade In, Save | Zoom and selection unchanged; Undo greyed out | Auto: `tests/state.rs::save_replaces_the_original` | ⏳ |
+| X13b | Save before the analysis finishes | Open `large-1gb.wav`, apply Fade Out to most of it, Save As straight away while the stats say "Updating…" | Progress box after a moment; afterwards the stats are current and not marked as updating | Auto: `tests/state.rs::save_before_the_analysis_finishes_is_exact` | ⏳ |
+| X13c | Progress while rendering | Edit `large-1gb.wav`, Save As | The delayed progress box shows how far the save has got; other tabs stay usable | Auto: `tests/state.rs::save_before_the_analysis_finishes_is_exact` (progress reaches the total) | ⏳ |
 | X14 | Cancel closing | Edit A, Ctrl/Cmd+W, Cancel (also try ×, middle-click, File › Close Tab) | Tab stays open with its edits | | ⏳ |
 | X15 | Save on close | Edit A, close its tab, choose Save | A written with the edits (no overwrite prompt); tab closes | | ⏳ |
 | X16 | Two edited files | Edit A and B, close the window (also File › Quit) | Asked about A, then B; quits after both answered | | ⏳ |
@@ -258,9 +259,37 @@ Below, "A" is `cd-16bit-stereo-10s.wav`. Handles: trim brackets at the audio's e
 | F11 | Longer crossfade | Drag the join's crossfade square out to 200 ms | Blend covers 100 ms each side; length unchanged | Auto: `clipHandles.test.ts` (crossfades) | ⏳ |
 | F12 | Hard join | Drag the crossfade to zero | Direct switch at the join; samples unchanged | Auto: `edit::audio::tests::hard_join_is_a_plain_concatenation` | ⏳ |
 | F13 | Limited by available audio | Make a join 20 ms from the end, drag its crossfade to 200 ms | Stops at the longest length the audio allows | Auto: `edit::tests::crossfades_are_clamped_by_the_audio` | ⏳ |
-| F14 | Preview a fade | Drag the end fade square slowly | Fade line and tapered waveform follow the pointer; label shows the fade length | | ⏳ |
+| F14 | Preview a fade | Drag the end fade square slowly | Fade line and tapered waveform follow the pointer; label shows the fade length; while playing, the fade is heard as you drag | | ⏳ |
+| F14b | Hear a trim while playing | Play A to the end from 5.0 s; drag the end bracket from 10.0 s to 7.0 s without releasing | Playback ends at the audio that is at 7.0 s | Auto: `playback::engine::tests::removed_position_with_nothing_after_it_ends`, `tests/state.rs::previews_change_nothing` | ⏳ |
 | F15 | Cancel a drag | Drag a trim bracket, press Escape, release | Audio, handles and undo history unchanged; selection kept | | ⏳ |
 | F16 | Select near an edge | Press 20 px in from the start and drag right | A selection is made; no trim or fade | Auto: `clipHandles.test.ts` (hitTest) | ⏳ |
 | F17 | Adjust twice, undo once | Set a 0.5 s fade-in, drag it to 1.0 s, Undo | Fade-in is 0.5 s again with the same curve | Auto: `tests/state.rs::adjusting_a_fade_replaces_it_and_undo_restores_it` | ⏳ |
 | F18 | Save a shaped take | Trim both ends, add fades, Save As, reopen | File contains exactly what was shown; handles back at the edges, no fades | Auto: `tests/state.rs::saving_bakes_the_clip_settings` | ⏳ |
+| F19 | Release during playback | Play A, drag the fade-out square and release | Playback continues; handles and waveform show the new fade; no progress box | Auto: `playback::engine::tests::fade_while_listening` | ⏳ |
 
+## live-editing
+
+Below, "A" is `cd-16bit-stereo-10s.wav` and "L" is `large-1gb.wav`. "Playing" means playing to the end unless a selection is looping.
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| L1 | Delete on a long file | Open L, select 10:00–20:00, Delete | Waveform and duration show the shorter result straight away, no progress box | Auto: `tests/state.rs::edits_apply_back_to_back_without_analysis` | ⏳ |
+| L2 | Edit again straight away | Silence a selection in A, then at once Fade Out another selection | Both applied; Undo reverts the fade first | Auto: `tests/state.rs::edits_apply_back_to_back_without_analysis` | ⏳ |
+| L3 | Undo is instant | Make several edits on L, hold Ctrl/Cmd+Z | Each step shows its result straight away, no progress box | Auto: `tests/state.rs::edits_apply_back_to_back_without_analysis` | ⏳ |
+| L4 | No peak hidden | Open `single-spike-10min.wav`, Fade Out from 1:00 to the end, zoom to fit at once | The spike is visible at no less than its faded height | Auto: `peaks::tests::transient_in_a_long_fade_is_not_hidden`, `peaks::tests::edited_peaks_are_exact_or_never_hide_a_peak` | ⏳ |
+| L5 | Exact when zoomed in | After L4, zoom in to single samples around the spike before the stats finish | The samples drawn are the faded samples | Auto: `peaks::tests::transient_in_a_long_fade_is_not_hidden`, `tests/state.rs::analysis_matches_a_file_with_the_same_audio` | ⏳ |
+| L6 | Old view kept until redrawn | Open `beep-every-second-mono-60s.wav`, zoom in, Silence a selection | No blank or flicker; zoom and scroll stay as the edit rules say | | ⏳ |
+| L7 | Rapid changes | Make five edits on L in quick succession | Whole-file stats update once, for the final state | Auto: `tests/state.rs::rapid_changes_are_analysed_once` | ⏳ |
+| L8 | Selection stats stay current | On L, select a range, silence part of it straight away | Selection stats reflect the silence while whole-file stats still say "Updating…" | Auto: `tests/state.rs::silence_shows_in_selection_stats` | ⏳ |
+| L9 | Stats updating | Edit L, look at the whole-file stats | "Updating…" with dimmed figures, then the new figures | Auto: `tests/state.rs::edits_apply_back_to_back_without_analysis`, `rapid_changes_are_analysed_once` | ⏳ |
+| L10 | Clip markers removed at once | Open `two-clip-runs.wav`, silence a clipped run | Its markers disappear straight away | Auto: `stats::clipping::tests::runs_in_changed_audio_vanish` | ⏳ |
+| L11 | Fade while listening | Play A from 3.0 s, select 5.0–8.0 s, Fade Out | Playback continues; the fade is heard from 5.0 s | Auto: `playback::engine::tests::fade_while_listening` | ⏳ |
+| L12 | Delete before the playhead | Play L from 0:29, at 0:30 delete 0:10–0:20 | Same audio keeps playing without a jump; playhead moves to 0:20 | Auto: `playback::engine::tests::delete_before_the_playhead_keeps_playing_the_same_audio`, `edit::tests::delete_before_the_playhead_keeps_the_audio` | ⏳ |
+| L13 | Delete the audio being played | Play L, at 0:15 delete 0:10–0:20 | Playback continues from the join at 0:10 | Auto: `playback::engine::tests::deleting_the_audio_being_played_continues_from_the_join`, `edit::tests::deleted_audio_continues_from_the_join` | ⏳ |
+| L14 | Looping selection | Loop 2.0–3.0 s of A, silence part of the selection | Loop keeps playing 2.0–3.0 s with that part silent | Auto: `playback::engine::tests::looping_selection_keeps_its_range_through_silence` | ⏳ |
+| L15 | Selection cleared by the edit | Play a selection of A, press Delete | Playback continues to the end of the file | | ⏳ |
+| L16 | Shape a fade by ear | Loop a selection near A's end, drag the end fade square inward | Fade heard while dragging; one undo step on release | Auto: `tests/state.rs::previews_change_nothing` | ⏳ |
+| L17 | Cancel a heard drag | Delete a range of A, play across the join, drag its crossfade square, press Escape | Sounds as before the drag; Undo unchanged | Auto: `tests/state.rs::previews_change_nothing` | ⏳ |
+| L18 | Audition a curve | Loop a selection of A, Edit › Fade Out…, drag the point | Waveform under the dialog and the playing audio follow the bend | | ⏳ |
+| L19 | Cancel the preview | Edit › Fade In…, drag the point, Cancel | Waveform and playback as before; Undo unchanged | Auto: `tests/state.rs::previews_change_nothing` | ⏳ |
+| L20 | Many edits, no files | Make many edits to a copy of A without saving; watch its folder | No new files; the file is unchanged on disk | Auto: `tests/state.rs::edits_apply_back_to_back_without_analysis` | ⏳ |

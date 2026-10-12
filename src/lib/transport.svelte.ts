@@ -18,6 +18,9 @@ export const transport = $state({
   volume: 1,
 });
 
+/** Whether the current playback plays the selection (rather than the whole file). */
+export const playback = { fromSelection: false };
+
 /** Last position reported by the backend and when it arrived. */
 let reported = { frame: 0, at: 0 };
 let session = 0;
@@ -65,6 +68,7 @@ export async function play() {
     from = transport.playhead >= total ? 0 : transport.playhead;
   }
   from = Math.round(from);
+  playback.fromSelection = !!sel;
   const token = ++session;
   transport.playStart = from;
   transport.playhead = from;
