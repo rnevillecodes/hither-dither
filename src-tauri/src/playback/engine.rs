@@ -2,7 +2,7 @@
 //! mapped, resampled frames, and `Engine::render` (called from the audio callback, or from
 //! tests in place of a device) drains it and publishes the audible position.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -14,11 +14,18 @@ use rubato::{
 
 use super::mapping::ChannelMap;
 use crate::edit::{Audio, EditList, Located};
+use crate::fx::live::{Live, LiveChain};
 
 /// Frames read from the file per feeder step.
 const CHUNK_FRAMES: usize = 1024;
 /// Ring buffer length in seconds of device audio.
 const RING_SECS: f64 = 0.2;
+/// How much of the ring the feeder fills while effects process, in seconds, so parameter
+/// changes are heard within 0.25 s (this, plus a chunk, plus the device buffer).
+const FX_RING_SECS: f64 = 0.15;
+/// Underruns within `OVERLOAD_WINDOW` that mean the effects can't keep up.
+const OVERLOAD_UNDERRUNS: usize = 3;
+const OVERLOAD_WINDOW: Duration = Duration::from_secs(2);
 
 /// What to play: from `from` up to `end`, wrapping to `start` while looping is on.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -66,6 +73,16 @@ pub struct Shared {
     cursor_seq: AtomicU64,
     cursor_out: AtomicU64,
     cursor_frame: AtomicU64,
+    /// The effects to run the audio through, taken by the feeder at the start and on each
+    /// switch.
+    fx: Mutex<Option<Arc<LiveChain>>>,
+    /// Interleaved samples the feeder may have queued: less than the ring holds while
+    /// effects process.
+    fill_limit: AtomicUsize,
+    /// Effects are processing the audio being queued.
+    fx_active: AtomicBool,
+    /// The effects couldn't keep up with real time (reported once per playback).
+    overload: AtomicBool,
 }
 
 /// Switch playback to `audio` (a new edit state of the same source), playing `[start, end)`.
@@ -100,6 +117,10 @@ impl Shared {
             cursor_seq: AtomicU64::new(0),
             cursor_out: AtomicU64::new(0),
             cursor_frame: AtomicU64::new((req.from as f64).to_bits()),
+            fx: Mutex::new(None),
+            fill_limit: AtomicUsize::new(usize::MAX),
+            fx_active: AtomicBool::new(false),
+            overload: AtomicBool::new(false),
         }
     }
 
@@ -131,6 +152,28 @@ impl Shared {
     /// Switch to new audio as soon as possible (replacing a switch not yet made).
     pub fn retarget(&self, to: Retarget) {
         *self.retarget.lock().unwrap() = Some(to);
+    }
+
+    /// The effects the feeder uses from its next switch on.
+    pub fn fx(&self) -> Option<Arc<LiveChain>> {
+        self.fx.lock().unwrap().clone()
+    }
+
+    /// Run the audio through `fx` from the next switch on. Follow with a [`Retarget`] to
+    /// hear the change at once.
+    pub fn set_fx(&self, fx: Option<Arc<LiveChain>>) {
+        *self.fx.lock().unwrap() = fx;
+    }
+
+    /// Whether the effects turned out too slow for real time since this was last asked.
+    /// True at most once per playback.
+    pub fn take_overload(&self) -> bool {
+        self.overload.swap(false, Ordering::AcqRel)
+    }
+
+    /// Interleaved samples the ring may hold, given its capacity.
+    fn fill_limit(&self, capacity: usize) -> usize {
+        self.fill_limit.load(Ordering::Relaxed).min(capacity)
     }
 
     fn publish_cursor(&self, out_index: u64, frame: f64) {
@@ -193,6 +236,10 @@ pub struct Engine {
     /// Frames of the switch crossfade, and how far it has got.
     declick: usize,
     declick_pos: usize,
+    /// When the latest underruns mid-range happened, oldest first.
+    underruns: [Option<Duration>; OVERLOAD_UNDERRUNS],
+    /// An overload has been reported for this playback.
+    overloaded: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -239,6 +286,8 @@ impl Engine {
             declick,
             // No crossfade at the very start.
             declick_pos: declick,
+            underruns: [None; OVERLOAD_UNDERRUNS],
+            overloaded: false,
         }
     }
 
@@ -246,6 +295,7 @@ impl Engine {
     pub fn render(&mut self, out: &mut [f32], latency: Duration) {
         let ch = self.out_ch;
         let wanted = out.len() / ch;
+        let was_running = self.shared.running.load(Ordering::Acquire);
         self.take_switch();
         let switched = self.complete_switch(wanted);
         let pos = self.frame_at_cursor();
@@ -296,6 +346,15 @@ impl Engine {
             }
         }
         out[n * ch..].fill(0.0);
+        let sh = &self.shared;
+        let underrun = n < wanted
+            && was_running
+            && self.pending.is_none()
+            && !sh.feeder_done.load(Ordering::Acquire)
+            && sh.fx_active.load(Ordering::Acquire);
+        if underrun {
+            self.note_underrun();
+        }
 
         // Where the next buffer starts, for the feeder to continue from after a switch.
         let next = self.frame_at_cursor();
@@ -312,6 +371,19 @@ impl Engine {
         {
             sh.finished.store(true, Ordering::Release);
             sh.running.store(false, Ordering::Release);
+        }
+    }
+
+    /// Count an underrun while effects are processing; report an overload (once) when there
+    /// have been several in a short time.
+    fn note_underrun(&mut self) {
+        let now = self.shared.base.elapsed();
+        self.underruns.rotate_left(1);
+        self.underruns[OVERLOAD_UNDERRUNS - 1] = Some(now);
+        let burst = self.underruns[0].is_some_and(|t| now - t <= OVERLOAD_WINDOW);
+        if burst && !self.overloaded {
+            self.overloaded = true;
+            self.shared.overload.store(true, Ordering::Release);
         }
     }
 
@@ -373,7 +445,7 @@ impl Engine {
         let have = self.samples.slots() / ch;
         let all_queued = self.shared.feeder_done.load(Ordering::Acquire);
         // (A full ring can't take more: then go with what there is.)
-        let full = have == self.samples.buffer().capacity() / ch;
+        let full = have >= self.shared.fill_limit(self.samples.buffer().capacity()) / ch;
         if have < skip + wanted && !all_queued && !full {
             return false;
         }
@@ -401,7 +473,7 @@ impl Engine {
     /// output does not start with an underrun.
     pub fn wait_prefilled(&self, timeout: Duration) {
         let deadline = Instant::now() + timeout;
-        let target = self.samples.buffer().capacity() / 2;
+        let target = self.shared.fill_limit(self.samples.buffer().capacity()) / 2;
         while self.samples.slots() < target
             && !self.shared.feeder_done.load(Ordering::Acquire)
             && Instant::now() < deadline
@@ -411,7 +483,8 @@ impl Engine {
     }
 }
 
-/// Start a feeder for `req` and return the engine that consumes its output.
+/// Start a feeder for `req`, processing the audio through `fx`, and return the engine that
+/// consumes its output.
 pub fn start(
     src: Arc<Audio>,
     req: PlayRequest,
@@ -419,6 +492,7 @@ pub fn start(
     map: ChannelMap,
     out_rate: u32,
     volume: Arc<AtomicU32>,
+    fx: Option<Arc<LiveChain>>,
 ) -> (Engine, JoinHandle<()>) {
     let end = req.end.min(src.frames());
     let start = req.start.min(end);
@@ -432,7 +506,11 @@ pub fn start(
     let ring = ((out_rate as f64 * RING_SECS) as usize).max(CHUNK_FRAMES * 4) * out_ch;
     let (producer, consumer) = RingBuffer::<f32>::new(ring);
     let (marker_tx, marker_rx) = RingBuffer::<Marker>::new(64);
+    let fx_limit = ((out_rate as f64 * FX_RING_SECS) as usize * out_ch).min(ring);
     let shared = Arc::new(Shared::new(file_rate, req, looping, volume));
+    let limit = if fx.is_some() { fx_limit } else { ring };
+    shared.fill_limit.store(limit, Ordering::Relaxed);
+    shared.set_fx(fx);
     let engine = Engine::new(
         consumer,
         marker_rx,
@@ -450,6 +528,9 @@ pub fn start(
         markers: marker_tx,
         resampler: (file_rate != out_rate).then(|| Resample::new(file_rate, out_rate, out_ch)),
         written: 0,
+        live: None,
+        capacity: ring,
+        fx_limit,
     };
     let handle = std::thread::Builder::new()
         .name("playback-feeder".into())
@@ -482,6 +563,11 @@ struct Feeder {
     resampler: Option<Resample>,
     /// Output frames queued so far.
     written: u64,
+    /// The effects the audio is processed through.
+    live: Option<Live>,
+    /// Ring capacity, and the part of it filled while effects process, in samples.
+    capacity: usize,
+    fx_limit: usize,
 }
 
 impl Feeder {
@@ -489,6 +575,8 @@ impl Feeder {
         let out_ch = self.map.out_channels();
         let ratio = self.resampler.as_ref().map_or(1.0, |r| r.ratio);
         let (mut raw, mut mapped, mut out) = (Vec::new(), Vec::new(), Vec::new());
+        let mut processed = Vec::new();
+        self.take_fx();
         let mut pos = self.req.from;
         // Input frames fed since `base_out`; marks where loop segments start in the output.
         let mut fed: u64 = 0;
@@ -516,6 +604,7 @@ impl Feeder {
                 if let Some(r) = &mut self.resampler {
                     r.reset();
                 }
+                self.take_fx();
                 generation += 1;
                 let marker = Marker {
                     generation,
@@ -545,6 +634,14 @@ impl Feeder {
             if pos >= req.end {
                 let looping = self.shared.looping.load(Ordering::Relaxed);
                 if !looping || req.end <= req.start {
+                    // Drain the effects, so the end of the range is heard.
+                    if let Some(live) = &mut self.live {
+                        processed.clear();
+                        live.drain(pos, &mut processed);
+                        if !self.output(&processed, &mut mapped, &mut out, out_ch) {
+                            return;
+                        }
+                    }
                     if let Some(r) = &mut self.resampler {
                         out.clear();
                         r.finish(fed, &mut out);
@@ -568,20 +665,55 @@ impl Feeder {
             }
             let n = (req.end - pos).min(CHUNK_FRAMES as u64) as usize;
             self.src.read(pos, n, &mut raw);
-            mapped.clear();
-            self.map.apply(&raw, &mut mapped);
+            // Effects run at the file's rate, on its channels, before mapping and resampling.
+            let input = match &mut self.live {
+                Some(live) => {
+                    processed.clear();
+                    live.process(&raw, pos, &mut processed);
+                    &processed
+                }
+                None => &raw,
+            };
             pos += n as u64;
             fed += n as u64;
-
-            out.clear();
-            match &mut self.resampler {
-                Some(r) => r.push(&mapped, &mut out),
-                None => out.extend_from_slice(&mapped),
-            }
-            if !self.write(&out, out_ch) {
+            if !self.output(input, &mut mapped, &mut out, out_ch) {
                 return;
             }
         }
+    }
+
+    /// Map, resample and queue `frames` (interleaved, in the file's channels). Returns false
+    /// if asked to stop.
+    fn output(
+        &mut self,
+        frames: &[f32],
+        mapped: &mut Vec<f32>,
+        out: &mut Vec<f32>,
+        out_ch: usize,
+    ) -> bool {
+        mapped.clear();
+        self.map.apply(frames, mapped);
+        out.clear();
+        match &mut self.resampler {
+            Some(r) => r.push(mapped, out),
+            None => out.extend_from_slice(mapped),
+        }
+        self.write(out, out_ch)
+    }
+
+    /// Take the effects to use from now on. The input is starting or jumping, so the chain's
+    /// first `latency` frames of output belong to the audio before and are dropped.
+    fn take_fx(&mut self) {
+        let fx = self.shared.fx();
+        let same = LiveChain::same(self.live.as_ref().map(Live::chain), fx.as_ref());
+        match &mut self.live {
+            Some(live) if same => live.restart(),
+            _ => self.live = fx.map(|c| Live::new(c, self.src.channels())),
+        }
+        let active = self.live.is_some();
+        let limit = if active { self.fx_limit } else { self.capacity };
+        self.shared.fill_limit.store(limit, Ordering::Relaxed);
+        self.shared.fx_active.store(active, Ordering::Release);
     }
 
     /// The pending switch, once the engine has carried out the previous one (so its
@@ -611,7 +743,9 @@ impl Feeder {
             if self.shared.stop.load(Ordering::Relaxed) {
                 return false;
             }
-            let free = self.producer.slots() / out_ch * out_ch;
+            let queued = self.capacity - self.producer.slots();
+            let limit = self.shared.fill_limit(self.capacity);
+            let free = limit.saturating_sub(queued) / out_ch * out_ch;
             if free == 0 {
                 std::thread::sleep(Duration::from_millis(2));
                 continue;
@@ -714,6 +848,9 @@ impl Resample {
 }
 
 #[cfg(test)]
+mod fx_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::edit::Curve;
@@ -805,6 +942,7 @@ mod tests {
             ChannelMap::new(1, 2, false),
             48_000,
             volume(),
+            None,
         );
         let (out, positions) = render_until_finished(&mut engine, 2, 200_000);
         feeder.join().unwrap();
@@ -837,6 +975,7 @@ mod tests {
             ChannelMap::new(1, 1, false),
             8_000,
             volume(),
+            None,
         );
         let (out, positions) = render_until_finished(&mut engine, 1, 3_500);
         assert!(
@@ -871,6 +1010,7 @@ mod tests {
             ChannelMap::new(1, 1, false),
             8_000,
             volume(),
+            None,
         );
         let (out, _) = render_until_finished(&mut engine, 1, 1_500);
         assert!((out[0] - 2_601.0 / 10_001.0).abs() < 1e-6);
@@ -889,7 +1029,15 @@ mod tests {
             end: 4_000,
             from: 0,
         };
-        let (mut engine, _f) = start(src, req, false, ChannelMap::new(1, 1, false), 8_000, vol);
+        let (mut engine, _f) = start(
+            src,
+            req,
+            false,
+            ChannelMap::new(1, 1, false),
+            8_000,
+            vol,
+            None,
+        );
         let (out, _) = render_until_finished(&mut engine, 1, 10_000);
         assert!((out[0] - 0.5 / 4_001.0).abs() < 1e-7);
     }
@@ -909,6 +1057,7 @@ mod tests {
             ChannelMap::new(1, 1, false),
             48_000,
             volume(),
+            None,
         );
         let (out, positions) = render_until_finished(&mut engine, 1, 200_000);
         feeder.join().unwrap();
@@ -1091,6 +1240,7 @@ mod tests {
             ChannelMap::new(1, 1, false),
             RATE,
             volume(),
+            None,
         );
         engine.wait_prefilled(Duration::from_secs(2));
         engine

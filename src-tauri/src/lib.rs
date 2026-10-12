@@ -22,7 +22,21 @@ pub fn run() {
             app.manage(plugins.clone());
             commands::start_plugin_scan(app.handle(), &plugins, false);
             let ui = Arc::new(app.handle().clone());
-            app.manage::<commands::SharedState>(Arc::new(state::AppState::new(ui)));
+            let state = Arc::new(state::AppState::new(ui));
+            // A plugin's new latency is heard at once, off the UI thread.
+            let (weak, player) = (
+                Arc::downgrade(&state),
+                app.state::<commands::SharedPlayer>().inner().clone(),
+            );
+            state.on_fx_changed(move |file_id| {
+                let (weak, player) = (weak.clone(), player.clone());
+                std::thread::spawn(move || {
+                    if let Some(state) = weak.upgrade() {
+                        commands::follow_playing(&state, &player, file_id);
+                    }
+                });
+            });
+            app.manage::<commands::SharedState>(state);
             Ok(())
         })
         .manage::<commands::SharedPlayer>(Arc::new(playback::Player::new()))

@@ -10,8 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::edit::{Audio, ClipFade, Crossfade, Curve, EditList};
 use crate::fx::chain::{Chain, ChainInfo, LIVE_BLOCK, MAX_EFFECTS, Slot, SlotId, layout_name};
+use crate::fx::live::LiveChain;
 use crate::peaks::{PeakPyramid, PyramidBuilder};
 use crate::plugins::cache::{LoadStep, PluginCache};
+use crate::plugins::host::HandlerEvent;
 use crate::plugins::instance::{Config, Instance};
 use crate::plugins::main_thread::{self, Inline, UiThread};
 use crate::plugins::{ClassId, module};
@@ -348,6 +350,9 @@ impl History {
 
 const NOT_IN_CHAIN: &str = "That effect isn't in the chain";
 
+/// Called on the UI thread when a file's effects change how they process by themselves.
+pub type FxListener = Arc<dyn Fn(FileId) + Send + Sync>;
+
 pub struct AppState {
     files: Arc<RwLock<HashMap<FileId, Arc<LoadedFile>>>>,
     /// Cancel flags of loads and saves in progress.
@@ -360,6 +365,7 @@ pub struct AppState {
     /// Where plugin calls that must run on the UI thread go.
     ui: Arc<dyn UiThread>,
     next_slot: AtomicU32,
+    fx_listener: Arc<Mutex<Option<FxListener>>>,
 }
 
 impl Default for AppState {
@@ -380,7 +386,14 @@ impl AppState {
             stats: StatsRunner::default(),
             ui,
             next_slot: AtomicU32::new(1),
+            fx_listener: Arc::default(),
         }
+    }
+
+    /// Sets what to call when a file's effects change how they process by themselves (a
+    /// plugin reports a new latency), so playback can follow.
+    pub fn on_fx_changed(&self, listener: impl Fn(FileId) + Send + Sync + 'static) {
+        *self.fx_listener.lock().unwrap() = Some(Arc::new(listener));
     }
 
     pub fn get(&self, id: FileId) -> Option<Arc<LoadedFile>> {
@@ -640,6 +653,49 @@ impl AppState {
         history.get(&id)?.slots.get(&slot).cloned()
     }
 
+    /// What playback of file `id` runs through: the slots of its chain that process audio.
+    pub fn live_chain(&self, id: FileId) -> Option<Arc<LiveChain>> {
+        LiveChain::of(&self.get(id)?.chain)
+    }
+
+    /// [`AppState::live_chain`], with the slots' tails and delay lines cleared on the UI
+    /// thread, so audio from an earlier play doesn't leak into a new one.
+    pub fn start_live_chain(&self, id: FileId) -> Option<Arc<LiveChain>> {
+        let chain = self.get(id)?.chain.clone();
+        let live = LiveChain::of(&chain)?;
+        let _ = main_thread::run(&*self.ui, move || {
+            for s in chain.processed() {
+                s.instance().reset();
+            }
+        });
+        Some(live)
+    }
+
+    /// When the plugin in `slot` (of file `id`) reports a new latency, reactivate it so the
+    /// new latency applies, record it, and tell the listener.
+    fn watch_latency(&self, id: FileId, slot: &Arc<Slot>) {
+        use vst3::Steinberg::Vst::RestartFlags_::kLatencyChanged;
+        let weak = Arc::downgrade(slot);
+        let (ui, listener) = (self.ui.clone(), self.fx_listener.clone());
+        let on_event = move |event| {
+            if !matches!(event, HandlerEvent::Restart(flags) if flags & kLatencyChanged != 0) {
+                return;
+            }
+            let (weak, listener) = (weak.clone(), listener.clone());
+            let _ = ui.post(Box::new(move || {
+                let Some(slot) = weak.upgrade() else { return };
+                slot.instance().reset();
+                slot.set_latency(slot.instance().latency());
+                let listener = listener.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                if let Some(f) = listener {
+                    f(id);
+                }
+            }));
+        };
+        let handler = slot.instance().handler();
+        handler.set_listener(Some(Box::new(on_event)));
+    }
+
     /// Load effect `class_id` from `plugins` and add it to the end of file `id`'s chain, as
     /// one undo step. Fails, leaving the chain as it was, when the chain is full, the effect
     /// can't process the file's channels, or the plugin fails to load.
@@ -697,6 +753,7 @@ impl AppState {
         .map_err(|e| e.to_string())?
         .map_err(|e| format!("“{name}” could not be loaded: {e}"))?;
         let slot = Arc::new(slot);
+        self.watch_latency(id, &slot);
 
         self.change_chain(id, |h, file| {
             // The file was reopened while the plugin loaded.

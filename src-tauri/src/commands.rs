@@ -9,6 +9,7 @@ use tauri::ipc::{Channel, Response};
 use tauri::{AppHandle, Emitter, Runtime, State};
 
 use crate::fx::chain::{ChainInfo, SlotId};
+use crate::fx::live::LiveChain;
 use crate::peaks::query_edited;
 use crate::playback::{PlayRequest, PlaybackInfo, Player};
 use crate::plugins::ClassId;
@@ -58,6 +59,8 @@ pub enum PlaybackEvent {
     Position { frame: f64 },
     /// Playback reached the end of the requested range.
     Ended { frame: f64 },
+    /// The effects are too demanding to play smoothly (sent at most once per playback).
+    Overload,
 }
 
 /// Forward `(done, total)` progress to `channel` at most every 50 ms, and at completion.
@@ -102,10 +105,10 @@ fn stop_playing(state: &AppState, player: &Player, file_id: FileId) {
     }
 }
 
-/// If `file_id` is playing, switch playback to its current audio.
-fn follow_playing(state: &AppState, player: &Player, file_id: FileId) {
+/// If `file_id` is playing, switch playback to its current audio and effects.
+pub fn follow_playing(state: &AppState, player: &Player, file_id: FileId) {
     if let Some(file) = state.get(file_id) {
-        player.follow(&file.audio);
+        player.follow(&file.audio, LiveChain::of(&file.chain));
     }
 }
 
@@ -186,7 +189,7 @@ pub async fn preview_edits(
     let player = player.inner().clone();
     blocking(move || {
         match preview {
-            Some(p) => player.follow(&state.preview(file_id, &p)?),
+            Some(p) => player.follow(&state.preview(file_id, &p)?, state.live_chain(file_id)),
             None => follow_playing(&state, &player, file_id),
         }
         Ok(())
@@ -324,6 +327,7 @@ pub async fn play(
     on_event: Channel<PlaybackEvent>,
 ) -> Result<(), String> {
     let file = state.get(file_id).ok_or("No file is loaded")?;
+    let state = state.inner().clone();
     let player = player.inner().clone();
     blocking(move || {
         if file.changed_on_disk() {
@@ -332,14 +336,19 @@ pub async fn play(
                 file.metadata.name
             ));
         }
+        let fx = state.start_live_chain(file_id);
         let shared = player.play(
             file.audio.clone(),
             PlayRequest { start, end, from },
             looping,
+            fx,
         )?;
         std::thread::spawn(move || {
             use std::sync::atomic::Ordering;
             while !shared.stop.load(Ordering::Relaxed) {
+                if shared.take_overload() && on_event.send(PlaybackEvent::Overload).is_err() {
+                    break;
+                }
                 if shared.finished.load(Ordering::Acquire) {
                     player.finish(&shared);
                     let _ = on_event.send(PlaybackEvent::Ended {
@@ -499,13 +508,22 @@ pub fn take_startup_notices(plugins: State<'_, SharedPlugins>) -> Vec<StartupNot
 
 // --- Effect chains -------------------------------------------------------------------------
 
-/// Run a chain change to `file_id` on a worker thread: plugin calls wait for the UI thread.
+/// Run a chain change to `file_id` on a worker thread (plugin calls wait for the UI thread),
+/// and let playback hear it at once.
 async fn chain_change(
     state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    file_id: FileId,
     change: impl FnOnce(&AppState) -> Result<EditOutcome, String> + Send + 'static,
 ) -> Result<EditOutcome, String> {
     let state = state.inner().clone();
-    blocking(move || change(&state)).await?
+    let player = player.inner().clone();
+    blocking(move || {
+        let outcome = change(&state)?;
+        follow_playing(&state, &player, file_id);
+        Ok(outcome)
+    })
+    .await?
 }
 
 #[tauri::command]
@@ -516,48 +534,68 @@ pub fn get_chain(state: State<'_, SharedState>, file_id: FileId) -> Option<Chain
 #[tauri::command]
 pub async fn add_effect(
     state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
     plugins: State<'_, SharedPlugins>,
     file_id: FileId,
     class_id: ClassId,
 ) -> Result<EditOutcome, String> {
     let plugins = plugins.inner().clone();
-    chain_change(state, move |s| s.add_effect(file_id, &plugins, class_id)).await
+    chain_change(state, player, file_id, move |s| {
+        s.add_effect(file_id, &plugins, class_id)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn remove_effect(
     state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
     file_id: FileId,
     slot_id: SlotId,
 ) -> Result<EditOutcome, String> {
-    chain_change(state, move |s| s.remove_effect(file_id, slot_id)).await
+    chain_change(state, player, file_id, move |s| {
+        s.remove_effect(file_id, slot_id)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn move_effect(
     state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
     file_id: FileId,
     slot_id: SlotId,
     index: usize,
 ) -> Result<EditOutcome, String> {
-    chain_change(state, move |s| s.move_effect(file_id, slot_id, index)).await
+    chain_change(state, player, file_id, move |s| {
+        s.move_effect(file_id, slot_id, index)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn set_effect_bypass(
     state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
     file_id: FileId,
     slot_id: SlotId,
     on: bool,
 ) -> Result<EditOutcome, String> {
-    chain_change(state, move |s| s.set_effect_bypass(file_id, slot_id, on)).await
+    chain_change(state, player, file_id, move |s| {
+        s.set_effect_bypass(file_id, slot_id, on)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn set_bypass_all(
     state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
     file_id: FileId,
     on: bool,
 ) -> Result<EditOutcome, String> {
-    chain_change(state, move |s| s.set_bypass_all(file_id, on)).await
+    chain_change(state, player, file_id, move |s| {
+        s.set_bypass_all(file_id, on)
+    })
+    .await
 }

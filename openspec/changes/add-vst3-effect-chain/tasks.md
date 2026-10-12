@@ -61,7 +61,7 @@
 
 ## 5. Hearing the chain in playback
 
-- [ ] 5.1 Implement `fx/live.rs` and the feeder integration:
+- [x] 5.1 Implement `fx/live.rs` and the feeder integration:
   - the `fx` snapshot slot in `Shared`, with planar buffers;
   - `process` per chunk at the file rate, before resampling;
   - delivery of pending parameter changes at offset 0;
@@ -75,7 +75,7 @@
   - playback ends exactly at the range end.
 
   Verify `npm run test:rust` passes.
-- [ ] 5.2 Make chain changes (add, remove, move, bypass, bypass all) install a new snapshot and flush through the retarget path. Reset active slots on `play`, and recompute latency on `restartComponent(kLatencyChanged)`. Limit ring fill to 0.15 s with an active chain. Send `overload` on the play channel after three or more mid-range underruns within 2 s. Add tests:
+- [x] 5.2 Make chain changes (add, remove, move, bypass, bypass all) install a new snapshot and flush through the retarget path. Reset active slots on `play`, and recompute latency on `restartComponent(kLatencyChanged)`. Limit ring fill to 0.15 s with an active chain. Send `overload` on the play channel after three or more mid-range underruns within 2 s. Add tests:
   - after bypass-all, the rendered output equals the dry audio within one flush;
   - a parameter change reaches the output within 0.25 s of audio;
   - a synthetic slow slot triggers exactly one `overload`.

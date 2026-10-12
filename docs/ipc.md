@@ -165,11 +165,16 @@ interface PlaybackInfo {
 
 Replaces any current playback, whichever file it was playing (only one file plays at a time). Rejects if no device is available, the output can't be opened, or the file changed on disk since it was loaded.
 
+The audio is heard through the file's effect chain (see *Effect chains*), at the file's sample rate before any resampling. Each play starts with the effects' tails and delay lines cleared. Their processing delay is compensated: the first audio heard is at `from`, `position` frames match what is heard, and the end of the range is heard in full before `ended`.
+
 ```ts
 type PlaybackEvent =
   | { kind: "position"; frame: number } // audible file frame, about every 16 ms, latency-compensated
-  | { kind: "ended"; frame: number };   // reached `end` (not sent when looping or stopped)
+  | { kind: "ended"; frame: number }    // reached `end` (not sent when looping or stopped)
+  | { kind: "overload" };               // the effects can't keep up with real time
 ```
+
+`overload` is sent at most once per playback, when the output runs dry three or more times within 2 s in the middle of the range while effects are processing. The frontend shows it as a notice that the effects are too demanding to play smoothly; saving still renders them correctly.
 
 ### `stop_playback`
 
@@ -199,6 +204,8 @@ Changes the range of the current playback without restarting it: playing carries
 ### Playback follows edits
 
 An edit, undo, redo, clip change or preview of the file that is playing doesn't stop playback. Within about 0.25 s it switches to the new audio with a 5 ms crossfade, carrying on from the same source audio. If that audio was removed, it continues from the join that replaced it, or ends (an `ended` event) if nothing after it is heard. The play range is mapped the same way, and a range covering the whole file becomes the whole new file. `position` events then report frames of the new audio.
+
+Chain changes to the file that is playing (adding, removing, moving or bypassing an effect, Bypass All, or undo and redo of these) switch the same way, with the same audio and range, so they are heard within about 0.25 s. So does a plugin reporting a new processing delay. Bypassing a plugin that has its own bypass parameter, and parameter changes, reach it without a switch, at the start of its next processed block. While effects are processing, less audio is queued ahead (0.15 s instead of 0.2 s) to keep parameter changes within 0.25 s.
 
 ## Editing
 
