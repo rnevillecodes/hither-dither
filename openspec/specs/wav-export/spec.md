@@ -44,10 +44,14 @@ File › Save As (Ctrl/Cmd+Shift+S) SHALL ask for a new file name with a native 
 - **THEN** nothing is written and a notice explains that the file is open in another tab
 
 ### Requirement: Output format
-Saved files SHALL be RIFF WAVE files containing exactly a `fmt ` chunk identical to the source's and a `data` chunk, with no other chunks. Sample format, bit depth, valid bits, sample rate, channel count and channel mask SHALL match the source. Samples an edit didn't change SHALL be written bit-for-bit as in the source. Changed integer samples SHALL be rounded to the nearest value and clamped to the format's range.
+Saved files SHALL be RIFF WAVE files containing exactly a `fmt ` chunk identical to the source's and a `data` chunk, with no other chunks. Sample format, bit depth, valid bits, sample rate, channel count and channel mask SHALL match the source. Samples that no edit, fade or crossfade changed SHALL be written bit-for-bit as in the source. Changed integer samples, including blended crossfade samples, SHALL be rounded to the nearest value and clamped to the format's range.
 
 #### Scenario: Untouched audio is bit-exact
 - **WHEN** the user deletes 1.0–2.0 s from a 24-bit file and saves it
+- **THEN** every sample of the saved file outside the crossfade at the join equals the source sample at the corresponding position
+
+#### Scenario: Hard join is bit-exact
+- **WHEN** the user deletes 1.0–2.0 s from a 24-bit file, drags the join's crossfade to zero and saves it
 - **THEN** every sample of the saved file equals the source sample at the corresponding position
 
 #### Scenario: Metadata is not carried over
@@ -70,11 +74,19 @@ Saving SHALL NOT leave a partial or corrupted file at the target path. If writin
 - **THEN** nothing is written and a notice says the file changed on disk and suggests Save As
 
 ### Requirement: After saving
-After a successful Save or Save As, the tab SHALL have no unsaved marker and an empty undo/redo history. Its view, selection and playhead SHALL be unchanged, and the shown audio, statistics and clip markers SHALL be identical to before the save, without a reload.
+Saving SHALL render the edited audio, first finishing any pending background analysis of it. Meanwhile the tab SHALL show the delayed progress indicator used for loads, and edits on it SHALL be disabled. After a successful Save or Save As, the tab SHALL have no unsaved marker and an empty undo/redo history; its view, selection, playhead and shown audio SHALL be unchanged; and its whole-file statistics, clip markers and waveform SHALL be exact, not marked as updating.
 
 #### Scenario: Keep working after save
 - **WHEN** the user zooms in, selects 1.0–2.0 s, applies Fade In and saves
 - **THEN** the zoom and the 1.0–2.0 s selection are unchanged, and Undo is greyed out
+
+#### Scenario: Save before the analysis finishes
+- **WHEN** the user edits a long file and saves it straight away, while the whole-file statistics are still updating
+- **THEN** the progress indicator appears if the save takes a moment, and afterwards the statistics are up to date and no longer marked as updating
+
+#### Scenario: Progress while rendering
+- **WHEN** the user saves a long edited file
+- **THEN** the delayed progress indicator shows how far the save has got, and other tabs stay usable
 
 ### Requirement: Closing a tab with unsaved edits
 Closing a tab that has unsaved changes (close button, middle-click, Ctrl/Cmd+W, File › Close Tab) SHALL ask whether to Save, Don't Save or Cancel. Save SHALL save the tab without asking for overwrite confirmation and then close it, unless saving fails. Don't Save SHALL close it and discard the edits. Cancel SHALL keep the tab open.
