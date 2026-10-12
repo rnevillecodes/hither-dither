@@ -7,8 +7,8 @@
 
 ## 2. Loading and driving a plugin
 
-- [ ] 2.1 Implement `plugins/module.rs` (per-OS bundle loading, entry and exit calls, factory access, process-lifetime module cache) and `plugins/main_thread.rs` (`run` a closure on the Tauri main thread and wait for it). Verify with a test that loads the HD Test Gain bundle and lists its three classes with names, vendor and subcategories.
-- [ ] 2.2 Implement the host objects in `plugins/host.rs` (`IHostApplication`, `IComponentHandler`, `IPlugFrame`, parameter changes and value queues, an empty event list, memory `IBStream`, `IMessage`/`IAttributeList`). Implement `plugins/instance.rs`:
+- [x] 2.1 Implement `plugins/module.rs` (per-OS bundle loading, entry and exit calls, factory access, process-lifetime module cache) and `plugins/main_thread.rs` (`run` a closure on the Tauri main thread and wait for it). Verify with a test that loads the HD Test Gain bundle and lists its three classes with names, vendor and subcategories.
+- [x] 2.2 Implement the host objects in `plugins/host.rs` (`IHostApplication`, `IComponentHandler`, `IPlugFrame`, parameter changes and value queues, an empty event list, memory `IBStream`, `IMessage`/`IAttributeList`). Implement `plugins/instance.rs`:
   - create and initialise the component and controller, then connect them;
   - set the bus arrangement from the WAV channel layout, deactivate non-main buses;
   - set up processing, query latency and get/set state.

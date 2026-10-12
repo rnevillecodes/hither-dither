@@ -62,7 +62,9 @@ fn built() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let target = manifest.join("target").join("test-plugins");
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map_or_else(|| manifest.join("target"), PathBuf::from)
+            .join("test-plugins");
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let mut cmd = Command::new(cargo);
         cmd.current_dir(manifest)

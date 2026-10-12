@@ -477,8 +477,18 @@ unsafe fn write_f64(stream: *mut IBStream, value: f64) -> tresult {
 /// (class ID, category, name, subcategories) for each class in the factory.
 const CLASSES: [(TUID, &str, &str, &str); 4] = [
     (GAIN_CID, "Audio Module Class", "HD Test Gain", "Fx|Tools"),
-    (STEREO_CID, "Audio Module Class", "HD Test Stereo", "Fx|Spatial"),
-    (SYNTH_CID, "Audio Module Class", "HD Test Synth", "Instrument|Synth"),
+    (
+        STEREO_CID,
+        "Audio Module Class",
+        "HD Test Stereo",
+        "Fx|Spatial",
+    ),
+    (
+        SYNTH_CID,
+        "Audio Module Class",
+        "HD Test Synth",
+        "Instrument|Synth",
+    ),
     (
         CONTROLLER_CID,
         "Component Controller Class",

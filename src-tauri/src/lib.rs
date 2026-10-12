@@ -2,6 +2,7 @@ pub mod commands;
 pub mod edit;
 pub mod peaks;
 pub mod playback;
+pub mod plugins;
 pub mod state;
 pub mod stats;
 pub mod wav;
