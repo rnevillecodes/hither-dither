@@ -1,9 +1,9 @@
 <script lang="ts">
-  let { name, fraction }: { name: string; fraction: number } = $props();
+  let { name, fraction, verb = "Loading" }: { name: string; fraction: number; verb?: string } = $props();
 </script>
 
 <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.round(fraction * 100)}>
-  <div class="label">Loading “{name}”… <span class="mono">{Math.round(fraction * 100)}%</span></div>
+  <div class="label">{verb} “{name}”… <span class="mono">{Math.round(fraction * 100)}%</span></div>
   <div class="bar"><div class="fill" style:width="{fraction * 100}%"></div></div>
 </div>
 

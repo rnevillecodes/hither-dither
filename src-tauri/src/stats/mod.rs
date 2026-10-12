@@ -4,7 +4,7 @@ mod clipping;
 mod levels;
 mod loudness;
 
-pub use clipping::{ClipRun, MAX_STORED_RUNS, MIN_RUN};
+pub use clipping::{ClipRun, MAX_STORED_RUNS, MIN_RUN, map_runs};
 pub use levels::Levels;
 pub use loudness::Loudness;
 
@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
+use crate::edit::Audio;
 use crate::peaks::PyramidBuilder;
-use crate::wav::SampleSource;
 use clipping::ClipDetector;
 use levels::LevelAccumulator;
 use loudness::LoudnessMeter;
@@ -49,7 +49,7 @@ pub struct Cancelled;
 /// Analyse frames `[start, end)` in one pass. If `pyramid` is given it is fed the same
 /// frames. `progress` receives the number of frames processed so far.
 pub fn analyse(
-    src: &SampleSource,
+    src: &Audio,
     start: u64,
     end: u64,
     cancel: &AtomicBool,
@@ -125,7 +125,7 @@ impl StatsRunner {
     /// Start analysing `[start, end)`. `done` receives `None` if the job was superseded.
     pub fn spawn(
         &self,
-        src: Arc<SampleSource>,
+        src: Arc<Audio>,
         start: u64,
         end: u64,
         done: impl FnOnce(Option<Analysis>) + Send + 'static,
@@ -145,11 +145,11 @@ mod tests {
     use super::*;
     use crate::wav::synth::{Encoding, WavBuilder, db_to_amp, interleave, sine};
 
-    fn src(enc: Encoding, bits: u16, ch: u16, rate: u32, samples: &[f64]) -> SampleSource {
-        SampleSource::from_bytes(WavBuilder::new(enc, bits, ch, rate).build(samples)).unwrap()
+    fn src(enc: Encoding, bits: u16, ch: u16, rate: u32, samples: &[f64]) -> Audio {
+        Audio::from_bytes(WavBuilder::new(enc, bits, ch, rate).build(samples)).unwrap()
     }
 
-    fn whole(src: &SampleSource) -> Analysis {
+    fn whole(src: &Audio) -> Analysis {
         analyse(src, 0, u64::MAX, &AtomicBool::new(false), None, |_| {}).unwrap()
     }
 
@@ -285,13 +285,13 @@ mod tests {
         assert_eq!(a.stats.channels[0].levels.peak_dbfs, None);
     }
 
-    fn ten_minutes_stereo() -> Arc<SampleSource> {
+    fn ten_minutes_stereo() -> Arc<Audio> {
         let rate = 48_000;
         let frames = rate as usize * 600;
         let tone = sine(997.0, 0.5, rate, frames);
         let bytes =
             WavBuilder::new(Encoding::Pcm, 16, 2, rate).build(&interleave(&[tone.clone(), tone]));
-        Arc::new(SampleSource::from_bytes(bytes).unwrap())
+        Arc::new(Audio::from_bytes(bytes).unwrap())
     }
 
     #[test]

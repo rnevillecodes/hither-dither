@@ -46,7 +46,7 @@ enum Command {
         reply: Sender<Result<OutputFormat, String>>,
     },
     Start {
-        engine: Engine,
+        engine: Box<Engine>,
         format: OutputFormat,
         reply: Sender<Result<(), String>>,
     },
@@ -80,7 +80,7 @@ impl AudioThread {
         let (reply, rx) = channel();
         self.tx
             .send(Command::Start {
-                engine,
+                engine: Box::new(engine),
                 format,
                 reply,
             })
@@ -107,7 +107,7 @@ fn run(rx: Receiver<Command>) {
                 reply,
             } => {
                 _stream = None;
-                let result = open_stream(engine, &format).and_then(|s| {
+                let result = open_stream(*engine, &format).and_then(|s| {
                     s.play()
                         .map_err(|e| format!("Could not start audio output: {e}"))?;
                     Ok(s)

@@ -65,8 +65,14 @@ impl SampleSource {
         self.info.channels as usize
     }
 
+    /// The `fmt ` chunk body, for writing a file in the same format.
+    pub fn fmt_bytes(&self) -> &[u8] {
+        let r = &self.info.fmt_range;
+        &self.backing.bytes()[r.start as usize..r.end as usize]
+    }
+
     /// Raw bytes of frames `[start, start + count)`, clamped to the available frames.
-    fn frame_bytes(&self, start: u64, count: usize) -> &[u8] {
+    pub fn frame_bytes(&self, start: u64, count: usize) -> &[u8] {
         let start = start.min(self.info.frames);
         let end = start.saturating_add(count as u64).min(self.info.frames);
         let ba = self.info.block_align() as u64;
@@ -90,6 +96,52 @@ impl SampleSource {
         full_scale: &mut Vec<bool>,
     ) {
         self.decode(start, count, out, Some(full_scale));
+    }
+
+    /// Frames `[start, start + count)` as interleaved values in the file's own units:
+    /// integer sample values for PCM (8-bit re-centred on zero), float values for IEEE
+    /// float. Used to write edited audio without losing precision.
+    pub fn read_native(&self, start: u64, count: usize, out: &mut Vec<f64>) {
+        let bytes = self.frame_bytes(start, count);
+        out.clear();
+        match self.info.format {
+            SampleFormat::U8 => out.extend(bytes.iter().map(|&b| b as f64 - 128.0)),
+            SampleFormat::I16 => out.extend(
+                bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|b| i16::from_le_bytes(*b) as f64),
+            ),
+            SampleFormat::I24 => out.extend(
+                bytes
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|b| (i32::from_le_bytes([0, b[0], b[1], b[2]]) >> 8) as f64),
+            ),
+            SampleFormat::I32 => out.extend(
+                bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| i32::from_le_bytes(*b) as f64),
+            ),
+            SampleFormat::F32 => out.extend(
+                bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| f32::from_le_bytes(*b) as f64),
+            ),
+            SampleFormat::F64 => out.extend(
+                bytes
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|b| f64::from_le_bytes(*b)),
+            ),
+        }
     }
 
     fn decode(&self, start: u64, count: usize, out: &mut Vec<f32>, fs: Option<&mut Vec<bool>>) {

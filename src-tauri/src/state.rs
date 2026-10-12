@@ -2,23 +2,68 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use crate::edit::{Audio, ClipFade, Crossfade, Curve, EditList};
 use crate::peaks::{PeakPyramid, PyramidBuilder};
-use crate::stats::{self, Analysis, ClipRun, MAX_STORED_RUNS, Stats, StatsRunner};
-use crate::wav::{SampleFormat, SampleSource, WavError, WavInfo};
+use crate::stats::{self, Analysis, ClipRun, MAX_STORED_RUNS, Stats, StatsRunner, map_runs};
+use crate::wav::{
+    SampleFormat, SampleSource, WavError, WavInfo, check_size, write_wav_with_progress,
+};
 
 /// Everything known about one open file.
 pub struct LoadedFile {
     pub metadata: Metadata,
     /// Size and modification time when loaded, to detect external changes.
     disk_stamp: (u64, Option<std::time::SystemTime>),
-    pub source: Arc<SampleSource>,
-    pub pyramid: PeakPyramid,
-    pub whole: Analysis,
+    /// The audio as currently edited.
+    pub audio: Arc<Audio>,
+    /// History revision that `audio` belongs to.
+    pub revision: u64,
+    /// Peaks of the unedited source (as opened or saved); edited peaks are drawn through
+    /// it until the edited audio has been analysed.
+    pub source_pyramid: Arc<PeakPyramid>,
+    /// Whole-file analysis of the unedited source, including its clip runs.
+    pub source_whole: Arc<Analysis>,
+    /// Analysis of `audio`, once the background pass has finished.
+    pub analysis: Option<EditAnalysis>,
+}
+
+/// Peaks and whole-file analysis of one edit state.
+#[derive(Clone)]
+pub struct EditAnalysis {
+    pub revision: u64,
+    pub pyramid: Arc<PeakPyramid>,
+    pub whole: Arc<Analysis>,
+}
+
+/// Wait after the last change before analysing, so a burst of edits is analysed once.
+const ANALYSIS_DEBOUNCE: Duration = Duration::from_millis(300);
+
+/// A pending or running background analysis.
+struct Job {
+    cancel: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+/// Wakes `wait_analysis` callers when a file's analysis or revision changes.
+#[derive(Default)]
+struct Signal {
+    lock: Mutex<()>,
+    changed: Condvar,
+    /// Background analyses that ran to completion (for tests).
+    completed: AtomicU64,
+}
+
+impl Signal {
+    fn notify(&self) {
+        let _guard = self.lock.lock().unwrap();
+        self.changed.notify_all();
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -54,16 +99,201 @@ pub struct ClipRuns {
     pub channels: Vec<Vec<ClipRun>>,
     /// Some channel had more runs than were stored.
     pub capped: bool,
+    /// The edited audio hasn't been analysed yet: these are the source's runs that
+    /// survive the edits unchanged, and runs created by a hard join are missing.
+    pub pending: bool,
 }
+
+const NO_FILE: &str = "No file is loaded";
+/// Error of an edit, undo or redo stopped because its file was closed.
+pub const CANCELLED: &str = "The edit was cancelled";
 
 /// Identifies an open file. Assigned by the frontend so a load can be cancelled
 /// before it finishes.
 pub type FileId = u32;
 
+/// An edit applied to a frame range of the edited audio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EditOp {
+    Crop,
+    Delete,
+    Silence,
+    FadeIn,
+    FadeOut,
+}
+
+/// Length of the crossfade Delete puts on a new join.
+const DEFAULT_CROSSFADE_SECS: f64 = 0.010;
+
+impl EditOp {
+    /// `bend` shapes fades; `sample_rate` sizes Delete's default crossfade.
+    fn apply(
+        self,
+        list: &EditList,
+        start: u64,
+        end: u64,
+        bend: f64,
+        sample_rate: u32,
+    ) -> Result<EditList, String> {
+        let curve = Curve::new(bend);
+        let result = match self {
+            EditOp::Crop => list.crop(start, end),
+            EditOp::Delete => {
+                let xfade = (sample_rate as f64 * DEFAULT_CROSSFADE_SECS).round() as u64;
+                list.delete(start, end, xfade)
+            }
+            EditOp::Silence => list.silence(start, end),
+            EditOp::FadeIn => list.fade_in_range(start, end, curve),
+            EditOp::FadeOut => list.fade_out_range(start, end, curve),
+        };
+        result.map_err(|e| format!("Can't apply the edit: {e}"))
+    }
+}
+
+/// A fade's length (frames) and bend, as sent to and from the frontend.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct FadeSetting {
+    pub len: u64,
+    pub bend: f64,
+}
+
+impl From<ClipFade> for FadeSetting {
+    fn from(f: ClipFade) -> Self {
+        Self {
+            len: f.len,
+            bend: f.curve.bend,
+        }
+    }
+}
+
+impl From<FadeSetting> for ClipFade {
+    fn from(f: FadeSetting) -> Self {
+        Self {
+            len: f.len,
+            curve: Curve::new(f.bend),
+        }
+    }
+}
+
+/// The trim window and end fades, as set by the handles. Trim positions are frames of
+/// the untrimmed timeline (see `ClipInfo::untrimmed_frames`).
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipSettings {
+    pub trim_start: u64,
+    pub trim_end: u64,
+    pub fade_in: FadeSetting,
+    pub fade_out: FadeSetting,
+}
+
+/// A join's crossfade as the handles need it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct JoinState {
+    /// Identifies the join to `set_crossfade`.
+    pub index: usize,
+    /// Output frame of the join (may be outside the audio when trimmed away).
+    pub position: i64,
+    pub len: u64,
+    pub bend: f64,
+    pub max_len: u64,
+}
+
+/// Everything the clip handles show: trim window, end fades and joins.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ClipInfo {
+    pub untrimmed_frames: u64,
+    pub trim_start: u64,
+    pub trim_end: u64,
+    pub fade_in: FadeSetting,
+    pub fade_out: FadeSetting,
+    pub joins: Vec<JoinState>,
+}
+
+impl ClipInfo {
+    fn of(list: &EditList) -> Self {
+        let trim = list.trim();
+        Self {
+            untrimmed_frames: list.untrimmed_frames(),
+            trim_start: trim.start,
+            trim_end: trim.end,
+            fade_in: list.fade_in().into(),
+            fade_out: list.fade_out().into(),
+            joins: list
+                .joins()
+                .into_iter()
+                .map(|j| JoinState {
+                    index: j.index,
+                    position: j.position,
+                    len: j.xfade.len,
+                    bend: j.xfade.curve.bend,
+                    max_len: j.max_len,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Undo/redo availability and whether the audio differs from the file on disk.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct EditState {
+    pub can_undo: bool,
+    pub can_redo: bool,
+    pub dirty: bool,
+    /// Increases whenever the audio changes (edit, undo, redo, save).
+    pub revision: u64,
+}
+
+/// Result of an edit, undo, redo or save: the file's new metadata and edit state.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct EditOutcome {
+    pub metadata: Metadata,
+    pub edit_state: EditState,
+    pub clip: ClipInfo,
+}
+
+/// Every edit state of one file since it was opened or saved.
+struct History {
+    states: Vec<Arc<EditList>>,
+    pos: usize,
+    /// The state that matches the file on disk.
+    saved_pos: Option<usize>,
+    revision: u64,
+}
+
+impl History {
+    fn new(list: Arc<EditList>) -> Self {
+        Self {
+            states: vec![list],
+            pos: 0,
+            saved_pos: Some(0),
+            revision: 0,
+        }
+    }
+
+    fn current(&self) -> &Arc<EditList> {
+        &self.states[self.pos]
+    }
+
+    fn state(&self) -> EditState {
+        EditState {
+            can_undo: self.pos > 0,
+            can_redo: self.pos + 1 < self.states.len(),
+            dirty: self.saved_pos != Some(self.pos),
+            revision: self.revision,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct AppState {
-    files: RwLock<HashMap<FileId, Arc<LoadedFile>>>,
+    files: Arc<RwLock<HashMap<FileId, Arc<LoadedFile>>>>,
+    /// Cancel flags of loads and saves in progress.
     loading: Mutex<HashMap<FileId, Arc<AtomicBool>>>,
+    history: Mutex<HashMap<FileId, History>>,
+    /// Background analysis of each file's current edit state.
+    analysers: Mutex<HashMap<FileId, Job>>,
+    signal: Arc<Signal>,
     pub stats: StatsRunner,
 }
 
@@ -73,7 +303,7 @@ impl AppState {
     }
 
     fn require(&self, id: FileId) -> Result<Arc<LoadedFile>, String> {
-        self.get(id).ok_or_else(|| "No file is loaded".to_string())
+        self.get(id).ok_or_else(|| NO_FILE.to_string())
     }
 
     /// Parse, map and analyse `path`, then install it under `id`. On failure nothing
@@ -106,7 +336,13 @@ impl AppState {
         }
         let loaded = result?;
         let metadata = loaded.metadata.clone();
+        self.stop_analysis(id);
+        self.history
+            .lock()
+            .unwrap()
+            .insert(id, History::new(loaded.audio.edits().clone()));
         self.files.write().unwrap().insert(id, loaded);
+        self.signal.notify();
         Ok(metadata)
     }
 
@@ -117,14 +353,426 @@ impl AppState {
         }
     }
 
-    /// Forget `id`, cancelling its load if one is running. Returns the file that was open.
+    /// Forget `id`, cancelling its load, save or analysis if one is running. Returns the
+    /// file that was open.
     pub fn close(&self, id: FileId) -> Option<Arc<LoadedFile>> {
         self.cancel_open(id);
-        self.files.write().unwrap().remove(&id)
+        self.stop_analysis(id);
+        self.history.lock().unwrap().remove(&id);
+        let file = self.files.write().unwrap().remove(&id);
+        self.signal.notify();
+        file
     }
 
-    /// Stats for `[start, end)` of file `id`, or its cached whole-file stats when
-    /// `range` is `None`. Returns `Ok(None)` when superseded by a newer request.
+    pub fn edit_state(&self, id: FileId) -> Option<EditState> {
+        self.history.lock().unwrap().get(&id).map(History::state)
+    }
+
+    /// The clip handles' state for file `id`.
+    pub fn clip(&self, id: FileId) -> Option<ClipInfo> {
+        self.history
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|h| ClipInfo::of(h.current()))
+    }
+
+    /// Apply `op` to frames `[start, end)` of file `id`. `bend` shapes fades. Discards
+    /// the redo history. The result is analysed in the background.
+    pub fn apply_edit(
+        &self,
+        id: FileId,
+        op: EditOp,
+        start: u64,
+        end: u64,
+        bend: f64,
+    ) -> Result<EditOutcome, String> {
+        let rate = self.require(id)?.metadata.sample_rate;
+        self.change(id, |list| op.apply(list, start, end, bend, rate))
+    }
+
+    /// Replace file `id`'s trim window and end fades (clamped to what the audio allows).
+    pub fn set_clip(&self, id: FileId, clip: ClipSettings) -> Result<EditOutcome, String> {
+        self.change(id, |list| Ok(clip.apply(list)))
+    }
+
+    /// Replace the crossfade at join `join` of file `id` (length clamped).
+    pub fn set_crossfade(
+        &self,
+        id: FileId,
+        join: usize,
+        xfade: FadeSetting,
+    ) -> Result<EditOutcome, String> {
+        self.change(id, |list| apply_crossfade(list, join, xfade))
+    }
+
+    /// File `id`'s current edits with `preview` applied, as the committing command would
+    /// apply it, without changing the file or its history.
+    pub fn preview(&self, id: FileId, preview: &Preview) -> Result<Arc<Audio>, String> {
+        let file = self.require(id)?;
+        let list = file.audio.edits();
+        let edited = match *preview {
+            Preview::Clip { clip } => clip.apply(list),
+            Preview::Crossfade { join, xfade } => apply_crossfade(list, join, xfade)?,
+            Preview::Fade {
+                op,
+                start,
+                end,
+                bend,
+            } => match op {
+                EditOp::FadeIn | EditOp::FadeOut => {
+                    op.apply(list, start, end, bend, file.metadata.sample_rate)?
+                }
+                _ => return Err("Only fades can be previewed".to_string()),
+            },
+        };
+        Ok(Arc::new(Audio::with_edits(
+            file.audio.source().clone(),
+            Arc::new(edited),
+        )))
+    }
+
+    /// Derive a new edit state from the current one and add it to the history
+    /// (discarding redo). A change that leaves the audio as it is adds nothing.
+    fn change(
+        &self,
+        id: FileId,
+        edit: impl FnOnce(&EditList) -> Result<EditList, String>,
+    ) -> Result<EditOutcome, String> {
+        self.check_not_saving(id)?;
+        let mut history = self.history.lock().unwrap();
+        let h = history.get_mut(&id).ok_or(NO_FILE)?;
+        let file = self.require(id)?;
+        let next = edit(h.current())?;
+        if next == **h.current() {
+            return Ok(EditOutcome {
+                metadata: file.metadata.clone(),
+                edit_state: h.state(),
+                clip: ClipInfo::of(&next),
+            });
+        }
+        let next = Arc::new(next);
+        h.states.truncate(h.pos + 1);
+        h.states.push(next.clone());
+        h.pos += 1;
+        Ok(self.install(id, &file, h, next))
+    }
+
+    /// Revert the most recent edit of file `id`.
+    pub fn undo(&self, id: FileId) -> Result<EditOutcome, String> {
+        self.step(id, true)
+    }
+
+    /// Reapply the most recently undone edit of file `id`.
+    pub fn redo(&self, id: FileId) -> Result<EditOutcome, String> {
+        self.step(id, false)
+    }
+
+    fn step(&self, id: FileId, back: bool) -> Result<EditOutcome, String> {
+        self.check_not_saving(id)?;
+        let mut history = self.history.lock().unwrap();
+        let h = history.get_mut(&id).ok_or(NO_FILE)?;
+        let file = self.require(id)?;
+        h.pos = match back {
+            true if h.pos > 0 => h.pos - 1,
+            false if h.pos + 1 < h.states.len() => h.pos + 1,
+            true => return Err("Nothing to undo".to_string()),
+            false => return Err("Nothing to redo".to_string()),
+        };
+        let target = h.current().clone();
+        Ok(self.install(id, &file, h, target))
+    }
+
+    /// Serve file `id` through `edits` as the next revision, and (re)start its analysis.
+    /// Called with the history lock held, so changes to one file are serialized.
+    fn install(
+        &self,
+        id: FileId,
+        file: &LoadedFile,
+        h: &mut History,
+        edits: Arc<EditList>,
+    ) -> EditOutcome {
+        h.revision += 1;
+        let audio = Arc::new(Audio::with_edits(file.audio.source().clone(), edits));
+        let mut metadata = file.metadata.clone();
+        metadata.frames = audio.frames();
+        metadata.duration_secs = audio.info().duration_secs();
+        let next = Arc::new(
+            LoadedFile {
+                metadata: metadata.clone(),
+                disk_stamp: file.disk_stamp,
+                audio,
+                revision: h.revision,
+                source_pyramid: file.source_pyramid.clone(),
+                source_whole: file.source_whole.clone(),
+                analysis: None,
+            }
+            .seeded(),
+        );
+        self.files.write().unwrap().insert(id, next.clone());
+        self.restart_analysis(id, &next);
+        self.signal.notify();
+        EditOutcome {
+            metadata,
+            edit_state: h.state(),
+            clip: ClipInfo::of(h.current()),
+        }
+    }
+
+    fn check_not_saving(&self, id: FileId) -> Result<(), String> {
+        if self.loading.lock().unwrap().contains_key(&id) {
+            return Err("The file is being saved".to_string());
+        }
+        Ok(())
+    }
+
+    /// Cancel any analysis of `id` and schedule one of `file` unless it is already
+    /// analysed. The pass starts after a short wait, so rapid changes are analysed once.
+    fn restart_analysis(&self, id: FileId, file: &Arc<LoadedFile>) {
+        let mut analysers = self.analysers.lock().unwrap();
+        if let Some(old) = analysers.remove(&id) {
+            old.cancel.store(true, Ordering::Relaxed);
+        }
+        if file.analysis.is_some() {
+            return;
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (files, signal) = (self.files.clone(), self.signal.clone());
+        let (audio, revision) = (file.audio.clone(), file.revision);
+        let flag = cancel.clone();
+        let thread = std::thread::spawn(move || {
+            let start = Instant::now() + ANALYSIS_DEBOUNCE;
+            while Instant::now() < start {
+                if flag.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let Some(analysis) = analyse_audio(&audio, revision, &flag, |_| {}) else {
+                return;
+            };
+            drop(audio);
+            let mut files = files.write().unwrap();
+            if let Some(f) = files
+                .get(&id)
+                .filter(|f| f.revision == revision && f.analysis.is_none())
+            {
+                let f = Arc::new(f.with_analysis(analysis));
+                files.insert(id, f);
+                signal.completed.fetch_add(1, Ordering::Relaxed);
+            }
+            drop(files);
+            signal.notify();
+        });
+        analysers.insert(id, Job { cancel, thread });
+    }
+
+    /// Cancel any background analysis of `id` and wait for it to let go of the audio.
+    fn stop_analysis(&self, id: FileId) {
+        let job = self.analysers.lock().unwrap().remove(&id);
+        if let Some(job) = job {
+            job.cancel.store(true, Ordering::Relaxed);
+            let _ = job.thread.join();
+        }
+    }
+
+    /// Wait until revision `revision` of file `id` has been analysed: `true` once it has,
+    /// `false` if a newer revision replaced it or the file was closed first.
+    pub fn wait_analysis(&self, id: FileId, revision: u64) -> bool {
+        let mut guard = self.signal.lock.lock().unwrap();
+        loop {
+            match self.get(id) {
+                Some(f) if f.revision == revision && f.analysis.is_some() => return true,
+                Some(f) if f.revision == revision => {}
+                _ => return false,
+            }
+            guard = self
+                .signal
+                .changed
+                .wait_timeout(guard, Duration::from_millis(250))
+                .unwrap()
+                .0;
+        }
+    }
+
+    /// Background analyses that have run to completion since the app started.
+    #[doc(hidden)]
+    pub fn completed_analyses(&self) -> u64 {
+        self.signal.completed.load(Ordering::Relaxed)
+    }
+
+    /// Write file `id`'s audio to `target`, or over its own file when `None`. If the
+    /// current edit state hasn't been analysed yet, it is analysed first, so the saved
+    /// file starts with exact peaks and statistics. `progress(done, total)` covers both.
+    /// Afterwards the file is served from the saved copy, with an empty history. On
+    /// failure any existing file at the target is untouched and the edits are kept.
+    pub fn save(
+        &self,
+        id: FileId,
+        target: Option<&Path>,
+        progress: impl FnMut(u64, u64),
+    ) -> Result<EditOutcome, String> {
+        let token = {
+            let mut loading = self.loading.lock().unwrap();
+            if loading.contains_key(&id) {
+                return Err("The file is still being saved".to_string());
+            }
+            let token = Arc::new(AtomicBool::new(false));
+            loading.insert(id, token.clone());
+            token
+        };
+        let result = self.save_inner(id, target, &token, progress);
+        let mut loading = self.loading.lock().unwrap();
+        if loading.get(&id).is_some_and(|t| Arc::ptr_eq(t, &token)) {
+            loading.remove(&id);
+        }
+        result
+    }
+
+    fn save_inner(
+        &self,
+        id: FileId,
+        target: Option<&Path>,
+        cancel: &AtomicBool,
+        mut progress: impl FnMut(u64, u64),
+    ) -> Result<EditOutcome, String> {
+        // Range-stats workers and the background analysis hold the audio (and so the
+        // mapping) while they run.
+        self.stats.cancel();
+        self.stop_analysis(id);
+        let file = self.require(id)?;
+        let target = target.map_or_else(|| file.metadata.path.clone(), Path::to_path_buf);
+        let overwrite = same_file(&target, &file.metadata.path);
+        if overwrite && file.changed_on_disk() {
+            return Err(format!(
+                "“{}” changed on disk since it was opened, so it wasn't overwritten. Use Save As to keep your edits in a new file.",
+                file.metadata.name
+            ));
+        }
+        let target_name = file_name(&target);
+        let fail = |e: &dyn std::fmt::Display| format!("Could not save “{target_name}”: {e}");
+        check_size(&file.audio).map_err(|e| fail(&e))?;
+
+        // Analyse first if the background pass hasn't finished, then write.
+        let frames = file.audio.frames();
+        let (analysis, written_from, total) = match &file.analysis {
+            Some(a) => (a.clone(), 0, frames),
+            None => {
+                let a = analyse_audio(&file.audio, file.revision, cancel, |done| {
+                    progress(done, 2 * frames)
+                })
+                .ok_or(CANCELLED)?;
+                (a, frames, 2 * frames)
+            }
+        };
+        let temp = temp_path(&target);
+        let written = write_file(&file.audio, &temp, |done| {
+            progress(written_from + done, total)
+        });
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&temp);
+            return Err(fail(&e));
+        }
+        if cancel.load(Ordering::Relaxed) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(CANCELLED.to_string());
+        }
+
+        let mut history = self.history.lock().unwrap();
+        let mut files = self.files.write().unwrap();
+        if overwrite {
+            // Windows can't replace a file that is still memory-mapped: release ours first.
+            files.remove(&id);
+        }
+        let old_meta = file.metadata.clone();
+        let old_stamp = file.disk_stamp;
+        let old_revision = file.revision;
+        let (old_pyramid, old_whole) = (file.source_pyramid.clone(), file.source_whole.clone());
+        let edits = file.audio.edits().clone();
+        drop(file);
+
+        if let Err(e) = rename_with_retry(&temp, &target) {
+            let _ = std::fs::remove_file(&temp);
+            if overwrite {
+                // The original is unchanged: map it again with the same edits.
+                match SampleSource::open(&old_meta.path) {
+                    Ok(src) => {
+                        let audio = Arc::new(Audio::with_edits(Arc::new(src), edits));
+                        files.insert(
+                            id,
+                            Arc::new(LoadedFile {
+                                metadata: old_meta,
+                                disk_stamp: old_stamp,
+                                audio,
+                                revision: old_revision,
+                                source_pyramid: old_pyramid,
+                                source_whole: old_whole,
+                                analysis: Some(analysis),
+                            }),
+                        );
+                    }
+                    Err(_) => {
+                        history.remove(&id);
+                    }
+                }
+            }
+            drop((files, history));
+            self.signal.notify();
+            return Err(fail(&e));
+        }
+
+        let opened = std::fs::metadata(&target)
+            .map_err(WavError::from)
+            .and_then(|m| Ok((m, SampleSource::open(&target)?)));
+        let (fs_meta, src) = match opened {
+            Ok(v) => v,
+            Err(e) => {
+                files.remove(&id);
+                history.remove(&id);
+                drop((files, history));
+                self.signal.notify();
+                return Err(format!(
+                    "Saved “{target_name}”, but could not reopen it: {e}"
+                ));
+            }
+        };
+        let audio = Arc::new(Audio::new(Arc::new(src)));
+        let size = fs_meta.len();
+        let metadata = Metadata::new(&target, target_name, size, audio.info());
+        let revision = history.get(&id).map_or(old_revision, |h| h.revision) + 1;
+        let mut fresh = History::new(audio.edits().clone());
+        fresh.revision = revision;
+        let edit_state = fresh.state();
+        let clip = ClipInfo::of(fresh.current());
+        history.insert(id, fresh);
+        // Saving doesn't change the audio, so its analysis becomes the source's.
+        files.insert(
+            id,
+            Arc::new(
+                LoadedFile {
+                    metadata: metadata.clone(),
+                    disk_stamp: (size, fs_meta.modified().ok()),
+                    audio,
+                    revision,
+                    source_pyramid: analysis.pyramid,
+                    source_whole: analysis.whole,
+                    analysis: None,
+                }
+                .seeded(),
+            ),
+        );
+        drop((files, history));
+        self.signal.notify();
+        Ok(EditOutcome {
+            metadata,
+            edit_state,
+            clip,
+        })
+    }
+
+    /// Stats for `[start, end)` of file `id`, or its whole-file stats when `range` is
+    /// `None`. Returns `Ok(None)` when superseded by a newer request, or for the whole
+    /// file while its current edit state hasn't been analysed yet.
     pub fn compute_stats(
         &self,
         id: FileId,
@@ -133,11 +781,11 @@ impl AppState {
         let file = self.require(id)?;
         let Some((start, end)) = range else {
             self.stats.cancel();
-            return Ok(Some(file.whole.stats.clone()));
+            return Ok(file.analysis.as_ref().map(|a| a.whole.stats.clone()));
         };
         let (tx, rx) = std::sync::mpsc::channel();
         self.stats
-            .spawn(file.source.clone(), start, end, move |r| {
+            .spawn(file.audio.clone(), start, end, move |r| {
                 let _ = tx.send(r);
             })
             .join()
@@ -145,19 +793,87 @@ impl AppState {
         Ok(rx.recv().ok().flatten().map(|a| a.stats))
     }
 
+    /// Clip runs of file `id`: exact once analysed, else the source's runs that survive
+    /// the edits unchanged.
     pub fn clip_runs(&self, id: FileId) -> Result<ClipRuns, String> {
         let file = self.require(id)?;
-        let capped = file
-            .whole
-            .stats
-            .channels
-            .iter()
-            .any(|c| c.clip_runs > MAX_STORED_RUNS as u64);
-        Ok(ClipRuns {
-            channels: file.whole.clip_runs.clone(),
-            capped,
+        let capped = |whole: &Analysis| {
+            whole
+                .stats
+                .channels
+                .iter()
+                .any(|c| c.clip_runs > MAX_STORED_RUNS as u64)
+        };
+        Ok(match &file.analysis {
+            Some(a) => ClipRuns {
+                channels: a.whole.clip_runs.clone(),
+                capped: capped(&a.whole),
+                pending: false,
+            },
+            None => ClipRuns {
+                channels: file
+                    .source_whole
+                    .clip_runs
+                    .iter()
+                    .map(|runs| map_runs(runs, file.audio.spans()))
+                    .collect(),
+                capped: capped(&file.source_whole),
+                pending: true,
+            },
         })
     }
+}
+
+/// A setting tried out while playing, before it is committed.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Preview {
+    Clip {
+        clip: ClipSettings,
+    },
+    Crossfade {
+        join: usize,
+        xfade: FadeSetting,
+    },
+    Fade {
+        op: EditOp,
+        start: u64,
+        end: u64,
+        bend: f64,
+    },
+}
+
+impl ClipSettings {
+    fn apply(&self, list: &EditList) -> EditList {
+        list.set_trim(self.trim_start, self.trim_end)
+            .set_clip_fades(self.fade_in.into(), self.fade_out.into())
+    }
+}
+
+fn apply_crossfade(list: &EditList, join: usize, xfade: FadeSetting) -> Result<EditList, String> {
+    let xfade = Crossfade {
+        len: xfade.len,
+        curve: Curve::new(xfade.bend),
+    };
+    list.set_crossfade(join, xfade)
+        .map_err(|e| format!("Can't change the crossfade: {e}"))
+}
+
+/// One pass over `audio` for its statistics and peaks (`None` if cancelled).
+fn analyse_audio(
+    audio: &Audio,
+    revision: u64,
+    cancel: &AtomicBool,
+    progress: impl FnMut(u64),
+) -> Option<EditAnalysis> {
+    let total = audio.frames();
+    let mut builder = PyramidBuilder::new(audio.channels(), total);
+    let whole = stats::analyse(audio, 0, total, cancel, Some(&mut builder), progress).ok()?;
+    Some(EditAnalysis {
+        revision,
+        pyramid: Arc::new(builder.finish()),
+        whole: Arc::new(whole),
+    })
 }
 
 /// Parse, map and analyse `path` (stops early if `cancel` is set).
@@ -173,24 +889,108 @@ fn load(
     };
     let fs_meta = std::fs::metadata(path).map_err(|e| wav_err(e.into()))?;
     let size_bytes = fs_meta.len();
-    let source = Arc::new(SampleSource::open(path).map_err(wav_err)?);
-    let total = source.frames();
-    let mut builder = PyramidBuilder::new(source.channels(), total);
-    let whole = stats::analyse(&source, 0, total, cancel, Some(&mut builder), |done| {
-        progress(done, total)
-    })
-    .map_err(|_| OpenError::Cancelled(name.to_string()))?;
+    let audio = Arc::new(Audio::new(Arc::new(
+        SampleSource::open(path).map_err(wav_err)?,
+    )));
+    let total = audio.frames();
+    let analysis = analyse_audio(&audio, 0, cancel, |done| progress(done, total))
+        .ok_or_else(|| OpenError::Cancelled(name.to_string()))?;
 
-    Ok(Arc::new(LoadedFile {
-        metadata: Metadata::new(path, name.to_string(), size_bytes, source.info()),
-        disk_stamp: (size_bytes, fs_meta.modified().ok()),
-        source,
-        pyramid: builder.finish(),
-        whole,
-    }))
+    Ok(Arc::new(
+        LoadedFile {
+            metadata: Metadata::new(path, name.to_string(), size_bytes, audio.info()),
+            disk_stamp: (size_bytes, fs_meta.modified().ok()),
+            audio,
+            revision: 0,
+            source_pyramid: analysis.pyramid,
+            source_whole: analysis.whole,
+            analysis: None,
+        }
+        .seeded(),
+    ))
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Whether two paths name the same existing file.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// A unique hidden file next to `target`, so the final rename stays on one volume.
+fn temp_path(target: &Path) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    target.with_file_name(format!(
+        ".{}.{}-{nanos}.tmp",
+        file_name(target),
+        std::process::id()
+    ))
+}
+
+/// Write `audio` to a new file at `path` and flush it to disk.
+fn write_file(
+    audio: &Audio,
+    path: &Path,
+    progress: impl FnMut(u64),
+) -> Result<(), crate::wav::WriteError> {
+    let file = std::fs::File::create_new(path)?;
+    write_wav_with_progress(audio, &file, progress)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Move `from` over `to`, retrying briefly: on Windows a reader finishing with the old
+/// file (or a virus scanner) can hold it open for a moment.
+fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(_) if attempt < 20 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 impl LoadedFile {
+    /// With the source's analysis as the analysis of `audio` when it is the source
+    /// unedited (as opened, saved, or undone back to that).
+    fn seeded(self) -> Self {
+        if self.analysis.is_some() || !self.audio.edits().is_identity() {
+            return self;
+        }
+        let analysis = EditAnalysis {
+            revision: self.revision,
+            pyramid: self.source_pyramid.clone(),
+            whole: self.source_whole.clone(),
+        };
+        self.with_analysis(analysis)
+    }
+
+    fn with_analysis(&self, analysis: EditAnalysis) -> Self {
+        Self {
+            metadata: self.metadata.clone(),
+            disk_stamp: self.disk_stamp,
+            audio: self.audio.clone(),
+            revision: self.revision,
+            source_pyramid: self.source_pyramid.clone(),
+            source_whole: self.source_whole.clone(),
+            analysis: Some(analysis),
+        }
+    }
+
     /// The file's size or modification time differs from when it was loaded. Reading a
     /// memory-mapped file that was changed or truncated is unsafe, so playback refuses.
     pub fn changed_on_disk(&self) -> bool {

@@ -81,7 +81,7 @@ Returns a binary `ArrayBuffer` (raw `tauri::ipc::Response`, not JSON), little-en
 | 16 | f64 | `start`: first frame after clamping |
 | 24 | f32[] | values, channel-major |
 
-- **kind 0 (min/max)**: used when the span is longer than `columns` frames. For each channel there are `count` pairs `[min, max]`, so the payload is `channels × count × 2` floats. Column `i` covers frames `[start + span·i/count, start + span·(i+1)/count)`, and its values are exact (never hide a peak).
+- **kind 0 (min/max)**: used when the span is longer than `columns` frames. For each channel there are `count` pairs `[min, max]`, so the payload is `channels × count × 2` floats. Column `i` covers frames `[start + span·i/count, start + span·(i+1)/count)`. Its values never hide a peak. They are exact once the current edit state has been analysed (see `wait_analysis`). Before that, they are drawn through the edits from the unedited file's peaks: exact for unchanged audio and wherever a column holds at most 4096 changed frames, and otherwise a bound that may overstate a peak inside a fade or crossfade.
 - **kind 1 (samples)**: used when the span is at most `columns` frames. For each channel there are `count` consecutive samples starting at `start`, so the payload is `channels × count` floats.
 
 Sample values are normalised to −1.0…+1.0 (integer PCM divided by 2^(bits−1), so positive full scale is slightly below 1.0).
@@ -95,7 +95,7 @@ Sample values are normalised to −1.0…+1.0 (integer PCM divided by 2^(bits−
 | `fileId` | number | |
 | `range` | `{ start, end } \| null` | Frame range; `null` returns the cached whole-file stats |
 
-Returns `Stats | null`. The result is `null` when a newer `compute_stats` request (for any file) superseded this one, and the caller should discard it.
+Returns `Stats | null`. The result is `null` when a newer `compute_stats` request (for any file) superseded this one, and the caller should discard it. For `range: null` it is also `null` while the current edit state hasn't been analysed yet; show the figures as updating and fetch them again after `wait_analysis`. A range is always computed from the current edited audio.
 
 ```ts
 interface Stats {
@@ -130,8 +130,11 @@ Returns the clipped runs in the whole file, used for waveform markers:
 interface ClipRuns {
   channels: { start: number; len: number }[][]; // per channel, frame positions
   capped: boolean; // some channel had more than 10 000 runs; only the first 10 000 are listed
+  pending: boolean; // not analysed yet: only the source's runs that survive the edits unchanged
 }
 ```
+
+While `pending`, runs in removed, silenced or gain-changed audio are already gone, and runs after a delete have moved with the audio. Runs that a hard join would create appear once the analysis finishes.
 
 ## Playback
 
@@ -183,3 +186,155 @@ No arguments. Stops output and returns the audible frame at that moment (`number
 | Arg | Type | Notes |
 | --- | --- | --- |
 | `enabled` | boolean | Toggle looping of the current playback range |
+
+### `set_play_range`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `start` | number | New start of the play range (frames of the audio now playing) |
+| `end` | number | New end (exclusive), clamped to the audio |
+
+Changes the range of the current playback without restarting it: playing carries on from the same point, wrapping or ending at the new range. Used when an edit clears or changes the selection being played. Does nothing if nothing is playing.
+
+### Playback follows edits
+
+An edit, undo, redo, clip change or preview of the file that is playing doesn't stop playback. Within about 0.25 s it switches to the new audio with a 5 ms crossfade, carrying on from the same source audio. If that audio was removed, it continues from the join that replaced it, or ends (an `ended` event) if nothing after it is heard. The play range is mapped the same way, and a range covering the whole file becomes the whole new file. `position` events then report frames of the new audio.
+
+## Editing
+
+Edits are non-destructive: the file on disk is untouched until it's saved. Each file keeps an undo history from when it was opened (or last saved). `get_metadata`, `get_peaks`, `compute_stats`, `get_clip_runs` and `play` always serve the current edited audio, with frame positions in the edited timeline.
+
+Edits, undo and redo return at once: nothing is analysed or written before they return, and the next edit can follow straight away. If the file is playing, playback follows the change (see *Playback follows edits*). The edited audio is analysed in the background (exact peaks, whole-file stats and clip runs), starting 300 ms after the last change; a further change cancels and restarts it. Until it finishes, `compute_stats(null)` returns `null`, `get_clip_runs` is `pending`, and `get_peaks` draws through the edits. Edits made while the file is being saved reject with `The file is being saved`.
+
+These commands return an `EditOutcome`:
+
+```ts
+interface EditOutcome {
+  metadata: Metadata;      // frames and duration_secs reflect the edited audio
+  edit_state: EditState;
+  clip: ClipInfo;          // what the clip handles show (see get_clip)
+}
+
+interface EditState {
+  can_undo: boolean;
+  can_redo: boolean;
+  dirty: boolean;          // the audio differs from the file on disk
+  revision: number;        // increases whenever the audio changes; invalidate cached peaks
+}
+```
+
+### `wait_analysis`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `revision` | number | An `edit_state.revision` |
+
+Resolves `true` once that revision's background analysis has finished (at once if it already has, as for a file just opened or saved). Resolves `false` if a newer revision replaces it first or the file is closed. After `true`, fetch the whole-file stats, clip runs and peaks again.
+
+### `apply_edit`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `op` | `"crop" | "delete" | "silence" | "fadeIn" | "fadeOut"` | |
+| `start` | number | First frame of the range |
+| `end` | number | End of the range (exclusive) |
+| `bend` | `number | null` | Fade curve, -1 to 1 (0 or null = linear); only used by `fadeIn`/`fadeOut` |
+
+Applies the edit to `[start, end)` across all channels and discards the redo history. `delete` joins the two sides with a 10 ms linear crossfade (shortened to what the audio allows), which `set_crossfade` can change. Rejects with `Can't apply the edit: …` for an empty or out-of-range selection, a delete that would leave no audio, or a crop of the whole file.
+
+### `undo_edit` / `redo_edit`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+
+Step back or forward one edit. Rejects with `Nothing to undo` / `Nothing to redo` at either end of the history.
+
+### `save_file`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `path` | `string | null` | Where to write; `null` overwrites the file's own path |
+| `onProgress` | `Channel<LoadProgress>` | Progress of the save, as for `open_file` |
+
+This is the only command that renders the edited audio. If the current edit state hasn't been analysed yet, it is analysed first, so the saved tab has exact peaks and stats; progress then covers both passes (`totalFrames` is twice the length). Only one save can run per file at a time. Writes the current audio as a WAV file: the source's `fmt ` chunk followed by a `data` chunk, and no other chunks. Unedited samples are copied byte for byte. Scaled samples are converted in the file's own format (integers rounded to nearest and clamped). The file is written to a temporary file next to the target and then renamed over it, so a failure never leaves a partial file. If the file is playing, playback stops first.
+
+Returns an `EditOutcome`. Afterwards the file is served from the saved copy (its `metadata.path` and `name` are the target's), the history is empty, and the peaks and stats are unchanged.
+
+Rejects, leaving any existing file at the target and the edits as they were:
+- with `“x.wav” changed on disk since it was opened…` when overwriting a file that changed since it was loaded;
+- with `Could not save “x.wav”: the result is too large for a WAV file (over 4 GiB)`;
+- with `Could not save “x.wav”: …` for I/O errors such as a read-only folder.
+
+The frontend asks for confirmation before the first overwrite and rejects targets that are open in another tab.
+
+## Clip handles
+
+The whole file behaves like a clip: a trim window over the edited audio, a fade at each end, and a crossfade at every join that `delete` made. These are settings rather than one-off edits: each call replaces the previous setting and adds one undo step. Calls that leave everything as it was add nothing. Saving bakes them into the file, after which the clip state is empty again.
+
+A fade curve's `bend` runs from -1 to 1: 0 is linear, positive values bow the fade line upward (louder through the fade), negative downward. The gain at position t (0..1) of a fade-in is t^(4^-bend); a fade-out is its mirror image.
+
+### `get_clip`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+
+Returns `ClipInfo | null`:
+
+```ts
+interface FadeSetting { len: number; bend: number }  // len in frames; 0 = no fade
+
+interface ClipInfo {
+  untrimmed_frames: number; // length before trimming; trim positions are on this timeline
+  trim_start: number;
+  trim_end: number;         // exclusive; metadata.frames == trim_end - trim_start
+  fade_in: FadeSetting;     // from the start of the trimmed audio
+  fade_out: FadeSetting;    // ending at the end of the trimmed audio
+  joins: {
+    index: number;          // identifies the join to set_crossfade
+    position: number;       // output frame of the join (outside 0..frames if trimmed away)
+    len: number;            // crossfade length in frames (even; half each side; 0 = hard join)
+    bend: number;
+    max_len: number;        // longest crossfade the audio on both sides allows
+  }[];
+}
+```
+
+### `set_clip`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `clip` | `{ trimStart, trimEnd, fadeIn: FadeSetting, fadeOut: FadeSetting }` | Trim positions on the untrimmed timeline |
+
+Replaces the trim window and end fades. Values are clamped rather than rejected: at least one frame stays, and the two fades together never exceed the trimmed length. Returns an `EditOutcome`. If the file is playing, playback follows the change.
+
+### `set_crossfade`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `join` | number | A join's `index` from `ClipInfo` |
+| `xfade` | `FadeSetting` | Length in frames (clamped to `max_len`, rounded down to even) and bend |
+
+Replaces one join's crossfade. A length of 0 makes a hard join (it stays a join). Rejects with `Can't change the crossfade: there is no join there` for an index that isn't a join. Returns an `EditOutcome`.
+
+### `preview_edits`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `preview` | `Preview \| null` | A setting to hear; `null` goes back to the file as it is |
+
+```ts
+type Preview =
+  | { kind: "clip"; clip: { trimStart, trimEnd, fadeIn: FadeSetting, fadeOut: FadeSetting } }
+  | { kind: "crossfade"; join: number; xfade: FadeSetting }
+  | { kind: "fade"; op: "fadeIn" | "fadeOut"; start: number; end: number; bend: number };
+```
+
+If `fileId` is playing, playback switches to the current edits with `preview` applied, exactly as `set_clip`, `set_crossfade` or `apply_edit` would apply it. Nothing else changes: not the history, the revision, the unsaved state, the peaks or the stats. Used while a handle is dragged and while the fade curve dialog is open. The committing command (or `null`, on cancel) follows. Does nothing if the file isn't playing. Rejects for a `fade` with another `op`, or a crossfade `join` that isn't a join.

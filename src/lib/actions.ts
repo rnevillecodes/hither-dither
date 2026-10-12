@@ -2,6 +2,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { cancelOpen, closeFile } from "./api";
 import { forgetStats, loadIntoTab, setSelection } from "./app.svelte";
+import { confirmClose } from "./editActions";
 import { notify } from "./notices.svelte";
 import { cycle, move, neighbourAfterClose, samePath } from "./tabOrder";
 import { type Tab, activeTab, findTab, newTab, overviewCache, tabs } from "./tabs.svelte";
@@ -141,10 +142,18 @@ export function moveTab(id: number, to: number) {
   tabs.list.splice(0, tabs.list.length, ...order.map((i) => byId.get(i)!));
 }
 
-/** Close a tab, cancelling its load or releasing its file in the backend. */
-export function closeTab(id: number) {
-  const tab = findTab(id);
+/**
+ * Close a tab, cancelling its load or releasing its file in the backend. A tab with
+ * unsaved changes asks first and stays open if the user cancels (or saving fails).
+ */
+export async function closeTab(id: number): Promise<void> {
+  let tab = findTab(id);
   if (!tab) return;
+  if (tab.dirty) {
+    if (!(await confirmClose(tab))) return;
+    tab = findTab(id);
+    if (!tab) return;
+  }
   if (tab.status === "loading") void cancelOpen(id);
   else void closeFile(id);
   removeTab(id);
@@ -158,7 +167,20 @@ export function closeActiveTab() {
   const now = performance.now();
   if (now - lastCloseAt < 100) return;
   lastCloseAt = now;
-  if (tabs.activeId !== null) closeTab(tabs.activeId);
+  if (tabs.activeId !== null) void closeTab(tabs.activeId);
+}
+
+/**
+ * Before quitting, ask about each tab with unsaved changes in tab order. Resolves false
+ * if the user cancels (or a save fails), so the app keeps running.
+ */
+export async function confirmQuit(): Promise<boolean> {
+  for (const tab of [...tabs.list]) {
+    if (!tab.dirty || !findTab(tab.id)) continue;
+    activateTab(tab.id);
+    if (!(await confirmClose(tab))) return false;
+  }
+  return true;
 }
 
 function removeTab(id: number) {

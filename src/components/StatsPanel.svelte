@@ -7,8 +7,10 @@
     labels: string[];
     scope: "Whole file" | "Selection";
     pending: boolean;
+    /** The figures describe the audio before the latest edits; new ones are on their way. */
+    updating: boolean;
   }
-  let { stats, labels, scope, pending }: Props = $props();
+  let { stats, labels, scope, pending, updating }: Props = $props();
 
   const loudness = $derived.by(() => {
     const l = stats?.loudness;
@@ -23,11 +25,11 @@
   <h2>
     Levels
     <span class="scope" class:sel={scope === "Selection"}>{scope}</span>
-    {#if pending}<span class="pending">computing…</span>{/if}
+    {#if pending}<span class="pending">computing…</span>{:else if updating}<span class="pending">Updating…</span>{/if}
   </h2>
 
   {#if stats}
-    <div class="table-wrap" class:stale={pending}>
+    <div class="table-wrap" class:stale={pending || updating}>
       <table class="mono">
         <thead>
           <tr>
@@ -65,7 +67,7 @@
         </tbody>
       </table>
     </div>
-    <p class="loudness">
+    <p class="loudness" class:stale={updating}>
       <span class="label">Integrated loudness</span>
       <span class="mono value" title={loudness.tip}>{loudness.text}</span>
     </p>

@@ -50,6 +50,8 @@ export interface ClipRun {
 export interface ClipRuns {
   channels: ClipRun[][];
   capped: boolean;
+  /** Not analysed yet: only the source's runs that survive the edits unchanged. */
+  pending: boolean;
 }
 
 export const PEAKS_KIND_MINMAX = 0;
@@ -112,6 +114,15 @@ export async function getPeaks(
   return decodePeaks(buf, e - s);
 }
 
+/**
+ * Resolves true once revision `revision` of `fileId` has been analysed in the background,
+ * false if a newer revision replaced it or the file closed first.
+ */
+export function waitAnalysis(fileId: number, revision: number): Promise<boolean> {
+  return invoke("wait_analysis", { fileId, revision });
+}
+
+/** Whole-file stats (`range` null) are null until the current edits have been analysed. */
 export function computeStats(fileId: number, range: { start: number; end: number } | null): Promise<Stats | null> {
   return invoke("compute_stats", { fileId, range });
 }
@@ -155,4 +166,109 @@ export function setVolume(volume: number): Promise<void> {
 
 export function setLoop(enabled: boolean): Promise<void> {
   return invoke("set_loop", { enabled });
+}
+
+/** Change the range being played, carrying on from where it is. */
+export function setPlayRange(start: number, end: number): Promise<void> {
+  return invoke("set_play_range", { start, end });
+}
+
+export type EditOp = "crop" | "delete" | "silence" | "fadeIn" | "fadeOut";
+
+export interface EditState {
+  can_undo: boolean;
+  can_redo: boolean;
+  /** The audio differs from the file on disk. */
+  dirty: boolean;
+  /** Increases whenever the audio changes; cached peaks are stale after a change. */
+  revision: number;
+}
+
+/** A fade's length in frames (0 = none) and curve bend (-1..1, 0 = linear). */
+export interface FadeSetting {
+  len: number;
+  bend: number;
+}
+
+export interface JoinState {
+  /** Identifies the join to `setCrossfade`. */
+  index: number;
+  /** Output frame of the join (outside the audio when trimmed away). */
+  position: number;
+  /** Crossfade length in frames (even, half each side; 0 = hard join). */
+  len: number;
+  bend: number;
+  max_len: number;
+}
+
+/** What the clip handles show; see docs/ipc.md `get_clip`. */
+export interface ClipInfo {
+  untrimmed_frames: number;
+  trim_start: number;
+  trim_end: number;
+  fade_in: FadeSetting;
+  fade_out: FadeSetting;
+  joins: JoinState[];
+}
+
+export interface EditOutcome {
+  metadata: Metadata;
+  edit_state: EditState;
+  clip: ClipInfo;
+}
+
+function progressChannel(onProgress: (p: LoadProgress) => void): Channel<LoadProgress> {
+  const channel = new Channel<LoadProgress>();
+  channel.onmessage = onProgress;
+  return channel;
+}
+
+/** Apply `op` to frames `[start, end)`. Resolves at once; analysis follows in the background. */
+export function applyEdit(fileId: number, op: EditOp, start: number, end: number, bend: number): Promise<EditOutcome> {
+  return invoke("apply_edit", { fileId, op, start, end, bend });
+}
+
+export function getClip(fileId: number): Promise<ClipInfo | null> {
+  return invoke("get_clip", { fileId });
+}
+
+function clipArg(clip: ClipInfo) {
+  return { trimStart: clip.trim_start, trimEnd: clip.trim_end, fadeIn: clip.fade_in, fadeOut: clip.fade_out };
+}
+
+/** Replace the trim window and end fades (trim positions on the untrimmed timeline). */
+export function setClip(fileId: number, clip: ClipInfo): Promise<EditOutcome> {
+  return invoke("set_clip", { fileId, clip: clipArg(clip) });
+}
+
+export function setCrossfade(fileId: number, join: number, xfade: FadeSetting): Promise<EditOutcome> {
+  return invoke("set_crossfade", { fileId, join, xfade });
+}
+
+export function undoEdit(fileId: number): Promise<EditOutcome> {
+  return invoke("undo_edit", { fileId });
+}
+
+export function redoEdit(fileId: number): Promise<EditOutcome> {
+  return invoke("redo_edit", { fileId });
+}
+
+/** A setting being tried out (a handle drag, or the fade curve dialog). */
+export type Preview =
+  | { kind: "clip"; clip: ClipInfo }
+  | { kind: "crossfade"; join: number; xfade: FadeSetting }
+  | { kind: "fade"; op: "fadeIn" | "fadeOut"; start: number; end: number; bend: number };
+
+/** Hear `preview` if `fileId` is playing, without changing anything; null goes back. */
+export function previewEdits(fileId: number, preview: Preview | null): Promise<void> {
+  const arg = preview?.kind === "clip" ? { kind: "clip", clip: clipArg(preview.clip) } : preview;
+  return invoke("preview_edits", { fileId, preview: arg });
+}
+
+/**
+ * Write the file's audio to `path`, or over its own file when `path` is null. This renders
+ * the edits (analysing them first if that hasn't finished); `onProgress` covers both.
+ */
+export function saveFile(fileId: number, path: string | null, onProgress: (p: LoadProgress) => void): Promise<EditOutcome> {
+  return invoke("save_file", { fileId, path, onProgress: progressChannel(onProgress) });
 }
