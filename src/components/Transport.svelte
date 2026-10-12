@@ -3,6 +3,7 @@
   import { formatDuration } from "../lib/format";
   import {
     changeVolume,
+    goToStart,
     playbackAvailable,
     stop,
     toggleLoop,
@@ -16,6 +17,10 @@
 </script>
 
 <div class="transport" title={reason || undefined}>
+  <!-- Seeking needs no audio output, so this stays enabled when playback is unavailable. -->
+  <button onclick={goToStart} disabled={!app.meta} title="Go to start (Home)" aria-label="Go to start">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="2" width="2" height="12" /><path d="M14 2L5.5 8 14 14z" /></svg>
+  </button>
   <button class="play" onclick={togglePlay} {disabled} title={reason || (transport.playing ? "Pause (Space)" : "Play (Space)")} aria-label={transport.playing ? "Pause" : "Play"}>
     {#if transport.playing}
       <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="2" width="3.5" height="12" /><rect x="9.5" y="2" width="3.5" height="12" /></svg>

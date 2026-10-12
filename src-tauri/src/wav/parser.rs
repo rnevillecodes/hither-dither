@@ -22,6 +22,8 @@ pub struct WavInfo {
     pub sample_rate: u32,
     /// `dwChannelMask` from a `WAVE_FORMAT_EXTENSIBLE` header.
     pub channel_mask: Option<u32>,
+    /// Byte range of the `fmt ` chunk's body (after its id and size), so it can be copied.
+    pub fmt_range: std::ops::Range<u64>,
     /// Byte offset of the first sample.
     pub data_offset: u64,
     /// Whole frames available in the file.
@@ -82,7 +84,7 @@ pub fn parse_header(bytes: &[u8]) -> Result<WavInfo, WavError> {
         _ => return Err(WavError::NotWav),
     }
 
-    let mut fmt: Option<Fmt> = None;
+    let mut fmt: Option<(Fmt, std::ops::Range<u64>)> = None;
     let mut data: Option<(u64, u64)> = None;
     let mut pos: u64 = 12;
     let len = bytes.len() as u64;
@@ -97,7 +99,8 @@ pub fn parse_header(bytes: &[u8]) -> Result<WavInfo, WavError> {
                 if body + size > len {
                     return Err(WavError::Malformed("the 'fmt ' chunk is cut short".into()));
                 }
-                fmt = Some(parse_fmt(&bytes[body as usize..(body + size) as usize])?);
+                let parsed = parse_fmt(&bytes[body as usize..(body + size) as usize])?;
+                fmt = Some((parsed, body..body + size));
             }
             // Only the first `data` chunk counts.
             b"data" if data.is_none() => {
@@ -109,7 +112,7 @@ pub fn parse_header(bytes: &[u8]) -> Result<WavInfo, WavError> {
         pos = body + size + (size & 1);
     }
 
-    let fmt = fmt.ok_or(WavError::MissingChunk("fmt "))?;
+    let (fmt, fmt_range) = fmt.ok_or(WavError::MissingChunk("fmt "))?;
     let (data_offset, declared) = data.ok_or(WavError::MissingChunk("data"))?;
     let available = len.saturating_sub(data_offset);
     let truncated = declared > available;
@@ -122,6 +125,7 @@ pub fn parse_header(bytes: &[u8]) -> Result<WavInfo, WavError> {
         channels: fmt.channels,
         sample_rate: fmt.sample_rate,
         channel_mask: fmt.channel_mask,
+        fmt_range,
         data_offset,
         frames,
         truncated,
@@ -238,6 +242,24 @@ mod tests {
                 assert!(!i.truncated);
                 assert_eq!(i.channel_mask.is_some(), extensible);
             }
+        }
+    }
+
+    #[test]
+    fn records_the_fmt_chunk_body() {
+        for extensible in [false, true] {
+            let b = WavBuilder::new(Encoding::Pcm, 24, 2, 48_000)
+                .extensible(extensible)
+                .chunk(*b"LIST", vec![0; 10]);
+            let bytes = b.build(&[0.0; 4]);
+            let i = parse_header(&bytes).unwrap();
+            let r = i.fmt_range.start as usize..i.fmt_range.end as usize;
+            assert_eq!(&bytes[r.start - 8..r.start - 4], b"fmt ");
+            let size = u32::from_le_bytes(bytes[r.start - 4..r.start].try_into().unwrap());
+            assert_eq!(r.len(), size as usize);
+            assert_eq!(r.len(), if extensible { 40 } else { 16 });
+            // The body parses on its own to the same format.
+            assert_eq!(parse_fmt(&bytes[r]).unwrap().format, SampleFormat::I24);
         }
     }
 

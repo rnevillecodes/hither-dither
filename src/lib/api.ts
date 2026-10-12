@@ -156,3 +156,49 @@ export function setVolume(volume: number): Promise<void> {
 export function setLoop(enabled: boolean): Promise<void> {
   return invoke("set_loop", { enabled });
 }
+
+export type EditOp = "crop" | "delete" | "silence" | "fadeIn" | "fadeOut";
+
+export interface EditState {
+  can_undo: boolean;
+  can_redo: boolean;
+  /** The audio differs from the file on disk. */
+  dirty: boolean;
+  /** Increases whenever the audio changes; cached peaks are stale after a change. */
+  revision: number;
+}
+
+export interface EditOutcome {
+  metadata: Metadata;
+  edit_state: EditState;
+}
+
+function progressChannel(onProgress: (p: LoadProgress) => void): Channel<LoadProgress> {
+  const channel = new Channel<LoadProgress>();
+  channel.onmessage = onProgress;
+  return channel;
+}
+
+/** Apply `op` to frames `[start, end)`; resolves after the edited audio is re-analysed. */
+export function applyEdit(
+  fileId: number,
+  op: EditOp,
+  start: number,
+  end: number,
+  onProgress: (p: LoadProgress) => void,
+): Promise<EditOutcome> {
+  return invoke("apply_edit", { fileId, op, start, end, onProgress: progressChannel(onProgress) });
+}
+
+export function undoEdit(fileId: number, onProgress: (p: LoadProgress) => void): Promise<EditOutcome> {
+  return invoke("undo_edit", { fileId, onProgress: progressChannel(onProgress) });
+}
+
+export function redoEdit(fileId: number, onProgress: (p: LoadProgress) => void): Promise<EditOutcome> {
+  return invoke("redo_edit", { fileId, onProgress: progressChannel(onProgress) });
+}
+
+/** Write the file's audio to `path`, or over its own file when `path` is null. */
+export function saveFile(fileId: number, path: string | null): Promise<EditOutcome> {
+  return invoke("save_file", { fileId, path });
+}

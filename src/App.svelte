@@ -7,17 +7,30 @@
   import Toolbar from "./components/Toolbar.svelte";
   import Transport from "./components/Transport.svelte";
   import Waveform from "./components/Waveform.svelte";
-  import { activateTab, closeActiveTab, cycleTab, openDialog, openPaths } from "./lib/actions";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { activateTab, closeActiveTab, confirmQuit, cycleTab, openDialog, openPaths } from "./lib/actions";
   import { app, setSelection } from "./lib/app.svelte";
   import logoShadow from "./assets/logo-shadow.svg";
   import { dropHover } from "./lib/dropHover.svelte";
   import { layout } from "./lib/layout.svelte";
-  import { setCloseTabEnabled } from "./lib/menu";
+  import {
+    applyEdit,
+    canEdit,
+    canRedo,
+    canSave,
+    canSaveAs,
+    canUndo,
+    redo,
+    save,
+    saveAs,
+    undo,
+  } from "./lib/editActions";
+  import { onQuit, setMenuEnabled } from "./lib/menu";
   import { runScrollBenchmark } from "./lib/perf";
   import { readSession, writeSession } from "./lib/session";
   import { samePath } from "./lib/tabOrder";
   import { activeTab, tabs } from "./lib/tabs.svelte";
-  import { initTransport, seek, togglePlay, transport } from "./lib/transport.svelte";
+  import { goToStart, initTransport, seek, togglePlay, transport } from "./lib/transport.svelte";
   import { zoomIn, zoomOut, zoomToFit } from "./lib/view.svelte";
 
   void initTransport();
@@ -44,8 +57,27 @@
   const showDetails = $derived(tabs.list.length > 0 && layout.detailsOpen);
 
   $effect(() => {
-    void setCloseTabEnabled(tabs.list.length > 0);
+    void setMenuEnabled({
+      "close-tab": tabs.list.length > 0,
+      save: canSave(),
+      "save-as": canSaveAs(),
+      undo: canUndo(),
+      redo: canRedo(),
+      crop: canEdit("crop"),
+      delete: canEdit("delete"),
+      silence: canEdit("silence"),
+      "fade-in": canEdit("fadeIn"),
+      "fade-out": canEdit("fadeOut"),
+    });
   });
+
+  // Closing the window (or File › Quit) asks about unsaved changes first. Tauri closes
+  // the window after this handler unless it prevents the close.
+  const appWindow = getCurrentWindow();
+  void appWindow.onCloseRequested(async (event) => {
+    if (!(await confirmQuit())) event.preventDefault();
+  });
+  onQuit(() => void appWindow.close());
 
   function onKeydown(e: KeyboardEvent) {
     const target = e.target as HTMLElement | null;
@@ -66,6 +98,31 @@
     if (e.ctrlKey && e.key === "Tab") {
       e.preventDefault();
       cycleTab(e.shiftKey ? -1 : 1);
+      return;
+    }
+    if (mod && e.key.toLowerCase() === "z") {
+      e.preventDefault();
+      void (e.shiftKey ? redo() : undo());
+      return;
+    }
+    if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === "y") {
+      e.preventDefault();
+      void redo();
+      return;
+    }
+    if (mod && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      void (e.shiftKey ? saveAs() : save());
+      return;
+    }
+    if (mod && !e.shiftKey && e.key.toLowerCase() === "t") {
+      e.preventDefault();
+      void applyEdit("crop");
+      return;
+    }
+    if (mod && !e.shiftKey && e.key.toLowerCase() === "l") {
+      e.preventDefault();
+      void applyEdit("silence");
       return;
     }
     if (mod && e.shiftKey && e.key.toLowerCase() === "b" && app.meta) {
@@ -94,8 +151,11 @@
         // Always play/pause, rather than activating whichever button has focus.
         togglePlay();
         break;
+      case "Delete":
+        void applyEdit("delete");
+        break;
       case "Home":
-        seek(0);
+        goToStart();
         break;
       case "End":
         seek(app.meta.frames);
@@ -120,9 +180,13 @@
   <main class:with-details={showDetails}>
     <section class="wave-area">
       {#if active && app.meta}
-        {#key active.id}
+        <!-- Remount when the audio changes, so cached peaks are dropped. -->
+        {#key `${active.id}:${active.revision}`}
           <Waveform fileId={active.id} meta={app.meta} playhead={transport.playhead} onseek={seek} />
         {/key}
+        {#if active.editing && active.progress.visible}
+          <ProgressOverlay name={active.name} fraction={active.progress.fraction} verb="Updating" />
+        {/if}
       {:else if active}
         <!-- Still loading. The progress box appears once the load has lasted a moment. -->
         {#if active.progress.visible}

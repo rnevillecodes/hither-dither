@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
-use crate::wav::SampleSource;
+use crate::edit::Audio;
 use device::AudioThread;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -26,7 +26,7 @@ pub struct PlaybackInfo {
 
 struct Session {
     /// The file being played, so closing it can stop playback.
-    source: Arc<SampleSource>,
+    source: Arc<Audio>,
     shared: Arc<Shared>,
     feeder: std::thread::JoinHandle<()>,
 }
@@ -68,7 +68,7 @@ impl Player {
     /// Start playing `req`, replacing any current playback.
     pub fn play(
         &self,
-        src: Arc<SampleSource>,
+        src: Arc<Audio>,
         req: PlayRequest,
         looping: bool,
     ) -> Result<Arc<Shared>, String> {
@@ -111,10 +111,10 @@ impl Player {
         Some(self.end(session))
     }
 
-    /// Stop playback if it is playing `src`.
-    pub fn stop_if_playing(&self, src: &Arc<SampleSource>) {
+    /// Stop playback if it is playing any version of `src`'s file.
+    pub fn stop_if_playing(&self, src: &Audio) {
         let mut guard = self.session.lock().unwrap();
-        if guard.as_ref().is_some_and(|s| Arc::ptr_eq(&s.source, src)) {
+        if guard.as_ref().is_some_and(|s| s.source.same_source(src)) {
             let session = guard.take().unwrap();
             drop(guard);
             self.end(session);

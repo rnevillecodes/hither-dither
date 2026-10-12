@@ -9,7 +9,7 @@ use tauri::State;
 use tauri::ipc::{Channel, Response};
 
 use crate::playback::{PlayRequest, PlaybackInfo, Player};
-use crate::state::{AppState, ClipRuns, FileId, LoadedFile, Metadata};
+use crate::state::{AppState, ClipRuns, EditOp, EditOutcome, FileId, LoadedFile, Metadata};
 use crate::stats::Stats;
 
 pub type SharedState = Arc<AppState>;
@@ -52,6 +52,20 @@ pub enum PlaybackEvent {
     Ended { frame: f64 },
 }
 
+/// Forward `(done, total)` progress to `channel` at most every 50 ms, and at completion.
+fn throttled(channel: Channel<LoadProgress>) -> impl FnMut(u64, u64) {
+    let mut last = Instant::now();
+    move |done, total| {
+        if done == total || last.elapsed() >= Duration::from_millis(50) {
+            last = Instant::now();
+            let _ = channel.send(LoadProgress {
+                done_frames: done,
+                total_frames: total,
+            });
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn open_file(
     state: State<'_, SharedState>,
@@ -63,21 +77,90 @@ pub async fn open_file(
     let state = state.inner().clone();
     let player = player.inner().clone();
     blocking(move || {
-        let mut last = Instant::now();
         state
-            .open(file_id, &path, |done, total| {
-                if done == total || last.elapsed() >= Duration::from_millis(50) {
-                    last = Instant::now();
-                    let _ = on_progress.send(LoadProgress {
-                        done_frames: done,
-                        total_frames: total,
-                    });
-                }
-            })
+            .open(file_id, &path, throttled(on_progress))
             .inspect(|_| {
                 player.stop();
             })
             .map_err(|e| e.to_string())
+    })
+    .await?
+}
+
+/// Stop playback if it is playing `file_id`, before its audio changes.
+fn stop_playing(state: &AppState, player: &Player, file_id: FileId) {
+    if let Some(file) = state.get(file_id) {
+        player.stop_if_playing(&file.audio);
+    }
+}
+
+/// Apply `op` to frames `[start, end)` of `file_id` and re-analyse it.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri maps each argument to an IPC field.
+pub async fn apply_edit(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    file_id: FileId,
+    op: EditOp,
+    start: u64,
+    end: u64,
+    on_progress: Channel<LoadProgress>,
+) -> Result<EditOutcome, String> {
+    let state = state.inner().clone();
+    let player = player.inner().clone();
+    blocking(move || {
+        stop_playing(&state, &player, file_id);
+        state.apply_edit(file_id, op, start, end, throttled(on_progress))
+    })
+    .await?
+}
+
+#[tauri::command]
+pub async fn undo_edit(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    file_id: FileId,
+    on_progress: Channel<LoadProgress>,
+) -> Result<EditOutcome, String> {
+    let state = state.inner().clone();
+    let player = player.inner().clone();
+    blocking(move || {
+        stop_playing(&state, &player, file_id);
+        state.undo(file_id, throttled(on_progress))
+    })
+    .await?
+}
+
+#[tauri::command]
+pub async fn redo_edit(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    file_id: FileId,
+    on_progress: Channel<LoadProgress>,
+) -> Result<EditOutcome, String> {
+    let state = state.inner().clone();
+    let player = player.inner().clone();
+    blocking(move || {
+        stop_playing(&state, &player, file_id);
+        state.redo(file_id, throttled(on_progress))
+    })
+    .await?
+}
+
+/// Write `file_id`'s audio to `path`, or over its own file when `path` is null.
+#[tauri::command]
+pub async fn save_file(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    file_id: FileId,
+    path: Option<PathBuf>,
+) -> Result<EditOutcome, String> {
+    let state = state.inner().clone();
+    let player = player.inner().clone();
+    blocking(move || {
+        // Playback holds the file's mapping, which must be released to replace it.
+        stop_playing(&state, &player, file_id);
+        state.save(file_id, path.as_deref())
     })
     .await?
 }
@@ -100,7 +183,7 @@ pub async fn close_file(
     let player = player.inner().clone();
     blocking(move || {
         if let Some(file) = state.close(file_id) {
-            player.stop_if_playing(&file.source);
+            player.stop_if_playing(&file.audio);
         }
     })
     .await
@@ -167,7 +250,7 @@ pub async fn play(
             ));
         }
         let shared = player.play(
-            file.source.clone(),
+            file.audio.clone(),
             PlayRequest { start, end, from },
             looping,
         )?;
@@ -216,23 +299,23 @@ pub fn set_loop(player: State<'_, SharedPlayer>, enabled: bool) {
 /// Spans of at most `columns` frames are sent as raw samples; longer spans as per-column
 /// min/max pairs.
 pub fn encode_peaks(file: &LoadedFile, start: u64, end: u64, columns: u32) -> Vec<u8> {
-    let frames = file.source.frames();
+    let frames = file.audio.frames();
     let end = end.min(frames);
     let start = start.min(end);
     let columns = columns.clamp(1, MAX_COLUMNS) as usize;
-    let ch = file.source.channels();
+    let ch = file.audio.channels();
     let span = (end - start) as usize;
 
     let (kind, count, values) = if span <= columns {
         let mut interleaved = Vec::new();
-        file.source.read(start, span, &mut interleaved);
+        file.audio.read(start, span, &mut interleaved);
         let mut planar = Vec::with_capacity(interleaved.len());
         for c in 0..ch {
             planar.extend(interleaved.iter().skip(c).step_by(ch));
         }
         (PEAKS_KIND_SAMPLES, span, planar)
     } else {
-        let mm = file.pyramid.query(&file.source, start, end, columns);
+        let mm = file.pyramid.query(&file.audio, start, end, columns);
         let values = mm.iter().flat_map(|m| [m.min, m.max]).collect();
         (PEAKS_KIND_MINMAX, columns, values)
     };

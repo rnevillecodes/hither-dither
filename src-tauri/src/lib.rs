@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod edit;
 pub mod peaks;
 pub mod playback;
 pub mod state;
@@ -26,6 +27,10 @@ pub fn run() {
             commands::stop_playback,
             commands::set_volume,
             commands::set_loop,
+            commands::apply_edit,
+            commands::undo_edit,
+            commands::redo_edit,
+            commands::save_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

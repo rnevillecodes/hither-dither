@@ -124,6 +124,12 @@ export function seek(frame: number) {
   if (transport.playing) void play();
 }
 
+/** Move the playhead to the first frame and scroll it into view (Go to start, Home). */
+export function goToStart() {
+  seek(0);
+  reveal(0);
+}
+
 export function toggleLoop() {
   transport.looping = !transport.looping;
   void api.setLoop(transport.looping);

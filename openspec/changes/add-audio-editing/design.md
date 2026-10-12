@@ -87,7 +87,7 @@ New commands, documented in `docs/ipc.md`:
   - Returns `{ metadata, editState }` after re-analysis.
   - `editState = { canUndo, canRedo, dirty, revision }`.
 - **`undo_edit(fileId, onProgress)`** and **`redo_edit(fileId, onProgress)`**: same response.
-- **`save_file(fileId, path | null, overwrite_ok)`**:
+- **`save_file(fileId, path | null)`**:
   - Writes the file and returns `{ metadata, editState }`.
   - Errors use readable messages (changed on disk, too large, I/O).
 
@@ -128,13 +128,13 @@ The parser gains `fmt_range: Range<u64>` so the writer can copy the chunk. If th
   - Enabled states are pushed from an `$effect` in `App.svelte`, the same way Close Tab is handled today.
   - Shortcuts: Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z, Ctrl+Y, Delete, Ctrl/Cmd+T (Crop), Ctrl/Cmd+L (Silence), Ctrl/Cmd+S, Ctrl/Cmd+Shift+S. The webview key handler gets the same double-fire guard Close Tab uses. Fade In and Fade Out have no shortcut.
 - **Dialogs:**
-  - Overwrite confirmation uses the dialog plugin's `ask`.
+  - Overwrite confirmation uses `message` with `buttons: { ok: "Overwrite", cancel: "Cancel" }`.
   - Save / Don't Save / Cancel uses `message` with `buttons: { yes: "Save", no: "Don't Save", cancel: "Cancel" }`.
   - Save As uses `save` with a WAV filter.
-  - Capabilities add `dialog:allow-save`, `dialog:allow-ask` and `dialog:allow-message`.
+  - Capabilities add `dialog:allow-save` and `dialog:allow-message`.
 - **Closing and quitting:**
   - `closeTab` becomes async and goes through `confirmDiscard`.
-  - Quitting is handled by `getCurrentWindow().onCloseRequested`: prevent the close, prompt for each dirty tab, then `destroy()`. This needs `core:window:allow-destroy`.
+  - Quitting is handled by `getCurrentWindow().onCloseRequested`: prevent the close, prompt for each dirty tab, then `destroy()`. This needs `core:window:allow-close` (menu Quit calls `close()`) and `core:window:allow-destroy`.
   - The predefined Quit menu item is replaced by a custom one that triggers the same path.
 - **Tab strip:** `TabBar` shows a dot in place of the close icon while the tab is dirty (it turns back into × on hover), and the tooltip adds "Unsaved changes".
 - **Go to start:** `Transport.svelte` gets a button that calls `seek(0)` then `reveal(0)`, enabled whenever `app.meta` is set. It isn't tied to `playbackAvailable()`. The Home key gets the same `reveal(0)`.

@@ -23,6 +23,17 @@ export interface Tab {
   userScrolled: boolean;
   playhead: number;
   playStart: number;
+  // Editing.
+  /** Unsaved changes: the audio differs from the file on disk. */
+  dirty: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
+  /** Increases whenever the audio changes; keys the waveform and its caches. */
+  revision: number;
+  /** An edit, undo, redo or save is in progress. */
+  editing: boolean;
+  /** The user has agreed to Save overwriting this file. */
+  overwriteConfirmed: boolean;
 }
 
 export const tabs = $state({
@@ -52,6 +63,12 @@ export function newTab(path: string): Tab {
     userScrolled: false,
     playhead: 0,
     playStart: 0,
+    dirty: false,
+    canUndo: false,
+    canRedo: false,
+    revision: 0,
+    editing: false,
+    overwriteConfirmed: false,
   };
 }
 

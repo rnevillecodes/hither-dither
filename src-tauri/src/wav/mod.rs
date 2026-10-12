@@ -3,9 +3,11 @@
 mod parser;
 mod source;
 pub mod synth;
+mod writer;
 
 pub use parser::{WavInfo, parse_header};
 pub use source::SampleSource;
+pub use writer::{WriteError, check_size, write_wav};
 
 use serde::Serialize;
 

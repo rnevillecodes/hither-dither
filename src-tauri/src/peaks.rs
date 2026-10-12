@@ -5,7 +5,7 @@
 //! whole buckets (taken from the coarsest level that fits) plus partial blocks at the edges,
 //! which are read from the sample source, so results are exact at every zoom level.
 
-use crate::wav::SampleSource;
+use crate::edit::Audio;
 
 pub const BASE_BLOCK: u64 = 256;
 
@@ -141,7 +141,7 @@ impl PeakPyramid {
     /// Min/max of frames `[start, end)` for every channel, split evenly into `columns`
     /// columns. Returns `columns * channels` values, channel-major (`[ch][column]`).
     /// Columns that cover no frames are `(0, 0)`.
-    pub fn query(&self, src: &SampleSource, start: u64, end: u64, columns: usize) -> Vec<MinMax> {
+    pub fn query(&self, src: &Audio, start: u64, end: u64, columns: usize) -> Vec<MinMax> {
         let ch = self.channels;
         let end = end.min(self.frames);
         let start = start.min(end);
@@ -165,14 +165,7 @@ impl PeakPyramid {
     }
 
     /// Merge the min/max of frames `[a, b)` into `acc` (one entry per channel).
-    fn range(
-        &self,
-        src: &SampleSource,
-        a: u64,
-        b: u64,
-        acc: &mut [MinMax],
-        scratch: &mut Vec<f32>,
-    ) {
+    fn range(&self, src: &Audio, a: u64, b: u64, acc: &mut [MinMax], scratch: &mut Vec<f32>) {
         let first_block = a.div_ceil(BASE_BLOCK);
         let last_block = b / BASE_BLOCK;
         if first_block >= last_block {
@@ -202,7 +195,7 @@ impl PeakPyramid {
         }
     }
 
-    fn raw(&self, src: &SampleSource, a: u64, b: u64, acc: &mut [MinMax], scratch: &mut Vec<f32>) {
+    fn raw(&self, src: &Audio, a: u64, b: u64, acc: &mut [MinMax], scratch: &mut Vec<f32>) {
         if a >= b {
             return;
         }
@@ -226,7 +219,7 @@ mod tests {
     use super::*;
     use crate::wav::synth::{Encoding, WavBuilder, interleave};
 
-    fn build(src: &SampleSource) -> PeakPyramid {
+    fn build(src: &Audio) -> PeakPyramid {
         let mut b = PyramidBuilder::new(src.channels(), src.frames());
         let mut buf = Vec::new();
         let mut pos = 0;
@@ -258,10 +251,9 @@ mod tests {
         let spike_at = 654_321usize;
         let mut samples = vec![0.0; frames];
         samples[spike_at] = 1.0;
-        let src = SampleSource::from_bytes(
-            WavBuilder::new(Encoding::Float, 32, 1, 48_000).build(&samples),
-        )
-        .unwrap();
+        let src =
+            Audio::from_bytes(WavBuilder::new(Encoding::Float, 32, 1, 48_000).build(&samples))
+                .unwrap();
         let pyr = build(&src);
         assert_eq!(pyr.frames(), frames as u64);
 
@@ -292,7 +284,7 @@ mod tests {
         let frames = 300_017;
         let left: Vec<f64> = (0..frames).map(|_| rng.unit()).collect();
         let right: Vec<f64> = (0..frames).map(|_| rng.unit() * 0.5).collect();
-        let src = SampleSource::from_bytes(
+        let src = Audio::from_bytes(
             WavBuilder::new(Encoding::Pcm, 16, 2, 44_100).build(&interleave(&[left, right])),
         )
         .unwrap();

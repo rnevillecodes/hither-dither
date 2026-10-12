@@ -1,6 +1,6 @@
 # Acceptance checklist
 
-Manual acceptance pass over every scenario in the four v1 specs (`openspec/changes/add-wav-analyser-app/specs/`), plus the multi-file tabs and app icon change (`openspec/changes/add-multi-file-tabs/specs/`; sections file-tabs, audio-stats: details panel, app-branding, and rows I2b–I13) the dark theme change (section app-theme), and the session restore, tab reordering and window change (`openspec/changes/tab-session-and-window-fit/specs/`; sections app-window, tab-reorder and session-restore).
+Manual acceptance pass over every scenario in the four v1 specs (`openspec/changes/add-wav-analyser-app/specs/`), plus the multi-file tabs and app icon change (`openspec/changes/add-multi-file-tabs/specs/`; sections file-tabs, audio-stats: details panel, app-branding, and rows I2b–I13) the dark theme change (section app-theme), and the session restore, tab reordering and window change (`openspec/changes/tab-session-and-window-fit/specs/`; sections app-window, tab-reorder and session-restore), and the audio editing change (`openspec/changes/add-audio-editing/specs/`; sections transport-controls, audio-editing and wav-export).
 
 **Setup:** generate fixtures with `cd src-tauri && cargo run --release --example gen_fixtures -- ../fixtures --large`, then run `npm run tauri dev`. Fixture names below refer to files in `fixtures/`.
 
@@ -178,3 +178,60 @@ Below, "A" is `cd-16bit-stereo-10s.wav` and "B" is `beep-every-second-mono-60s.w
 | S7 | Close a restoring tab | Open `large-1gb.wav`, quit, relaunch and close its tab while it loads; quit and relaunch again | Load stops with no error; the second relaunch doesn't restore it | | ⏳ |
 | S8 | Selection not restored | Select 1.0–2.0 s in A and zoom in, quit, relaunch | A reopens zoomed to fit, no selection, "Whole file" stats | | ⏳ |
 | S9 | Reordered tabs | Drag B before A, quit, relaunch | Restored in the order B, A | | ⏳ |
+
+## transport-controls
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| G1 | While stopped | Open `beep-every-second-mono-60s.wav`, click at 12 s on the ruler, click Go to start | Playhead at 0; time shows 0:00:00.000 | | ⏳ |
+| G2 | While playing | Play from 30 s, click Go to start | Playback continues from 0 without stopping | | ⏳ |
+| G3 | Zoomed in elsewhere | Open `single-spike-10min.wav`, zoom in around 5:00, click Go to start (also try Home) | View scrolls to the start at the same zoom; playhead visible at 0 | | ⏳ |
+| G4 | Accessible name and tooltip | Hover and Tab to the button | Tooltip "Go to start (Home)"; announced as "Go to start"; still enabled with no audio device | | ⏳ |
+
+## audio-editing
+
+Below, "A" is `cd-16bit-stereo-10s.wav`. Shortcuts: Delete, Ctrl/Cmd+T (Crop), Ctrl/Cmd+L (Silence), Ctrl/Cmd+Z (Undo), Ctrl/Cmd+Shift+Z or Ctrl+Y (Redo); Fade In and Fade Out are in the Edit menu only.
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| E1 | No selection | Open A without selecting | Crop, Delete, Silence, Fade In and Fade Out are greyed out; their shortcuts do nothing | Auto: `editRules.test.ts` (canApply) | ⏳ |
+| E2 | Nothing open | Close every tab, open the Edit menu | Every item is greyed out | | ⏳ |
+| E3 | Trim leading and trailing silence | Select 2.0–7.5 s in A, Edit › Crop to Selection | 5.5 s long, starts with the audio that was at 2.0 s, no selection, zoomed to fit, playhead at 0 | Auto: `edit::tests::crop_keeps_the_range`, `editRules.test.ts` | ⏳ |
+| E4 | Remove a section | Select 4.0–5.0 s, press Delete | 9.0 s long; audio from 5.0 s now at 4.0 s; playhead at 4.0 s | Auto: `edit::tests::delete_joins_either_side` | ⏳ |
+| E5 | Whole file selected | Drag across the whole file, open the Edit menu, press Delete | Delete and Crop greyed out; nothing changes | Auto: `editRules.test.ts` | ⏳ |
+| E6 | Silence a click | Select a few ms, Edit › Silence | Flat waveform there, same length, selection stats show −∞ peak | Auto: `tests/state.rs::silence_shows_in_selection_stats` | ⏳ |
+| E7 | Fade out the ending | Select the last 2 s, Edit › Fade Out | Waveform tapers to silence; audio before is unchanged | Auto: `edit::tests::fade_in_and_out_are_linear` | ⏳ |
+| E8 | Fade twice | Fade Out the same range twice | Visibly steeper (squared) taper | Auto: `edit::tests::fading_twice_squares_the_gain` | ⏳ |
+| E9 | Clipping removed | Open `two-clip-runs.wav`, select a clipped run, Silence | Its clip markers disappear; whole-file clip count drops | Auto: `edit::audio::tests::full_scale_survives_only_at_unity_gain` | ⏳ |
+| E10 | Playback of an edited file | Delete 4.0–5.0 s, play from 3.5 s | Goes straight from the 4.0 s audio to the 5.0 s audio, no gap | Auto: `edit::audio::tests::reads_every_kind_of_edit` | ⏳ |
+| E10b | Long re-analysis | Open `large-1gb.wav`, crop it, switch to another tab during the update | "Updating …" progress box after a moment; other tabs usable; edit menu greyed out for that tab until done | | ⏳ |
+| E11 | Edit during playback | Play A, select a range, Fade In | Playback stops; fade applied | | ⏳ |
+| E12 | Undo a delete | Delete 4.0–5.0 s, Ctrl/Cmd+Z | 10.0 s again with the original audio; Redo enabled | Auto: `tests/state.rs::edit_then_undo_restores_frames_and_stats` | ⏳ |
+| E13 | Several undos | Crop, Silence, Fade In, then Undo ×3 | Identical to the file as opened; Undo greyed out | Auto: `tests/state.rs::edit_then_undo_restores_frames_and_stats` | ⏳ |
+| E14 | New edit clears redo | Undo an edit, then apply a different one | Redo greyed out | Auto: `tests/state.rs::new_edit_after_undo_clears_redo` | ⏳ |
+| E15 | History is per tab | Edit A, switch to B, Ctrl/Cmd+Z | Nothing changes in either file | Auto: `tests/state.rs::edits_on_one_file_leave_others_alone` | ⏳ |
+| E16 | Undo a fade | Fade In 1.0–2.0 s, Undo | Fade gone; 1.0–2.0 s still selected | Auto: `editRules.test.ts` | ⏳ |
+| E17 | Close without saving | Crop A, close the tab, choose Don't Save, reopen A | Original length and content | | ⏳ |
+
+## wav-export
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| X1 | Edit marks the tab | Silence a selection in A | A dot replaces the tab's × (× on hover); tooltip says "Unsaved changes" | | ⏳ |
+| X2 | Undo back to the original | One edit, then Undo | The dot disappears | Auto: `tests/state.rs::edit_then_undo_restores_frames_and_stats` | ⏳ |
+| X3 | First save asks | Crop a copy of A, Ctrl/Cmd+S; try Cancel, then Overwrite | Cancel leaves file and edits; Overwrite saves | | ⏳ |
+| X4 | Later saves don't ask | After X3, edit again and Ctrl/Cmd+S | Saved without a dialog | | ⏳ |
+| X5 | Save a trimmed copy | Crop `take1.wav`, Save As `take1-trim.wav` | New file has the cropped audio; original unchanged; tab now "take1-trim.wav" with no dot; relaunch restores the new path | Auto: `tests/state.rs::save_as_leaves_the_source_alone` | ⏳ |
+| X6 | Cancel the dialog | Save As, then Cancel | Nothing written; edits and dot kept | | ⏳ |
+| X7 | Name of another open file | With B open in another tab, Save As over B's path | Nothing written; notice says it's open in another tab | | ⏳ |
+| X8 | Untouched audio is bit-exact | Delete 1.0–2.0 s from `pcm24-stereo-48k.wav`, Save As | Remaining samples identical to the source | Auto: `wav::writer::tests::untouched_samples_are_bit_exact_after_delete` | ⏳ |
+| X9 | Metadata is not carried over | Edit `with-list-bext-chunks.wav`, Save As, reopen | Only `fmt ` and `data` chunks; same format details | Auto: `wav::writer::tests::metadata_chunks_are_not_written`, `edited_file_keeps_the_format` | ⏳ |
+| X10 | Result too large for WAV | (Not practical by hand) | Save fails with "too large" and writes nothing | Auto: `wav::writer::tests::refuses_results_over_4_gib` | ⏳ |
+| X11 | Read-only target | Save As into a read-only folder | Error notice; original intact; edits kept | Auto: `tests/state.rs::failed_save_keeps_the_edits` | ⏳ |
+| X12 | File changed by another program | Open a copy of A, edit it in another program and save there, then edit and Save in HitherDither | Nothing written; notice says it changed on disk and suggests Save As | Auto: `tests/state.rs::save_refuses_when_the_original_changed` | ⏳ |
+| X13 | Keep working after save | Zoom in, select 1.0–2.0 s, Fade In, Save | Zoom and selection unchanged; Undo greyed out | Auto: `tests/state.rs::save_replaces_the_original` | ⏳ |
+| X14 | Cancel closing | Edit A, Ctrl/Cmd+W, Cancel (also try ×, middle-click, File › Close Tab) | Tab stays open with its edits | | ⏳ |
+| X15 | Save on close | Edit A, close its tab, choose Save | A written with the edits (no overwrite prompt); tab closes | | ⏳ |
+| X16 | Two edited files | Edit A and B, close the window (also File › Quit) | Asked about A, then B; quits after both answered | | ⏳ |
+| X17 | Cancel quitting | Quit with edits, Cancel at the first prompt | App keeps running with every tab and edit; quitting with no edits doesn't prompt | | ⏳ |
+

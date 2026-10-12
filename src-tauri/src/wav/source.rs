@@ -65,8 +65,14 @@ impl SampleSource {
         self.info.channels as usize
     }
 
+    /// The `fmt ` chunk body, for writing a file in the same format.
+    pub fn fmt_bytes(&self) -> &[u8] {
+        let r = &self.info.fmt_range;
+        &self.backing.bytes()[r.start as usize..r.end as usize]
+    }
+
     /// Raw bytes of frames `[start, start + count)`, clamped to the available frames.
-    fn frame_bytes(&self, start: u64, count: usize) -> &[u8] {
+    pub fn frame_bytes(&self, start: u64, count: usize) -> &[u8] {
         let start = start.min(self.info.frames);
         let end = start.saturating_add(count as u64).min(self.info.frames);
         let ba = self.info.block_align() as u64;

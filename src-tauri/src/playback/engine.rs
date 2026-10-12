@@ -13,7 +13,7 @@ use rubato::{
 };
 
 use super::mapping::ChannelMap;
-use crate::wav::SampleSource;
+use crate::edit::Audio;
 
 /// Frames read from the file per feeder step.
 const CHUNK_FRAMES: usize = 1024;
@@ -148,7 +148,7 @@ impl Engine {
 
 /// Start a feeder for `req` and return the engine that consumes its output.
 pub fn start(
-    src: Arc<SampleSource>,
+    src: Arc<Audio>,
     req: PlayRequest,
     looping: bool,
     map: ChannelMap,
@@ -208,7 +208,7 @@ pub fn start(
 }
 
 struct Feeder {
-    src: Arc<SampleSource>,
+    src: Arc<Audio>,
     shared: Arc<Shared>,
     map: ChannelMap,
     producer: Producer<f32>,
@@ -440,14 +440,13 @@ mod tests {
         (all, positions)
     }
 
-    fn ramp_source(frames: usize, rate: u32) -> Arc<SampleSource> {
+    fn ramp_source(frames: usize, rate: u32) -> Arc<Audio> {
         // Distinct value per frame so output can be matched to file positions.
         let x: Vec<f64> = (0..frames)
             .map(|i| (i as f64 + 1.0) / (frames as f64 + 1.0))
             .collect();
         Arc::new(
-            SampleSource::from_bytes(WavBuilder::new(Encoding::Float, 32, 1, rate).build(&x))
-                .unwrap(),
+            Audio::from_bytes(WavBuilder::new(Encoding::Float, 32, 1, rate).build(&x)).unwrap(),
         )
     }
 

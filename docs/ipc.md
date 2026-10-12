@@ -183,3 +183,65 @@ No arguments. Stops output and returns the audible frame at that moment (`number
 | Arg | Type | Notes |
 | --- | --- | --- |
 | `enabled` | boolean | Toggle looping of the current playback range |
+
+## Editing
+
+Edits are non-destructive: the file on disk is untouched until it's saved. Each file keeps an undo history from when it was opened (or last saved). `get_metadata`, `get_peaks`, `compute_stats`, `get_clip_runs` and `play` always serve the current edited audio, with frame positions in the edited timeline.
+
+After an edit, undo or redo the backend re-analyses the edited audio (peaks, whole-file stats and clip runs), much as `open_file` does. Only one edit, undo or redo can run per file at a time; another call for the same file meanwhile rejects with `The file is still being analysed`. `close_file` cancels it, and the call then rejects with `The edit was cancelled`. If the file is playing, playback stops first.
+
+These commands return an `EditOutcome`:
+
+```ts
+interface EditOutcome {
+  metadata: Metadata;      // frames and duration_secs reflect the edited audio
+  edit_state: EditState;
+}
+
+interface EditState {
+  can_undo: boolean;
+  can_redo: boolean;
+  dirty: boolean;          // the audio differs from the file on disk
+  revision: number;        // increases whenever the audio changes; invalidate cached peaks
+}
+```
+
+### `apply_edit`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `op` | `"crop" | "delete" | "silence" | "fadeIn" | "fadeOut"` | |
+| `start` | number | First frame of the range |
+| `end` | number | End of the range (exclusive) |
+| `onProgress` | `Channel<LoadProgress>` | Re-analysis progress, as for `open_file` |
+
+Applies the edit to `[start, end)` across all channels and discards the redo history. Rejects with `Can't apply the edit: …` for an empty or out-of-range selection, a delete that would leave no audio, or a crop of the whole file.
+
+### `undo_edit` / `redo_edit`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `onProgress` | `Channel<LoadProgress>` | Re-analysis progress |
+
+Step back or forward one edit. Rejects with `Nothing to undo` / `Nothing to redo` at either end of the history.
+
+### `save_file`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `path` | `string | null` | Where to write; `null` overwrites the file's own path |
+
+Writes the current audio as a WAV file: the source's `fmt ` chunk followed by a `data` chunk, and no other chunks. Unedited samples are copied byte for byte. Scaled samples are converted in the file's own format (integers rounded to nearest and clamped). The file is written to a temporary file next to the target and then renamed over it, so a failure never leaves a partial file. If the file is playing, playback stops first.
+
+Returns an `EditOutcome`. Afterwards the file is served from the saved copy (its `metadata.path` and `name` are the target's), the history is empty, and the peaks and stats are unchanged.
+
+Rejects, leaving any existing file at the target and the edits as they were:
+- with `“x.wav” changed on disk since it was opened…` when overwriting a file that changed since it was loaded;
+- with `Could not save “x.wav”: the result is too large for a WAV file (over 4 GiB)`;
+- with `Could not save “x.wav”: …` for I/O errors such as a read-only folder.
+
+The frontend asks for confirmation before the first overwrite and rejects targets that are open in another tab.
+

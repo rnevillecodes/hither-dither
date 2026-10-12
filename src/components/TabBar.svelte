@@ -128,7 +128,7 @@
   function onAuxClick(e: MouseEvent, id: number) {
     if (e.button === 1) {
       e.preventDefault();
-      closeTab(id);
+      void closeTab(id);
     }
   }
 </script>
@@ -146,6 +146,7 @@
     <div
       class="tab"
       class:active
+      class:dirty={tab.dirty}
       class:dragged={tab.id === dragId}
       role="presentation"
       data-tab-id={tab.id}
@@ -157,16 +158,20 @@
         class="name"
         role="tab"
         aria-selected={active}
-        title={tab.path}
+        title={tab.dirty ? `${tab.path}
+Unsaved changes` : tab.path}
         onclick={() => activateTab(tab.id)}
       >
         {#if tab.status === "loading"}
           <span class="spinner" aria-label="Loading"></span>
         {/if}
         <span class="label">{tab.name}</span>
+        {#if tab.dirty}<span class="sr-only">(unsaved changes)</span>{/if}
       </button>
-      <button class="close" aria-label="Close {tab.name}" title="Close (Ctrl/Cmd+W)" onclick={() => closeTab(tab.id)}>
-        <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 2l6 6M8 2l-6 6" /></svg>
+      <!-- Unsaved tabs show a dot in place of the ×, which comes back on hover or focus. -->
+      <button class="close" aria-label="Close {tab.name}" title="Close (Ctrl/Cmd+W)" onclick={() => void closeTab(tab.id)}>
+        <svg class="cross" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 2l6 6M8 2l-6 6" /></svg>
+        <svg class="dot" viewBox="0 0 10 10" aria-hidden="true"><circle cx="5" cy="5" r="3" /></svg>
       </button>
     </div>
   {/each}
@@ -268,6 +273,28 @@
   }
   .tab.active .close:hover:not(:disabled) {
     background: var(--bg);
+  }
+  .close .dot {
+    display: none;
+    fill: currentColor;
+    stroke: none;
+  }
+  .tab.dirty .close:not(:hover):not(:focus-visible) .dot {
+    display: block;
+  }
+  .tab.dirty .close:not(:hover):not(:focus-visible) .cross {
+    display: none;
+  }
+  .tab.dirty .close {
+    opacity: 1;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   .close svg {
     width: 10px;

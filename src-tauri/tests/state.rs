@@ -3,7 +3,7 @@
 use hither_dither_lib::commands::{
     PEAKS_HEADER_BYTES, PEAKS_KIND_MINMAX, PEAKS_KIND_SAMPLES, encode_peaks,
 };
-use hither_dither_lib::state::{AppState, OpenError};
+use hither_dither_lib::state::{AppState, CANCELLED, EditOp, OpenError};
 use hither_dither_lib::stats::Loudness;
 use hither_dither_lib::wav::synth::{Encoding, WavBuilder, interleave, sine};
 
@@ -268,4 +268,241 @@ fn detects_file_changed_on_disk() {
         .write_all(&[0; 10])
         .unwrap();
     assert!(state.get(1).unwrap().changed_on_disk());
+}
+
+/// A 16-bit stereo sine file of `frames` frames at 8 kHz, opened as `id`.
+fn open_sine(state: &AppState, dir: &tempfile::TempDir, id: u32, frames: usize) {
+    let s = sine(440.0, 0.5, 8_000, frames);
+    let path = write(
+        dir,
+        &format!("sine{id}.wav"),
+        WavBuilder::new(Encoding::Pcm, 16, 2, 8_000),
+        &interleave(&[s.clone(), s]),
+    );
+    state.open(id, &path, |_, _| {}).unwrap();
+}
+
+fn whole_stats(state: &AppState, id: u32) -> hither_dither_lib::stats::Stats {
+    state.compute_stats(id, None).unwrap().unwrap()
+}
+
+#[test]
+fn edit_then_undo_restores_frames_and_stats() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let before = whole_stats(&state, 1);
+    assert!(!state.edit_state(1).unwrap().dirty);
+
+    let out = state
+        .apply_edit(1, EditOp::Delete, 1_000, 3_000, |_, _| {})
+        .unwrap();
+    assert_eq!(out.metadata.frames, 6_000);
+    assert_eq!(state.get(1).unwrap().audio.frames(), 6_000);
+    assert!(out.edit_state.dirty && out.edit_state.can_undo && !out.edit_state.can_redo);
+    assert_eq!(whole_stats(&state, 1).end, 6_000);
+
+    let out = state.undo(1, |_, _| {}).unwrap();
+    assert_eq!(out.metadata.frames, 8_000);
+    assert!(!out.edit_state.dirty && !out.edit_state.can_undo && out.edit_state.can_redo);
+    assert_eq!(whole_stats(&state, 1), before);
+    assert!(state.undo(1, |_, _| {}).is_err());
+
+    let out = state.redo(1, |_, _| {}).unwrap();
+    assert_eq!(out.metadata.frames, 6_000);
+    assert!(out.edit_state.revision > 1);
+}
+
+#[test]
+fn new_edit_after_undo_clears_redo() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    state
+        .apply_edit(1, EditOp::Silence, 100, 200, |_, _| {})
+        .unwrap();
+    state.undo(1, |_, _| {}).unwrap();
+    let out = state
+        .apply_edit(1, EditOp::FadeIn, 0, 4_000, |_, _| {})
+        .unwrap();
+    assert!(!out.edit_state.can_redo && out.edit_state.can_undo);
+    assert!(state.redo(1, |_, _| {}).is_err());
+}
+
+#[test]
+fn silence_shows_in_selection_stats() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    state
+        .apply_edit(1, EditOp::Silence, 2_000, 3_000, |_, _| {})
+        .unwrap();
+    let sel = state
+        .compute_stats(1, Some((2_000, 3_000)))
+        .unwrap()
+        .unwrap();
+    assert!(
+        sel.channels
+            .iter()
+            .all(|c| c.levels.peak_linear == 0.0 && c.levels.peak_dbfs.is_none())
+    );
+}
+
+#[test]
+fn edits_on_one_file_leave_others_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    open_sine(&state, &dir, 2, 8_000);
+    state
+        .apply_edit(1, EditOp::Crop, 0, 1_000, |_, _| {})
+        .unwrap();
+    assert_eq!(state.get(2).unwrap().metadata.frames, 8_000);
+    let other = state.edit_state(2).unwrap();
+    assert!(!other.dirty && !other.can_undo);
+    assert!(state.undo(2, |_, _| {}).is_err());
+}
+
+#[test]
+fn rejected_edit_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let err = state
+        .apply_edit(1, EditOp::Delete, 0, 8_000, |_, _| {})
+        .unwrap_err();
+    assert!(err.contains("no audio"), "{err}");
+    assert!(!state.edit_state(1).unwrap().can_undo);
+    // The failed edit didn't leave the file marked busy.
+    assert!(
+        state
+            .apply_edit(1, EditOp::Silence, 0, 10, |_, _| {})
+            .is_ok()
+    );
+}
+
+#[test]
+fn closing_during_reanalysis_cancels_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    // Several analysis blocks, so progress is reported before the end.
+    open_sine(&state, &dir, 1, 300_000);
+    let err = state
+        .apply_edit(1, EditOp::FadeOut, 0, 300_000, |_, _| {
+            state.close(1);
+        })
+        .unwrap_err();
+    assert_eq!(err, CANCELLED);
+    assert!(state.get(1).is_none() && state.edit_state(1).is_none());
+}
+
+fn frames_on_disk(path: &std::path::Path) -> u64 {
+    hither_dither_lib::wav::parse_header(&std::fs::read(path).unwrap())
+        .unwrap()
+        .frames
+}
+
+#[test]
+fn save_as_leaves_the_source_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let source = dir.path().join("sine1.wav");
+    let original = std::fs::read(&source).unwrap();
+    state
+        .apply_edit(1, EditOp::Delete, 1_000, 3_000, |_, _| {})
+        .unwrap();
+    let edited_stats = whole_stats(&state, 1);
+
+    let copy = dir.path().join("trimmed.wav");
+    let out = state.save(1, Some(&copy)).unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), original);
+    assert_eq!(frames_on_disk(&copy), 6_000);
+    assert_eq!(out.metadata.name, "trimmed.wav");
+    assert_eq!(out.metadata.frames, 6_000);
+    assert!(!out.edit_state.dirty && !out.edit_state.can_undo && !out.edit_state.can_redo);
+    assert_eq!(state.get(1).unwrap().metadata.path, copy);
+    // Same audio, so the same stats, now served from the saved file.
+    assert_eq!(whole_stats(&state, 1), edited_stats);
+    assert!(state.compute_stats(1, Some((0, 100))).unwrap().is_some());
+}
+
+#[test]
+fn save_replaces_the_original() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let path = dir.path().join("sine1.wav");
+    state
+        .apply_edit(1, EditOp::Crop, 2_000, 7_500, |_, _| {})
+        .unwrap();
+    state
+        .apply_edit(1, EditOp::FadeOut, 5_000, 5_500, |_, _| {})
+        .unwrap();
+    let out = state.save(1, None).unwrap();
+    assert_eq!(out.metadata.frames, 5_500);
+    assert_eq!(frames_on_disk(&path), 5_500);
+    assert!(!out.edit_state.dirty);
+    // The tab keeps working from the replaced file, and further edits can be saved too.
+    let file = state.get(1).unwrap();
+    assert!(!file.changed_on_disk());
+    let tile = encode_peaks(&file, 0, 5_500, 100);
+    assert_eq!(header(&tile).2, 100);
+    drop(file);
+    state
+        .apply_edit(1, EditOp::Delete, 0, 500, |_, _| {})
+        .unwrap();
+    state.save(1, None).unwrap();
+    assert_eq!(frames_on_disk(&path), 5_000);
+    // No temporary files are left behind.
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["sine1.wav"]);
+}
+
+#[test]
+fn save_refuses_when_the_original_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    state
+        .apply_edit(1, EditOp::Silence, 0, 100, |_, _| {})
+        .unwrap();
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(dir.path().join("sine1.wav"))
+        .unwrap()
+        .write_all(&[0; 10])
+        .unwrap();
+    let err = state.save(1, None).unwrap_err();
+    assert!(
+        err.contains("changed on disk") && err.contains("Save As"),
+        "{err}"
+    );
+    assert!(state.edit_state(1).unwrap().dirty);
+}
+
+#[test]
+fn failed_save_keeps_the_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let original = std::fs::read(dir.path().join("sine1.wav")).unwrap();
+    state
+        .apply_edit(1, EditOp::Crop, 0, 1_000, |_, _| {})
+        .unwrap();
+    let err = state
+        .save(1, Some(&dir.path().join("missing-dir").join("x.wav")))
+        .unwrap_err();
+    assert!(err.starts_with("Could not save “x.wav”"), "{err}");
+    let st = state.edit_state(1).unwrap();
+    assert!(st.dirty && st.can_undo);
+    assert_eq!(state.get(1).unwrap().metadata.frames, 1_000);
+    assert_eq!(
+        std::fs::read(dir.path().join("sine1.wav")).unwrap(),
+        original
+    );
 }
