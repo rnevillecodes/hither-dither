@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::edit::{Audio, EditList};
+use crate::edit::{Audio, ClipFade, Crossfade, Curve, EditList};
 use crate::peaks::{PeakPyramid, PyramidBuilder};
 use crate::stats::{self, Analysis, ClipRun, MAX_STORED_RUNS, Stats, StatsRunner};
 use crate::wav::{SampleFormat, SampleSource, WavError, WavInfo, check_size, write_wav};
@@ -77,16 +77,114 @@ pub enum EditOp {
     FadeOut,
 }
 
+/// Length of the crossfade Delete puts on a new join.
+const DEFAULT_CROSSFADE_SECS: f64 = 0.010;
+
 impl EditOp {
-    fn apply(self, list: &EditList, start: u64, end: u64) -> Result<EditList, String> {
+    /// `bend` shapes fades; `sample_rate` sizes Delete's default crossfade.
+    fn apply(
+        self,
+        list: &EditList,
+        start: u64,
+        end: u64,
+        bend: f64,
+        sample_rate: u32,
+    ) -> Result<EditList, String> {
+        let curve = Curve::new(bend);
         let result = match self {
             EditOp::Crop => list.crop(start, end),
-            EditOp::Delete => list.delete(start, end),
+            EditOp::Delete => {
+                let xfade = (sample_rate as f64 * DEFAULT_CROSSFADE_SECS).round() as u64;
+                list.delete(start, end, xfade)
+            }
             EditOp::Silence => list.silence(start, end),
-            EditOp::FadeIn => list.fade_in(start, end),
-            EditOp::FadeOut => list.fade_out(start, end),
+            EditOp::FadeIn => list.fade_in_range(start, end, curve),
+            EditOp::FadeOut => list.fade_out_range(start, end, curve),
         };
         result.map_err(|e| format!("Can't apply the edit: {e}"))
+    }
+}
+
+/// A fade's length (frames) and bend, as sent to and from the frontend.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct FadeSetting {
+    pub len: u64,
+    pub bend: f64,
+}
+
+impl From<ClipFade> for FadeSetting {
+    fn from(f: ClipFade) -> Self {
+        Self {
+            len: f.len,
+            bend: f.curve.bend,
+        }
+    }
+}
+
+impl From<FadeSetting> for ClipFade {
+    fn from(f: FadeSetting) -> Self {
+        Self {
+            len: f.len,
+            curve: Curve::new(f.bend),
+        }
+    }
+}
+
+/// The trim window and end fades, as set by the handles. Trim positions are frames of
+/// the untrimmed timeline (see `ClipInfo::untrimmed_frames`).
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipSettings {
+    pub trim_start: u64,
+    pub trim_end: u64,
+    pub fade_in: FadeSetting,
+    pub fade_out: FadeSetting,
+}
+
+/// A join's crossfade as the handles need it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct JoinState {
+    /// Identifies the join to `set_crossfade`.
+    pub index: usize,
+    /// Output frame of the join (may be outside the audio when trimmed away).
+    pub position: i64,
+    pub len: u64,
+    pub bend: f64,
+    pub max_len: u64,
+}
+
+/// Everything the clip handles show: trim window, end fades and joins.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ClipInfo {
+    pub untrimmed_frames: u64,
+    pub trim_start: u64,
+    pub trim_end: u64,
+    pub fade_in: FadeSetting,
+    pub fade_out: FadeSetting,
+    pub joins: Vec<JoinState>,
+}
+
+impl ClipInfo {
+    fn of(list: &EditList) -> Self {
+        let trim = list.trim();
+        Self {
+            untrimmed_frames: list.untrimmed_frames(),
+            trim_start: trim.start,
+            trim_end: trim.end,
+            fade_in: list.fade_in().into(),
+            fade_out: list.fade_out().into(),
+            joins: list
+                .joins()
+                .into_iter()
+                .map(|j| JoinState {
+                    index: j.index,
+                    position: j.position,
+                    len: j.xfade.len,
+                    bend: j.xfade.curve.bend,
+                    max_len: j.max_len,
+                })
+                .collect(),
+        }
     }
 }
 
@@ -105,6 +203,7 @@ pub struct EditState {
 pub struct EditOutcome {
     pub metadata: Metadata,
     pub edit_state: EditState,
+    pub clip: ClipInfo,
 }
 
 /// Every edit state of one file since it was opened or saved.
@@ -214,14 +313,77 @@ impl AppState {
         self.history.lock().unwrap().get(&id).map(History::state)
     }
 
+    /// The clip handles' state for file `id`.
+    pub fn clip(&self, id: FileId) -> Option<ClipInfo> {
+        self.history
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|h| ClipInfo::of(h.current()))
+    }
+
     /// Apply `op` to frames `[start, end)` of file `id` and re-analyse the result.
-    /// `progress(done, total)` reports the re-analysis. Discards the redo history.
+    /// `bend` shapes fades. `progress(done, total)` reports the re-analysis. Discards
+    /// the redo history.
     pub fn apply_edit(
         &self,
         id: FileId,
         op: EditOp,
         start: u64,
         end: u64,
+        bend: f64,
+        progress: impl FnMut(u64, u64),
+    ) -> Result<EditOutcome, String> {
+        let rate = self.require(id)?.metadata.sample_rate;
+        self.change(id, |list| op.apply(list, start, end, bend, rate), progress)
+    }
+
+    /// Replace file `id`'s trim window and end fades (clamped to what the audio allows).
+    pub fn set_clip(
+        &self,
+        id: FileId,
+        clip: ClipSettings,
+        progress: impl FnMut(u64, u64),
+    ) -> Result<EditOutcome, String> {
+        self.change(
+            id,
+            |list| {
+                Ok(list
+                    .set_trim(clip.trim_start, clip.trim_end)
+                    .set_clip_fades(clip.fade_in.into(), clip.fade_out.into()))
+            },
+            progress,
+        )
+    }
+
+    /// Replace the crossfade at join `join` of file `id` (length clamped).
+    pub fn set_crossfade(
+        &self,
+        id: FileId,
+        join: usize,
+        xfade: FadeSetting,
+        progress: impl FnMut(u64, u64),
+    ) -> Result<EditOutcome, String> {
+        let xfade = Crossfade {
+            len: xfade.len,
+            curve: Curve::new(xfade.bend),
+        };
+        self.change(
+            id,
+            |list| {
+                list.set_crossfade(join, xfade)
+                    .map_err(|e| format!("Can't change the crossfade: {e}"))
+            },
+            progress,
+        )
+    }
+
+    /// Derive a new edit state from the current one, re-analyse and add it to the
+    /// history (discarding redo). A change that leaves the audio as it is adds nothing.
+    fn change(
+        &self,
+        id: FileId,
+        edit: impl FnOnce(&EditList) -> Result<EditList, String>,
         progress: impl FnMut(u64, u64),
     ) -> Result<EditOutcome, String> {
         let token = self.begin_analysis(id)?;
@@ -229,7 +391,16 @@ impl AppState {
             let next = {
                 let history = self.history.lock().unwrap();
                 let h = history.get(&id).ok_or(NO_FILE)?;
-                Arc::new(op.apply(h.current(), start, end)?)
+                let next = edit(h.current())?;
+                if next == **h.current() {
+                    let file = self.require(id)?;
+                    return Ok(EditOutcome {
+                        metadata: file.metadata.clone(),
+                        edit_state: h.state(),
+                        clip: ClipInfo::of(&next),
+                    });
+                }
+                Arc::new(next)
             };
             let file = self.analyse_edits(id, next.clone(), &token, progress)?;
             self.commit(id, file, |h| {
@@ -371,6 +542,7 @@ impl AppState {
         let mut fresh = History::new(audio.edits().clone());
         fresh.revision = revision;
         let edit_state = fresh.state();
+        let clip = ClipInfo::of(fresh.current());
         history.insert(id, fresh);
         files.insert(
             id,
@@ -385,6 +557,7 @@ impl AppState {
         Ok(EditOutcome {
             metadata,
             edit_state,
+            clip,
         })
     }
 
@@ -455,6 +628,7 @@ impl AppState {
         Ok(EditOutcome {
             metadata,
             edit_state: h.state(),
+            clip: ClipInfo::of(h.current()),
         })
     }
 

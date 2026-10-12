@@ -2,6 +2,7 @@
 import { message, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
 import { PROGRESS_DELAY_MS, setSelection } from "./app.svelte";
+import { askFadeCurve, curveDialog } from "./curveDialog.svelte";
 import { type EditKind, afterEdit, canApply } from "./editRules";
 import { notify } from "./notices.svelte";
 import { samePath } from "./tabOrder";
@@ -17,13 +18,14 @@ const TITLES: Record<EditKind, string> = {
   fadeIn: "Could not fade in",
   fadeOut: "Could not fade out",
   undo: "Could not undo",
+  clip: "Could not change the clip",
   redo: "Could not redo",
 };
 
-/** The active tab, if it can be edited now (loaded and not already busy). */
+/** The active tab, if it can be edited now (loaded, not busy, no dialog open). */
 function editableTab(): Tab | null {
   const tab = activeTab();
-  return tab && tab.status === "ready" && tab.meta && !tab.editing ? tab : null;
+  return tab && tab.status === "ready" && tab.meta && !tab.editing && !curveDialog.open ? tab : null;
 }
 
 /** Whether Edit › `op` is available for the active tab. */
@@ -40,11 +42,33 @@ export function canRedo(): boolean {
   return !!editableTab()?.canRedo;
 }
 
-export function applyEdit(op: api.EditOp): Promise<void> {
+/** Apply `op` to the active tab's selection; `bend` shapes fades (0 = linear). */
+export function applyEdit(op: api.EditOp, bend = 0): Promise<void> {
   const tab = editableTab();
   const sel = tab?.selection;
   if (!tab || !sel || !canApply(op, sel, tab.meta!.frames)) return Promise.resolve();
-  return run(tab, op, sel, (p) => api.applyEdit(tab.id, op, sel.start, sel.end, p));
+  return run(tab, op, sel, (p) => api.applyEdit(tab.id, op, sel.start, sel.end, bend, p));
+}
+
+/** Edit › Fade In / Fade Out: ask for the curve, then fade the selection with it. */
+export async function fadeWithCurve(op: "fadeIn" | "fadeOut"): Promise<void> {
+  if (!canEdit(op)) return;
+  const bend = await askFadeCurve(op === "fadeIn" ? "in" : "out");
+  if (bend !== null) await applyEdit(op, bend);
+}
+
+/** Commit a trim / end-fade handle drag on the active tab. */
+export function setClip(clip: api.ClipInfo): Promise<void> {
+  const tab = editableTab();
+  if (!tab) return Promise.resolve();
+  return run(tab, "clip", tab.selection, (p) => api.setClip(tab.id, clip, p));
+}
+
+/** Commit a crossfade handle drag on the active tab. */
+export function setCrossfade(join: number, xfade: api.FadeSetting): Promise<void> {
+  const tab = editableTab();
+  if (!tab) return Promise.resolve();
+  return run(tab, "clip", tab.selection, (p) => api.setCrossfade(tab.id, join, xfade, p));
 }
 
 export function undo(): Promise<void> {
@@ -105,6 +129,7 @@ async function showOutcome(
   tab.meta = outcome.metadata;
   tab.wholeStats = whole;
   tab.clipRuns = clipRuns;
+  tab.clip = outcome.clip;
   setEditState(tab, outcome.edit_state);
 
   const active = tabs.activeId === tab.id;
@@ -222,6 +247,7 @@ async function saveTab(tab: Tab, path: string | null): Promise<boolean> {
     tab.meta = outcome.metadata;
     tab.path = outcome.metadata.path;
     tab.name = outcome.metadata.name;
+    tab.clip = outcome.clip;
     setEditState(tab, outcome.edit_state);
     return true;
   } catch (e) {

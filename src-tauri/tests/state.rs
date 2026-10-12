@@ -3,7 +3,7 @@
 use hither_dither_lib::commands::{
     PEAKS_HEADER_BYTES, PEAKS_KIND_MINMAX, PEAKS_KIND_SAMPLES, encode_peaks,
 };
-use hither_dither_lib::state::{AppState, CANCELLED, EditOp, OpenError};
+use hither_dither_lib::state::{AppState, CANCELLED, ClipSettings, EditOp, FadeSetting, OpenError};
 use hither_dither_lib::stats::Loudness;
 use hither_dither_lib::wav::synth::{Encoding, WavBuilder, interleave, sine};
 
@@ -295,7 +295,7 @@ fn edit_then_undo_restores_frames_and_stats() {
     assert!(!state.edit_state(1).unwrap().dirty);
 
     let out = state
-        .apply_edit(1, EditOp::Delete, 1_000, 3_000, |_, _| {})
+        .apply_edit(1, EditOp::Delete, 1_000, 3_000, 0.0, |_, _| {})
         .unwrap();
     assert_eq!(out.metadata.frames, 6_000);
     assert_eq!(state.get(1).unwrap().audio.frames(), 6_000);
@@ -319,11 +319,11 @@ fn new_edit_after_undo_clears_redo() {
     let state = AppState::default();
     open_sine(&state, &dir, 1, 8_000);
     state
-        .apply_edit(1, EditOp::Silence, 100, 200, |_, _| {})
+        .apply_edit(1, EditOp::Silence, 100, 200, 0.0, |_, _| {})
         .unwrap();
     state.undo(1, |_, _| {}).unwrap();
     let out = state
-        .apply_edit(1, EditOp::FadeIn, 0, 4_000, |_, _| {})
+        .apply_edit(1, EditOp::FadeIn, 0, 4_000, 0.0, |_, _| {})
         .unwrap();
     assert!(!out.edit_state.can_redo && out.edit_state.can_undo);
     assert!(state.redo(1, |_, _| {}).is_err());
@@ -335,7 +335,7 @@ fn silence_shows_in_selection_stats() {
     let state = AppState::default();
     open_sine(&state, &dir, 1, 8_000);
     state
-        .apply_edit(1, EditOp::Silence, 2_000, 3_000, |_, _| {})
+        .apply_edit(1, EditOp::Silence, 2_000, 3_000, 0.0, |_, _| {})
         .unwrap();
     let sel = state
         .compute_stats(1, Some((2_000, 3_000)))
@@ -355,7 +355,7 @@ fn edits_on_one_file_leave_others_alone() {
     open_sine(&state, &dir, 1, 8_000);
     open_sine(&state, &dir, 2, 8_000);
     state
-        .apply_edit(1, EditOp::Crop, 0, 1_000, |_, _| {})
+        .apply_edit(1, EditOp::Crop, 0, 1_000, 0.0, |_, _| {})
         .unwrap();
     assert_eq!(state.get(2).unwrap().metadata.frames, 8_000);
     let other = state.edit_state(2).unwrap();
@@ -369,14 +369,14 @@ fn rejected_edit_changes_nothing() {
     let state = AppState::default();
     open_sine(&state, &dir, 1, 8_000);
     let err = state
-        .apply_edit(1, EditOp::Delete, 0, 8_000, |_, _| {})
+        .apply_edit(1, EditOp::Delete, 0, 8_000, 0.0, |_, _| {})
         .unwrap_err();
     assert!(err.contains("no audio"), "{err}");
     assert!(!state.edit_state(1).unwrap().can_undo);
     // The failed edit didn't leave the file marked busy.
     assert!(
         state
-            .apply_edit(1, EditOp::Silence, 0, 10, |_, _| {})
+            .apply_edit(1, EditOp::Silence, 0, 10, 0.0, |_, _| {})
             .is_ok()
     );
 }
@@ -388,7 +388,7 @@ fn closing_during_reanalysis_cancels_it() {
     // Several analysis blocks, so progress is reported before the end.
     open_sine(&state, &dir, 1, 300_000);
     let err = state
-        .apply_edit(1, EditOp::FadeOut, 0, 300_000, |_, _| {
+        .apply_edit(1, EditOp::FadeOut, 0, 300_000, 0.0, |_, _| {
             state.close(1);
         })
         .unwrap_err();
@@ -410,7 +410,7 @@ fn save_as_leaves_the_source_alone() {
     let source = dir.path().join("sine1.wav");
     let original = std::fs::read(&source).unwrap();
     state
-        .apply_edit(1, EditOp::Delete, 1_000, 3_000, |_, _| {})
+        .apply_edit(1, EditOp::Delete, 1_000, 3_000, 0.0, |_, _| {})
         .unwrap();
     let edited_stats = whole_stats(&state, 1);
 
@@ -434,10 +434,10 @@ fn save_replaces_the_original() {
     open_sine(&state, &dir, 1, 8_000);
     let path = dir.path().join("sine1.wav");
     state
-        .apply_edit(1, EditOp::Crop, 2_000, 7_500, |_, _| {})
+        .apply_edit(1, EditOp::Crop, 2_000, 7_500, 0.0, |_, _| {})
         .unwrap();
     state
-        .apply_edit(1, EditOp::FadeOut, 5_000, 5_500, |_, _| {})
+        .apply_edit(1, EditOp::FadeOut, 5_000, 5_500, 0.0, |_, _| {})
         .unwrap();
     let out = state.save(1, None).unwrap();
     assert_eq!(out.metadata.frames, 5_500);
@@ -450,7 +450,7 @@ fn save_replaces_the_original() {
     assert_eq!(header(&tile).2, 100);
     drop(file);
     state
-        .apply_edit(1, EditOp::Delete, 0, 500, |_, _| {})
+        .apply_edit(1, EditOp::Delete, 0, 500, 0.0, |_, _| {})
         .unwrap();
     state.save(1, None).unwrap();
     assert_eq!(frames_on_disk(&path), 5_000);
@@ -468,7 +468,7 @@ fn save_refuses_when_the_original_changed() {
     let state = AppState::default();
     open_sine(&state, &dir, 1, 8_000);
     state
-        .apply_edit(1, EditOp::Silence, 0, 100, |_, _| {})
+        .apply_edit(1, EditOp::Silence, 0, 100, 0.0, |_, _| {})
         .unwrap();
     use std::io::Write;
     std::fs::OpenOptions::new()
@@ -492,7 +492,7 @@ fn failed_save_keeps_the_edits() {
     open_sine(&state, &dir, 1, 8_000);
     let original = std::fs::read(dir.path().join("sine1.wav")).unwrap();
     state
-        .apply_edit(1, EditOp::Crop, 0, 1_000, |_, _| {})
+        .apply_edit(1, EditOp::Crop, 0, 1_000, 0.0, |_, _| {})
         .unwrap();
     let err = state
         .save(1, Some(&dir.path().join("missing-dir").join("x.wav")))
@@ -505,4 +505,115 @@ fn failed_save_keeps_the_edits() {
         std::fs::read(dir.path().join("sine1.wav")).unwrap(),
         original
     );
+}
+
+fn clip(trim: (u64, u64), fade_in: (u64, f64), fade_out: (u64, f64)) -> ClipSettings {
+    ClipSettings {
+        trim_start: trim.0,
+        trim_end: trim.1,
+        fade_in: FadeSetting {
+            len: fade_in.0,
+            bend: fade_in.1,
+        },
+        fade_out: FadeSetting {
+            len: fade_out.0,
+            bend: fade_out.1,
+        },
+    }
+}
+
+#[test]
+fn adjusting_a_fade_replaces_it_and_undo_restores_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let first = state
+        .set_clip(1, clip((0, 8_000), (400, 0.3), (0, 0.0)), |_, _| {})
+        .unwrap();
+    assert_eq!(first.clip.fade_in.len, 400);
+    assert!(first.edit_state.dirty);
+    let second = state
+        .set_clip(1, clip((0, 8_000), (800, 0.3), (0, 0.0)), |_, _| {})
+        .unwrap();
+    assert_eq!(second.clip.fade_in.len, 800);
+    let back = state.undo(1, |_, _| {}).unwrap();
+    assert_eq!(
+        back.clip.fade_in,
+        FadeSetting {
+            len: 400,
+            bend: 0.3
+        }
+    );
+    // A drag that ends where it started adds nothing to the history.
+    let same = state
+        .set_clip(1, clip((0, 8_000), (400, 0.3), (0, 0.0)), |_, _| {})
+        .unwrap();
+    assert!(same.edit_state.can_redo, "the redo history is untouched");
+}
+
+#[test]
+fn trim_changes_the_length_and_can_be_restored() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let out = state
+        .set_clip(1, clip((1_200, 8_000), (0, 0.0), (0, 0.0)), |_, _| {})
+        .unwrap();
+    assert_eq!(out.metadata.frames, 6_800);
+    assert_eq!(out.clip.untrimmed_frames, 8_000);
+    let out = state
+        .set_clip(1, clip((0, 8_000), (0, 0.0), (0, 0.0)), |_, _| {})
+        .unwrap();
+    assert_eq!(out.metadata.frames, 8_000);
+}
+
+#[test]
+fn delete_creates_a_join_whose_crossfade_is_clamped() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let out = state
+        .apply_edit(1, EditOp::Delete, 4_000, 5_000, 0.0, |_, _| {})
+        .unwrap();
+    let join = out.clip.joins[0];
+    // 10 ms at 8 kHz.
+    assert_eq!((join.position, join.len), (4_000, 80));
+    let out = state
+        .set_crossfade(
+            1,
+            join.index,
+            FadeSetting {
+                len: 1_000_000,
+                bend: 0.5,
+            },
+            |_, _| {},
+        )
+        .unwrap();
+    assert_eq!(out.clip.joins[0].len, join.max_len);
+    assert_eq!(out.clip.joins[0].bend, 0.5);
+    assert!(
+        state
+            .set_crossfade(1, 0, FadeSetting::default(), |_, _| {})
+            .is_err()
+    );
+}
+
+#[test]
+fn saving_bakes_the_clip_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    state
+        .set_clip(1, clip((500, 7_500), (300, 0.0), (300, -0.5)), |_, _| {})
+        .unwrap();
+    let shown = whole_stats(&state, 1);
+    let copy = dir.path().join("shaped.wav");
+    let out = state.save(1, Some(&copy)).unwrap();
+    assert_eq!(frames_on_disk(&copy), 7_000);
+    assert_eq!(out.clip.untrimmed_frames, 7_000);
+    assert_eq!((out.clip.trim_start, out.clip.trim_end), (0, 7_000));
+    assert_eq!(out.clip.fade_in.len + out.clip.fade_out.len, 0);
+    assert!(out.clip.joins.is_empty());
+    assert_eq!(whole_stats(&state, 1), shown);
+    assert_eq!(state.clip(1).unwrap(), out.clip);
 }

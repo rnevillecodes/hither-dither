@@ -196,6 +196,7 @@ These commands return an `EditOutcome`:
 interface EditOutcome {
   metadata: Metadata;      // frames and duration_secs reflect the edited audio
   edit_state: EditState;
+  clip: ClipInfo;          // what the clip handles show (see get_clip)
 }
 
 interface EditState {
@@ -214,9 +215,10 @@ interface EditState {
 | `op` | `"crop" | "delete" | "silence" | "fadeIn" | "fadeOut"` | |
 | `start` | number | First frame of the range |
 | `end` | number | End of the range (exclusive) |
+| `bend` | `number | null` | Fade curve, -1 to 1 (0 or null = linear); only used by `fadeIn`/`fadeOut` |
 | `onProgress` | `Channel<LoadProgress>` | Re-analysis progress, as for `open_file` |
 
-Applies the edit to `[start, end)` across all channels and discards the redo history. Rejects with `Can't apply the edit: …` for an empty or out-of-range selection, a delete that would leave no audio, or a crop of the whole file.
+Applies the edit to `[start, end)` across all channels and discards the redo history. `delete` joins the two sides with a 10 ms linear crossfade (shortened to what the audio allows), which `set_crossfade` can change. Rejects with `Can't apply the edit: …` for an empty or out-of-range selection, a delete that would leave no audio, or a crop of the whole file.
 
 ### `undo_edit` / `redo_edit`
 
@@ -244,4 +246,58 @@ Rejects, leaving any existing file at the target and the edits as they were:
 - with `Could not save “x.wav”: …` for I/O errors such as a read-only folder.
 
 The frontend asks for confirmation before the first overwrite and rejects targets that are open in another tab.
+
+## Clip handles
+
+The whole file behaves like a clip: a trim window over the edited audio, a fade at each end, and a crossfade at every join that `delete` made. These are settings rather than one-off edits: each call replaces the previous setting and adds one undo step. Calls that leave everything as it was add nothing. Saving bakes them into the file, after which the clip state is empty again.
+
+A fade curve's `bend` runs from -1 to 1: 0 is linear, positive values bow the fade line upward (louder through the fade), negative downward. The gain at position t (0..1) of a fade-in is t^(4^-bend); a fade-out is its mirror image.
+
+### `get_clip`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+
+Returns `ClipInfo | null`:
+
+```ts
+interface FadeSetting { len: number; bend: number }  // len in frames; 0 = no fade
+
+interface ClipInfo {
+  untrimmed_frames: number; // length before trimming; trim positions are on this timeline
+  trim_start: number;
+  trim_end: number;         // exclusive; metadata.frames == trim_end - trim_start
+  fade_in: FadeSetting;     // from the start of the trimmed audio
+  fade_out: FadeSetting;    // ending at the end of the trimmed audio
+  joins: {
+    index: number;          // identifies the join to set_crossfade
+    position: number;       // output frame of the join (outside 0..frames if trimmed away)
+    len: number;            // crossfade length in frames (even; half each side; 0 = hard join)
+    bend: number;
+    max_len: number;        // longest crossfade the audio on both sides allows
+  }[];
+}
+```
+
+### `set_clip`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `clip` | `{ trimStart, trimEnd, fadeIn: FadeSetting, fadeOut: FadeSetting }` | Trim positions on the untrimmed timeline |
+| `onProgress` | `Channel<LoadProgress>` | Re-analysis progress |
+
+Replaces the trim window and end fades. Values are clamped rather than rejected: at least one frame stays, and the two fades together never exceed the trimmed length. Returns an `EditOutcome`. If the file is playing, playback stops first.
+
+### `set_crossfade`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `join` | number | A join's `index` from `ClipInfo` |
+| `xfade` | `FadeSetting` | Length in frames (clamped to `max_len`, rounded down to even) and bend |
+| `onProgress` | `Channel<LoadProgress>` | Re-analysis progress |
+
+Replaces one join's crossfade. A length of 0 makes a hard join (it stays a join). Rejects with `Can't change the crossfade: there is no join there` for an index that isn't a join. Returns an `EditOutcome`.
 

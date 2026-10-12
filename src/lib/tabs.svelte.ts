@@ -1,5 +1,5 @@
 // Open files, one tab each, and which one is active.
-import type { ClipRuns, Metadata, PeakTile, Stats } from "./api";
+import type { ClipInfo, ClipRuns, Metadata, PeakTile, Stats } from "./api";
 import type { Selection } from "./selection";
 import type { Viewport } from "./viewport";
 
@@ -34,6 +34,8 @@ export interface Tab {
   editing: boolean;
   /** The user has agreed to Save overwriting this file. */
   overwriteConfirmed: boolean;
+  /** Trim window, end fades and joins, as the clip handles show them. */
+  clip: ClipInfo | null;
 }
 
 export const tabs = $state({
@@ -69,6 +71,7 @@ export function newTab(path: string): Tab {
     revision: 0,
     editing: false,
     overwriteConfirmed: false,
+    clip: null,
   };
 }
 

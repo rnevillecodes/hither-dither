@@ -1,7 +1,7 @@
 // Native application menu.
 import { Menu, MenuItem, PredefinedMenuItem, Submenu } from "@tauri-apps/api/menu";
 import { closeActiveTab, openDialog } from "./actions";
-import { applyEdit, redo, save, saveAs, undo } from "./editActions";
+import { applyEdit, fadeWithCurve, redo, save, saveAs, undo } from "./editActions";
 import { zoomIn, zoomOut, zoomToFit } from "./view.svelte";
 
 /** Menu items whose enabled state follows the app (see `setMenuEnabled`). */
@@ -71,8 +71,8 @@ export async function installMenu(): Promise<void> {
       await toggle("crop", "Crop to Selection", () => void applyEdit("crop"), "CmdOrCtrl+T"),
       await toggle("delete", "Delete\tDel", () => void applyEdit("delete")),
       await toggle("silence", "Silence", () => void applyEdit("silence"), "CmdOrCtrl+L"),
-      await toggle("fade-in", "Fade In", () => void applyEdit("fadeIn")),
-      await toggle("fade-out", "Fade Out", () => void applyEdit("fadeOut")),
+      await toggle("fade-in", "Fade In…", () => void fadeWithCurve("fadeIn")),
+      await toggle("fade-out", "Fade Out…", () => void fadeWithCurve("fadeOut")),
     ],
   });
   const viewMenu = await Submenu.new({

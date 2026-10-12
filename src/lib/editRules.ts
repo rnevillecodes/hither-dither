@@ -2,7 +2,8 @@
 import type { EditOp } from "./api";
 import type { Selection } from "./selection";
 
-export type EditKind = EditOp | "undo" | "redo";
+/** An edit, undo/redo, or a clip-handle change (trim, end fades, crossfade). */
+export type EditKind = EditOp | "undo" | "redo" | "clip";
 
 export interface AfterEdit {
   selection: Selection | null;
@@ -35,6 +36,7 @@ export function afterEdit(
       return { selection, playhead: clampFrame(playhead), fit: false };
     case "undo":
     case "redo":
+    case "clip":
       return {
         selection: newFrames === oldFrames ? selection : null,
         playhead: clampFrame(playhead),

@@ -9,7 +9,10 @@ use tauri::State;
 use tauri::ipc::{Channel, Response};
 
 use crate::playback::{PlayRequest, PlaybackInfo, Player};
-use crate::state::{AppState, ClipRuns, EditOp, EditOutcome, FileId, LoadedFile, Metadata};
+use crate::state::{
+    AppState, ClipInfo, ClipRuns, ClipSettings, EditOp, EditOutcome, FadeSetting, FileId,
+    LoadedFile, Metadata,
+};
 use crate::stats::Stats;
 
 pub type SharedState = Arc<AppState>;
@@ -94,7 +97,8 @@ fn stop_playing(state: &AppState, player: &Player, file_id: FileId) {
     }
 }
 
-/// Apply `op` to frames `[start, end)` of `file_id` and re-analyse it.
+/// Apply `op` to frames `[start, end)` of `file_id` and re-analyse it. `bend` shapes
+/// fades (default linear).
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // Tauri maps each argument to an IPC field.
 pub async fn apply_edit(
@@ -104,15 +108,65 @@ pub async fn apply_edit(
     op: EditOp,
     start: u64,
     end: u64,
+    bend: Option<f64>,
     on_progress: Channel<LoadProgress>,
 ) -> Result<EditOutcome, String> {
     let state = state.inner().clone();
     let player = player.inner().clone();
     blocking(move || {
         stop_playing(&state, &player, file_id);
-        state.apply_edit(file_id, op, start, end, throttled(on_progress))
+        state.apply_edit(
+            file_id,
+            op,
+            start,
+            end,
+            bend.unwrap_or(0.0),
+            throttled(on_progress),
+        )
     })
     .await?
+}
+
+/// Replace `file_id`'s trim window and end fades, as set by the clip handles.
+#[tauri::command]
+pub async fn set_clip(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    file_id: FileId,
+    clip: ClipSettings,
+    on_progress: Channel<LoadProgress>,
+) -> Result<EditOutcome, String> {
+    let state = state.inner().clone();
+    let player = player.inner().clone();
+    blocking(move || {
+        stop_playing(&state, &player, file_id);
+        state.set_clip(file_id, clip, throttled(on_progress))
+    })
+    .await?
+}
+
+/// Replace the crossfade at join `join` of `file_id`.
+#[tauri::command]
+pub async fn set_crossfade(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    file_id: FileId,
+    join: usize,
+    xfade: FadeSetting,
+    on_progress: Channel<LoadProgress>,
+) -> Result<EditOutcome, String> {
+    let state = state.inner().clone();
+    let player = player.inner().clone();
+    blocking(move || {
+        stop_playing(&state, &player, file_id);
+        state.set_crossfade(file_id, join, xfade, throttled(on_progress))
+    })
+    .await?
+}
+
+#[tauri::command]
+pub fn get_clip(state: State<'_, SharedState>, file_id: FileId) -> Option<ClipInfo> {
+    state.clip(file_id)
 }
 
 #[tauri::command]

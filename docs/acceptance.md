@@ -1,6 +1,6 @@
 # Acceptance checklist
 
-Manual acceptance pass over every scenario in the four v1 specs (`openspec/changes/add-wav-analyser-app/specs/`), plus the multi-file tabs and app icon change (`openspec/changes/add-multi-file-tabs/specs/`; sections file-tabs, audio-stats: details panel, app-branding, and rows I2b–I13) the dark theme change (section app-theme), and the session restore, tab reordering and window change (`openspec/changes/tab-session-and-window-fit/specs/`; sections app-window, tab-reorder and session-restore), and the audio editing change (`openspec/changes/add-audio-editing/specs/`; sections transport-controls, audio-editing and wav-export).
+Manual acceptance pass over every scenario in the four v1 specs (`openspec/changes/add-wav-analyser-app/specs/`), plus the multi-file tabs and app icon change (`openspec/changes/add-multi-file-tabs/specs/`; sections file-tabs, audio-stats: details panel, app-branding, and rows I2b–I13) the dark theme change (section app-theme), and the session restore, tab reordering and window change (`openspec/changes/tab-session-and-window-fit/specs/`; sections app-window, tab-reorder and session-restore), and the audio editing change (`openspec/changes/add-audio-editing/specs/`; sections transport-controls, audio-editing and wav-export), and the clip fades change (`openspec/changes/add-clip-fades-and-crossfades/specs/`; section clip-fades, plus rows E4b, E8b, E8c and X8b).
 
 **Setup:** generate fixtures with `cd src-tauri && cargo run --release --example gen_fixtures -- ../fixtures --large`, then run `npm run tauri dev`. Fixture names below refer to files in `fixtures/`.
 
@@ -198,10 +198,13 @@ Below, "A" is `cd-16bit-stereo-10s.wav`. Shortcuts: Delete, Ctrl/Cmd+T (Crop), C
 | E2 | Nothing open | Close every tab, open the Edit menu | Every item is greyed out | | ⏳ |
 | E3 | Trim leading and trailing silence | Select 2.0–7.5 s in A, Edit › Crop to Selection | 5.5 s long, starts with the audio that was at 2.0 s, no selection, zoomed to fit, playhead at 0 | Auto: `edit::tests::crop_keeps_the_range`, `editRules.test.ts` | ⏳ |
 | E4 | Remove a section | Select 4.0–5.0 s, press Delete | 9.0 s long; audio from 5.0 s now at 4.0 s; playhead at 4.0 s | Auto: `edit::tests::delete_joins_either_side` | ⏳ |
+| E4b | Join is crossfaded | After E4, look at 4.0 s zoomed in | A crossfade marker at the join; the audio within 5 ms either side blends instead of switching abruptly | Auto: `edit::audio::tests::crossfade_blends_both_sides_at_the_join`, `tests/state.rs::delete_creates_a_join_whose_crossfade_is_clamped` | ⏳ |
 | E5 | Whole file selected | Drag across the whole file, open the Edit menu, press Delete | Delete and Crop greyed out; nothing changes | Auto: `editRules.test.ts` | ⏳ |
 | E6 | Silence a click | Select a few ms, Edit › Silence | Flat waveform there, same length, selection stats show −∞ peak | Auto: `tests/state.rs::silence_shows_in_selection_stats` | ⏳ |
-| E7 | Fade out the ending | Select the last 2 s, Edit › Fade Out | Waveform tapers to silence; audio before is unchanged | Auto: `edit::tests::fade_in_and_out_are_linear` | ⏳ |
-| E8 | Fade twice | Fade Out the same range twice | Visibly steeper (squared) taper | Auto: `edit::tests::fading_twice_squares_the_gain` | ⏳ |
+| E7 | Fade out the ending | Select the last 2 s, Edit › Fade Out…, Apply without moving the point | Waveform tapers linearly to silence; audio before is unchanged | Auto: `edit::tests::linear_fades` | ⏳ |
+| E8 | Fade twice | Apply the same linear Fade Out to a range twice | Visibly steeper (squared) taper | Auto: `edit::tests::fading_twice_squares_the_gain` | ⏳ |
+| E8b | Curved fade in | Edit › Fade In…, drag the point fully up, Apply | Gain rises quickly then levels off, matching the dialog's curve | Auto: `edit::tests::curved_fades_follow_the_curve`, `curve.test.ts` | ⏳ |
+| E8c | Cancel the dialog | Edit › Fade Out…, then Cancel (also Escape) | Audio and undo history unchanged | | ⏳ |
 | E9 | Clipping removed | Open `two-clip-runs.wav`, select a clipped run, Silence | Its clip markers disappear; whole-file clip count drops | Auto: `edit::audio::tests::full_scale_survives_only_at_unity_gain` | ⏳ |
 | E10 | Playback of an edited file | Delete 4.0–5.0 s, play from 3.5 s | Goes straight from the 4.0 s audio to the 5.0 s audio, no gap | Auto: `edit::audio::tests::reads_every_kind_of_edit` | ⏳ |
 | E10b | Long re-analysis | Open `large-1gb.wav`, crop it, switch to another tab during the update | "Updating …" progress box after a moment; other tabs usable; edit menu greyed out for that tab until done | | ⏳ |
@@ -224,7 +227,8 @@ Below, "A" is `cd-16bit-stereo-10s.wav`. Shortcuts: Delete, Ctrl/Cmd+T (Crop), C
 | X5 | Save a trimmed copy | Crop `take1.wav`, Save As `take1-trim.wav` | New file has the cropped audio; original unchanged; tab now "take1-trim.wav" with no dot; relaunch restores the new path | Auto: `tests/state.rs::save_as_leaves_the_source_alone` | ⏳ |
 | X6 | Cancel the dialog | Save As, then Cancel | Nothing written; edits and dot kept | | ⏳ |
 | X7 | Name of another open file | With B open in another tab, Save As over B's path | Nothing written; notice says it's open in another tab | | ⏳ |
-| X8 | Untouched audio is bit-exact | Delete 1.0–2.0 s from `pcm24-stereo-48k.wav`, Save As | Remaining samples identical to the source | Auto: `wav::writer::tests::untouched_samples_are_bit_exact_after_delete` | ⏳ |
+| X8 | Untouched audio is bit-exact | Delete 1.0–2.0 s from `pcm24-stereo-48k.wav`, Save As | Samples outside the join's crossfade identical to the source | Auto: `wav::writer::tests::untouched_samples_are_bit_exact_outside_the_crossfade` | ⏳ |
+| X8b | Hard join is bit-exact | As X8 but drag the join's crossfade to zero before saving | Every sample identical to the source | Auto: `wav::writer::tests::hard_join_is_bit_exact` | ⏳ |
 | X9 | Metadata is not carried over | Edit `with-list-bext-chunks.wav`, Save As, reopen | Only `fmt ` and `data` chunks; same format details | Auto: `wav::writer::tests::metadata_chunks_are_not_written`, `edited_file_keeps_the_format` | ⏳ |
 | X10 | Result too large for WAV | (Not practical by hand) | Save fails with "too large" and writes nothing | Auto: `wav::writer::tests::refuses_results_over_4_gib` | ⏳ |
 | X11 | Read-only target | Save As into a read-only folder | Error notice; original intact; edits kept | Auto: `tests/state.rs::failed_save_keeps_the_edits` | ⏳ |
@@ -234,4 +238,29 @@ Below, "A" is `cd-16bit-stereo-10s.wav`. Shortcuts: Delete, Ctrl/Cmd+T (Crop), C
 | X15 | Save on close | Edit A, close its tab, choose Save | A written with the edits (no overwrite prompt); tab closes | | ⏳ |
 | X16 | Two edited files | Edit A and B, close the window (also File › Quit) | Asked about A, then B; quits after both answered | | ⏳ |
 | X17 | Cancel quitting | Quit with edits, Cancel at the first prompt | App keeps running with every tab and edit; quitting with no edits doesn't prompt | | ⏳ |
+
+## clip-fades
+
+Below, "A" is `cd-16bit-stereo-10s.wav`. Handles: trim brackets at the audio's edges, small squares at the top for fade and crossfade lengths, dots on fade lines for curves.
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| F1 | Linear by default | Drag A's start fade square to 1 s without touching its dot | Straight fade line; gain rises linearly | Auto: `curve.test.ts`, `edit::curve::tests` | ⏳ |
+| F2 | Bend upward | Drag a fade-out's dot to the top | Line bows upward; audio half way through is louder than linear | Auto: `clipHandles.test.ts` (bend) | ⏳ |
+| F3 | Reset the bend | Double-click a bent fade's dot | Curve returns to linear (one undo step) | Auto: `clipHandles.test.ts` (resetBend) | ⏳ |
+| F4 | Trim the start | Drag A's start bracket to 1.5 s and release | 8.5 s long; starts with the audio that was at 1.5 s | Auto: `tests/state.rs::trim_changes_the_length_and_can_be_restored` | ⏳ |
+| F5 | Restore trimmed audio | Trim 1.5 s, delete a selection, drag the start bracket back to the left | Trimmed 1.5 s returns; the deletion is unaffected | Auto: `edit::tests::trimming_and_restoring` | ⏳ |
+| F6 | Can't trim to nothing | Drag the start bracket past the end | Stops one frame before the end | Auto: `clipHandles.test.ts`, `edit::tests::trim_keeps_at_least_one_frame` | ⏳ |
+| F7 | Fade in the start | Drag the start fade square to 0.5 s | First 0.5 s rises from silence; rest unchanged | Auto: `edit::audio::tests::reads_trims_clip_fades_and_crossfades` | ⏳ |
+| F8 | Fades can't overlap | On a 2 s crop with a 1.5 s fade-out, drag the fade-in towards the end | Fade-in stops at 0.5 s | Auto: `clipHandles.test.ts`, `edit::tests::clip_fades_fit_and_follow_trims` | ⏳ |
+| F9 | Fade follows a trim | Add a 0.5 s fade-in, then trim 1 s from the start | Fade-in still covers the first 0.5 s | Auto: `edit::tests::clip_fades_fit_and_follow_trims` | ⏳ |
+| F10 | Smooth cut | Delete 4.0–5.0 s of A | 9.0 s; 3.995–4.005 s blends out of the cut and into the audio from just before 5.0 s | Auto: `edit::audio::tests::crossfade_blends_both_sides_at_the_join` | ⏳ |
+| F11 | Longer crossfade | Drag the join's crossfade square out to 200 ms | Blend covers 100 ms each side; length unchanged | Auto: `clipHandles.test.ts` (crossfades) | ⏳ |
+| F12 | Hard join | Drag the crossfade to zero | Direct switch at the join; samples unchanged | Auto: `edit::audio::tests::hard_join_is_a_plain_concatenation` | ⏳ |
+| F13 | Limited by available audio | Make a join 20 ms from the end, drag its crossfade to 200 ms | Stops at the longest length the audio allows | Auto: `edit::tests::crossfades_are_clamped_by_the_audio` | ⏳ |
+| F14 | Preview a fade | Drag the end fade square slowly | Fade line and tapered waveform follow the pointer; label shows the fade length | | ⏳ |
+| F15 | Cancel a drag | Drag a trim bracket, press Escape, release | Audio, handles and undo history unchanged; selection kept | | ⏳ |
+| F16 | Select near an edge | Press 20 px in from the start and drag right | A selection is made; no trim or fade | Auto: `clipHandles.test.ts` (hitTest) | ⏳ |
+| F17 | Adjust twice, undo once | Set a 0.5 s fade-in, drag it to 1.0 s, Undo | Fade-in is 0.5 s again with the same curve | Auto: `tests/state.rs::adjusting_a_fade_replaces_it_and_undo_restores_it` | ⏳ |
+| F18 | Save a shaped take | Trim both ends, add fades, Save As, reopen | File contains exactly what was shown; handles back at the edges, no fades | Auto: `tests/state.rs::saving_bakes_the_clip_settings` | ⏳ |
 

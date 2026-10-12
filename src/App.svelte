@@ -1,4 +1,5 @@
 <script lang="ts">
+  import CurveDialog from "./components/CurveDialog.svelte";
   import MetadataPanel from "./components/MetadataPanel.svelte";
   import Notices from "./components/Notices.svelte";
   import ProgressOverlay from "./components/ProgressOverlay.svelte";
@@ -223,6 +224,7 @@
     <div class="drop-hint">Drop WAV files to open them</div>
   {/if}
   <Notices />
+  <CurveDialog />
 </div>
 
 <style>

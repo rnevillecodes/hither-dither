@@ -31,6 +31,9 @@ pub fn run() {
             commands::undo_edit,
             commands::redo_edit,
             commands::save_file,
+            commands::set_clip,
+            commands::set_crossfade,
+            commands::get_clip,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

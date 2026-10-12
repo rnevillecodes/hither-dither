@@ -168,9 +168,37 @@ export interface EditState {
   revision: number;
 }
 
+/** A fade's length in frames (0 = none) and curve bend (-1..1, 0 = linear). */
+export interface FadeSetting {
+  len: number;
+  bend: number;
+}
+
+export interface JoinState {
+  /** Identifies the join to `setCrossfade`. */
+  index: number;
+  /** Output frame of the join (outside the audio when trimmed away). */
+  position: number;
+  /** Crossfade length in frames (even, half each side; 0 = hard join). */
+  len: number;
+  bend: number;
+  max_len: number;
+}
+
+/** What the clip handles show; see docs/ipc.md `get_clip`. */
+export interface ClipInfo {
+  untrimmed_frames: number;
+  trim_start: number;
+  trim_end: number;
+  fade_in: FadeSetting;
+  fade_out: FadeSetting;
+  joins: JoinState[];
+}
+
 export interface EditOutcome {
   metadata: Metadata;
   edit_state: EditState;
+  clip: ClipInfo;
 }
 
 function progressChannel(onProgress: (p: LoadProgress) => void): Channel<LoadProgress> {
@@ -185,9 +213,32 @@ export function applyEdit(
   op: EditOp,
   start: number,
   end: number,
+  bend: number,
   onProgress: (p: LoadProgress) => void,
 ): Promise<EditOutcome> {
-  return invoke("apply_edit", { fileId, op, start, end, onProgress: progressChannel(onProgress) });
+  return invoke("apply_edit", { fileId, op, start, end, bend, onProgress: progressChannel(onProgress) });
+}
+
+export function getClip(fileId: number): Promise<ClipInfo | null> {
+  return invoke("get_clip", { fileId });
+}
+
+/** Replace the trim window and end fades (trim positions on the untrimmed timeline). */
+export function setClip(fileId: number, clip: ClipInfo, onProgress: (p: LoadProgress) => void): Promise<EditOutcome> {
+  return invoke("set_clip", {
+    fileId,
+    clip: { trimStart: clip.trim_start, trimEnd: clip.trim_end, fadeIn: clip.fade_in, fadeOut: clip.fade_out },
+    onProgress: progressChannel(onProgress),
+  });
+}
+
+export function setCrossfade(
+  fileId: number,
+  join: number,
+  xfade: FadeSetting,
+  onProgress: (p: LoadProgress) => void,
+): Promise<EditOutcome> {
+  return invoke("set_crossfade", { fileId, join, xfade, onProgress: progressChannel(onProgress) });
 }
 
 export function undoEdit(fileId: number, onProgress: (p: LoadProgress) => void): Promise<EditOutcome> {

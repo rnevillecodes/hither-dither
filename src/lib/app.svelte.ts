@@ -1,6 +1,6 @@
 // The active document (facade over the active tab), loading a file into a tab, and
 // selection statistics.
-import { computeStats, getClipRuns, openFile } from "./api";
+import { computeStats, getClip, getClipRuns, openFile } from "./api";
 import { notify } from "./notices.svelte";
 import type { Selection } from "./selection";
 import { type Tab, activeTab } from "./tabs.svelte";
@@ -18,6 +18,9 @@ export const app = {
   },
   get clipRuns() {
     return activeTab()?.clipRuns ?? null;
+  },
+  get clip() {
+    return activeTab()?.clip ?? null;
   },
   get wholeStats() {
     return activeTab()?.wholeStats ?? null;
@@ -48,8 +51,13 @@ export async function loadIntoTab(tab: Tab): Promise<void> {
     const meta = await openFile(tab.id, tab.path, (p) => {
       tab.progress.fraction = p.totalFrames ? p.doneFrames / p.totalFrames : 1;
     });
-    const [whole, clipRuns] = await Promise.all([computeStats(tab.id, null), getClipRuns(tab.id)]);
+    const [whole, clipRuns, clip] = await Promise.all([
+      computeStats(tab.id, null),
+      getClipRuns(tab.id),
+      getClip(tab.id),
+    ]);
     tab.meta = meta;
+    tab.clip = clip;
     tab.wholeStats = whole;
     tab.stats = whole;
     tab.clipRuns = clipRuns;

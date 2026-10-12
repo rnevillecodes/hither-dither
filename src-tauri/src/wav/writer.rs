@@ -32,14 +32,14 @@ pub fn check_size(audio: &Audio) -> Result<(), WriteError> {
         .ok_or(WriteError::TooLarge)
 }
 
-/// Write `audio` as a complete WAV file. Unedited samples are copied byte for byte;
-/// scaled ones are converted in their own format (integers rounded and clamped).
+/// Write `audio` as a complete WAV file. Unchanged samples are copied byte for byte;
+/// changed ones (edits, fades, crossfades) are rendered in the file's own units and
+/// encoded, integers rounded and clamped.
 pub fn write_wav(audio: &Audio, out: impl Write) -> Result<(), WriteError> {
     let src = audio.source();
     let info = audio.info();
     let fmt = src.fmt_bytes();
-    let block = info.block_align() as u64;
-    let data_bytes = audio.frames() * block;
+    let data_bytes = audio.frames() * info.block_align() as u64;
     let riff = riff_size(fmt.len() as u64, data_bytes).ok_or(WriteError::TooLarge)?;
 
     let mut out = io::BufWriter::with_capacity(1 << 20, out);
@@ -55,24 +55,18 @@ pub fn write_wav(audio: &Audio, out: impl Write) -> Result<(), WriteError> {
     out.write_all(b"data")?;
     out.write_all(&(data_bytes as u32).to_le_bytes())?;
 
-    let silence = silence_frame(info);
-    let mut buf = Vec::new();
-    for seg in audio.edits().segments() {
+    let (mut rendered, mut encoded) = (Vec::new(), Vec::new());
+    for span in audio.spans() {
         let mut done = 0;
-        while done < seg.len {
-            let n = (seg.len - done).min(CHUNK_FRAMES);
-            if seg.silent {
-                for _ in 0..n {
-                    out.write_all(&silence)?;
-                }
-            } else {
-                let raw = src.frame_bytes(seg.src_start + done, n as usize);
-                if seg.ramps.is_empty() {
-                    out.write_all(raw)?;
-                } else {
-                    buf.clear();
-                    scale(info, raw, |f| seg.gain(done + f), &mut buf);
-                    out.write_all(&buf)?;
+        while done < span.len {
+            let n = (span.len - done).min(CHUNK_FRAMES);
+            match span.src {
+                Some(from) => out.write_all(src.frame_bytes(from + done, n as usize))?,
+                None => {
+                    audio.render_native(span.start + done, n as usize, &mut rendered);
+                    encoded.clear();
+                    encode(info, &rendered, &mut encoded);
+                    out.write_all(&encoded)?;
                 }
             }
             done += n;
@@ -85,55 +79,24 @@ pub fn write_wav(audio: &Audio, out: impl Write) -> Result<(), WriteError> {
     Ok(())
 }
 
-/// One frame of digital silence (unsigned 8-bit samples centre on 0x80).
-fn silence_frame(info: &WavInfo) -> Vec<u8> {
-    let byte = if info.format == SampleFormat::U8 {
-        0x80
-    } else {
-        0
-    };
-    vec![byte; info.block_align()]
-}
-
-/// Scale each frame of `raw` by `gain(frame index)`, appending the encoded result.
-fn scale(info: &WavInfo, raw: &[u8], gain: impl Fn(u64) -> f64, out: &mut Vec<u8>) {
-    let bytes = info.format.bytes();
-    let container = (bytes as u32 * 8).min(32);
+/// Encode samples in the file's own units (see `Audio::render_native`). Integers are
+/// rounded on the grid of significant bits, so the unused low bits stay zero.
+fn encode(info: &WavInfo, samples: &[f64], out: &mut Vec<u8>) {
+    let container = (info.format.bytes() as u32 * 8).min(32);
     let valid = (info.valid_bits as u32).clamp(1, container);
-    // Integers are scaled on the grid of significant bits; the unused low bits stay zero.
     let shift = container - valid;
+    let step = (1u64 << shift) as f64;
     let max = (1i64 << (valid - 1)) - 1;
     let min = -max - 1;
-    for (f, frame) in raw.chunks_exact(info.block_align()).enumerate() {
-        let g = gain(f as u64);
-        for b in frame.chunks_exact(bytes) {
-            match info.format {
-                SampleFormat::F32 => {
-                    let v = f32::from_le_bytes(b.try_into().unwrap());
-                    out.extend_from_slice(&((v as f64 * g) as f32).to_le_bytes());
-                }
-                SampleFormat::F64 => {
-                    let v = f64::from_le_bytes(b.try_into().unwrap());
-                    out.extend_from_slice(&(v * g).to_le_bytes());
-                }
-                format => {
-                    let v = int_value(format, b) >> shift;
-                    let scaled = (v as f64 * g).round().clamp(min as f64, max as f64) as i64;
-                    push_int(format, scaled << shift, out);
-                }
+    for &v in samples {
+        match info.format {
+            SampleFormat::F32 => out.extend_from_slice(&(v as f32).to_le_bytes()),
+            SampleFormat::F64 => out.extend_from_slice(&v.to_le_bytes()),
+            format => {
+                let q = (v / step).round().clamp(min as f64, max as f64) as i64;
+                push_int(format, q << shift, out);
             }
         }
-    }
-}
-
-/// A raw integer sample, signed (8-bit samples re-centred on zero).
-fn int_value(format: SampleFormat, b: &[u8]) -> i64 {
-    match format {
-        SampleFormat::U8 => b[0] as i64 - 128,
-        SampleFormat::I16 => i16::from_le_bytes([b[0], b[1]]) as i64,
-        SampleFormat::I24 => (i32::from_le_bytes([0, b[0], b[1], b[2]]) >> 8) as i64,
-        SampleFormat::I32 => i32::from_le_bytes(b.try_into().unwrap()) as i64,
-        SampleFormat::F32 | SampleFormat::F64 => unreachable!("float samples are not integers"),
     }
 }
 
@@ -152,7 +115,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::edit::EditList;
+    use crate::edit::{Crossfade, Curve, EditList};
     use crate::wav::synth::{Encoding, WavBuilder};
     use crate::wav::{SampleSource, parse_header};
 
@@ -164,6 +127,8 @@ mod tests {
         (Encoding::Float, 32),
         (Encoding::Float, 64),
     ];
+
+    const LIN: Curve = Curve::LINEAR;
 
     /// Stereo test signal with full-scale peaks: 50 frames.
     fn samples() -> Vec<f64> {
@@ -204,10 +169,29 @@ mod tests {
     }
 
     #[test]
-    fn untouched_samples_are_bit_exact_after_delete() {
+    fn untouched_samples_are_bit_exact_outside_the_crossfade() {
         for (enc, bits) in FORMATS {
             let src = source(WavBuilder::new(enc, bits, 2, 44_100));
-            let out = write(&src, EditList::identity(50).delete(10, 20).unwrap());
+            // A 4-frame crossfade covers output frames 8..12 around the join at 10.
+            let out = write(&src, EditList::identity(50).delete(10, 20, 4).unwrap());
+            let ba = src.info().block_align();
+            let orig = src.frame_bytes(0, 50);
+            let got = data(&out);
+            assert_eq!(&got[..8 * ba], &orig[..8 * ba], "{enc:?} {bits} before");
+            assert_eq!(&got[12 * ba..], &orig[22 * ba..], "{enc:?} {bits} after");
+        }
+    }
+
+    #[test]
+    fn hard_join_is_bit_exact() {
+        for (enc, bits) in FORMATS {
+            let src = source(WavBuilder::new(enc, bits, 2, 44_100));
+            let list = EditList::identity(50)
+                .delete(10, 20, 4)
+                .unwrap()
+                .set_crossfade(1, Crossfade { len: 0, curve: LIN })
+                .unwrap();
+            let out = write(&src, list);
             let ba = src.info().block_align();
             let orig = src.frame_bytes(0, 50);
             let expected = [&orig[..10 * ba], &orig[20 * ba..]].concat();
@@ -221,9 +205,11 @@ mod tests {
             for extensible in [false, true] {
                 let src = source(WavBuilder::new(enc, bits, 2, 48_000).extensible(extensible));
                 let list = EditList::identity(50)
-                    .fade_in(0, 20)
+                    .fade_in_range(0, 20, Curve::new(0.4))
                     .unwrap()
                     .silence(30, 35)
+                    .unwrap()
+                    .delete(36, 40, 4)
                     .unwrap()
                     .crop(5, 45)
                     .unwrap();
@@ -271,23 +257,22 @@ mod tests {
     }
 
     #[test]
-    fn f64_fades_keep_full_precision() {
+    fn f64_fades_and_crossfades_keep_full_precision() {
         let src = source(WavBuilder::new(Encoding::Float, 64, 2, 48_000));
-        let list = EditList::identity(50).fade_out(0, 50).unwrap();
-        let out = write(&src, list.clone());
-        let orig = src.frame_bytes(0, 50);
-        let seg = &list.segments()[0];
-        for (i, (o, n)) in orig
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .zip(data(&out).as_chunks::<8>().0)
-            .enumerate()
-        {
-            let o = f64::from_le_bytes(*o);
-            let n = f64::from_le_bytes(*n);
-            assert!((o * seg.gain(i as u64 / 2) - n).abs() < 1e-12);
+        let list = EditList::identity(50)
+            .fade_out_range(0, 30, Curve::new(-0.3))
+            .unwrap()
+            .delete(30, 34, 6)
+            .unwrap();
+        let audio = Audio::with_edits(src.clone(), Arc::new(list.clone()));
+        let out = write(&src, list);
+        let mut want = Vec::new();
+        audio.render_native(0, audio.frames() as usize, &mut want);
+        for (n, w) in data(&out).as_chunks::<8>().0.iter().zip(&want) {
+            assert!((f64::from_le_bytes(*n) - w).abs() < 1e-12);
         }
+        // The native render really is in f64: it isn't rounded to f32 precision.
+        assert!(want.iter().any(|&w| (w as f32) as f64 != w));
     }
 
     #[test]
@@ -321,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn scaled_samples_stay_on_the_valid_bit_grid() {
+    fn changed_samples_stay_on_the_valid_bit_grid() {
         let mut bytes = WavBuilder::new(Encoding::Pcm, 24, 2, 48_000)
             .extensible(true)
             .build(&samples());
@@ -329,7 +314,12 @@ mod tests {
         let fmt = parse_header(&bytes).unwrap().fmt_range.start as usize;
         bytes[fmt + 18..fmt + 20].copy_from_slice(&20u16.to_le_bytes());
         let src = Arc::new(SampleSource::from_bytes(bytes).unwrap());
-        let out = write(&src, EditList::identity(50).fade_in(0, 50).unwrap());
+        let list = EditList::identity(50)
+            .fade_in_range(0, 50, LIN)
+            .unwrap()
+            .delete(20, 30, 8)
+            .unwrap();
+        let out = write(&src, list);
         for s in data(&out).as_chunks::<3>().0 {
             assert_eq!(s[0] & 0x0F, 0, "low 4 bits must stay zero");
         }
