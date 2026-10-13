@@ -12,6 +12,7 @@ use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 
+use super::levels::{BLOCK_FRAMES, Levels, Meter, measure};
 use super::mapping::ChannelMap;
 use crate::edit::{Audio, EditList, Located};
 use crate::fx::live::{Live, LiveChain};
@@ -39,6 +40,8 @@ pub struct PlayRequest {
 /// State shared between the feeder, the audio callback and position reporting.
 pub struct Shared {
     pub file_rate: u32,
+    /// Device frames per second.
+    out_rate: f64,
     pub looping: AtomicBool,
     /// Linear gain as `f32` bits.
     pub volume: Arc<AtomicU32>,
@@ -49,6 +52,8 @@ pub struct Shared {
     pub finished: AtomicBool,
     /// File frame audible at `stamp_nanos`, as `f64` bits.
     audible: AtomicU64,
+    /// Output frame index audible at `stamp_nanos`, as `f64` bits.
+    audible_out: AtomicU64,
     stamp_nanos: AtomicU64,
     /// The callback is advancing (false before the first callback and after an underrun
     /// at the end).
@@ -83,6 +88,13 @@ pub struct Shared {
     fx_active: AtomicBool,
     /// The effects couldn't keep up with real time (reported once per playback).
     overload: AtomicBool,
+    /// Levels of the audio after the effects, measured by the feeder ahead of the output.
+    meter: Mutex<Meter>,
+    /// The output indices `(skip_from, skip_to]` the engine jumped over at its latest switch
+    /// (stale audio it stopped playing, and new audio it skipped), counted by `skip_seq`.
+    skip_from: AtomicU64,
+    skip_to: AtomicU64,
+    skip_seq: AtomicU64,
 }
 
 /// Switch playback to `audio` (a new edit state of the same source), playing `[start, end)`.
@@ -93,15 +105,24 @@ pub struct Retarget {
 }
 
 impl Shared {
-    fn new(file_rate: u32, req: PlayRequest, looping: bool, volume: Arc<AtomicU32>) -> Self {
+    fn new(
+        file_rate: u32,
+        out_rate: u32,
+        channels: usize,
+        req: PlayRequest,
+        looping: bool,
+        volume: Arc<AtomicU32>,
+    ) -> Self {
         Self {
             file_rate,
+            out_rate: out_rate as f64,
             looping: AtomicBool::new(looping),
             volume,
             stop: AtomicBool::new(false),
             feeder_done: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             audible: AtomicU64::new((req.from as f64).to_bits()),
+            audible_out: AtomicU64::new(0f64.to_bits()),
             stamp_nanos: AtomicU64::new(0),
             running: AtomicBool::new(false),
             base: Instant::now(),
@@ -121,6 +142,10 @@ impl Shared {
             fill_limit: AtomicUsize::new(usize::MAX),
             fx_active: AtomicBool::new(false),
             overload: AtomicBool::new(false),
+            meter: Mutex::new(Meter::new(channels, file_rate)),
+            skip_from: AtomicU64::new(0),
+            skip_to: AtomicU64::new(0),
+            skip_seq: AtomicU64::new(0),
         }
     }
 
@@ -139,6 +164,29 @@ impl Shared {
             return end as f64;
         }
         pos.clamp(start as f64, end as f64)
+    }
+
+    /// Levels of the audio heard since this was last asked (after the effects, before the
+    /// volume), or `None` if no more has been heard.
+    pub fn levels(&self) -> Option<Levels> {
+        // Read before the skip: the engine records a skip before publishing a later position.
+        let mut audible = f64::from_bits(self.audible_out.load(Ordering::Acquire));
+        let skip_seq = self.skip_seq.load(Ordering::Acquire);
+        let mut meter = self.meter.lock().unwrap();
+        if skip_seq != meter.skip_seq {
+            meter.skip_seq = skip_seq;
+            let from = self.skip_from.load(Ordering::Relaxed);
+            meter.drop_range(from, self.skip_to.load(Ordering::Relaxed));
+        }
+        if self.finished.load(Ordering::Acquire) {
+            audible = f64::INFINITY;
+        } else if self.running.load(Ordering::Acquire) {
+            let stamp = Duration::from_nanos(self.stamp_nanos.load(Ordering::Acquire));
+            let elapsed = self.base.elapsed().saturating_sub(stamp);
+            // Interpolated as for `position`.
+            audible += elapsed.as_secs_f64().min(0.1) * self.out_rate;
+        }
+        meter.advance_to(audible)
     }
 
     /// The play range of the audio being heard.
@@ -302,6 +350,9 @@ impl Engine {
         let sh = &self.shared;
         let audible = pos - latency.as_secs_f64() * sh.file_rate as f64;
         sh.audible.store(audible.to_bits(), Ordering::Release);
+        let audible_out = self.out_index as f64 - latency.as_secs_f64() * sh.out_rate;
+        sh.audible_out
+            .store(audible_out.to_bits(), Ordering::Release);
         sh.stamp_nanos
             .store(sh.base.elapsed().as_nanos() as u64, Ordering::Release);
         let gain = f32::from_bits(sh.volume.load(Ordering::Relaxed));
@@ -454,6 +505,7 @@ impl Engine {
             .read_chunk(dropped * ch)
             .expect("slots checked")
             .commit_all();
+        let skipped_from = self.out_index;
         self.out_index = sw.to + sw.new_played + dropped as u64;
         self.generation = sw.generation;
         self.pending = None;
@@ -462,6 +514,10 @@ impl Engine {
         let sh = &self.shared;
         sh.range_start.store(sw.start, Ordering::Release);
         sh.range_end.store(sw.end, Ordering::Release);
+        // The rest of the stale audio, and the new audio skipped, are never heard.
+        sh.skip_from.store(skipped_from, Ordering::Relaxed);
+        sh.skip_to.store(self.out_index, Ordering::Relaxed);
+        sh.skip_seq.fetch_add(1, Ordering::Release);
         true
     }
 
@@ -507,7 +563,10 @@ pub fn start(
     let (producer, consumer) = RingBuffer::<f32>::new(ring);
     let (marker_tx, marker_rx) = RingBuffer::<Marker>::new(64);
     let fx_limit = ((out_rate as f64 * FX_RING_SECS) as usize * out_ch).min(ring);
-    let shared = Arc::new(Shared::new(file_rate, req, looping, volume));
+    let channels = src.channels();
+    let shared = Arc::new(Shared::new(
+        file_rate, out_rate, channels, req, looping, volume,
+    ));
     let limit = if fx.is_some() { fx_limit } else { ring };
     shared.fill_limit.store(limit, Ordering::Relaxed);
     shared.set_fx(fx);
@@ -528,6 +587,9 @@ pub fn start(
         markers: marker_tx,
         resampler: (file_rate != out_rate).then(|| Resample::new(file_rate, out_rate, out_ch)),
         written: 0,
+        ratio: out_rate as f64 / file_rate as f64,
+        meter_base: 0,
+        measured: 0,
         live: None,
         capacity: ring,
         fx_limit,
@@ -563,6 +625,12 @@ struct Feeder {
     resampler: Option<Resample>,
     /// Output frames queued so far.
     written: u64,
+    /// Output frames per file frame.
+    ratio: f64,
+    /// Output index where the audio being measured starts (the latest switch), and the
+    /// file frames measured since.
+    meter_base: u64,
+    measured: u64,
     /// The effects the audio is processed through.
     live: Option<Live>,
     /// Ring capacity, and the part of it filled while effects process, in samples.
@@ -601,6 +669,8 @@ impl Feeder {
                 pos = from;
                 fed = 0;
                 base_out = self.written;
+                self.meter_base = self.written;
+                self.measured = 0;
                 if let Some(r) = &mut self.resampler {
                     r.reset();
                 }
@@ -691,6 +761,7 @@ impl Feeder {
         out: &mut Vec<f32>,
         out_ch: usize,
     ) -> bool {
+        self.measure(frames);
         mapped.clear();
         self.map.apply(frames, mapped);
         out.clear();
@@ -699,6 +770,18 @@ impl Feeder {
             None => out.extend_from_slice(mapped),
         }
         self.write(out, out_ch)
+    }
+
+    /// Measure the levels of `frames` (interleaved, in the file's channels), tagging each
+    /// block with the output index at which it will have been heard.
+    fn measure(&mut self, frames: &[f32]) {
+        let ch = self.src.channels();
+        let mut meter = self.shared.meter.lock().unwrap();
+        for block in frames.chunks(BLOCK_FRAMES * ch) {
+            self.measured += (block.len() / ch) as u64;
+            let out_end = self.meter_base + (self.measured as f64 * self.ratio).round() as u64;
+            meter.push_block(measure(block, ch, out_end));
+        }
     }
 
     /// Take the effects to use from now on. The input is starting or jumping, so the chain's
@@ -1077,7 +1160,7 @@ mod tests {
             end: 100_000,
             from: 0,
         };
-        let shared = Arc::new(Shared::new(8_000, req, false, volume()));
+        let shared = Arc::new(Shared::new(8_000, 8_000, 1, req, false, volume()));
         let engine = Engine::new(consumer, marker_rx, shared, 1, 8_000, 0);
         (engine, producer, marker_tx)
     }
@@ -1370,5 +1453,98 @@ mod tests {
             play_for(&mut engine, 256);
         }
         assert_eq!(engine.shared().position(), 400_000.0);
+    }
+
+    // --- Levels of what is heard ------------------------------------------------------
+
+    /// Render `buffers` buffers of 256 frames (`out_ch` channels), asking for the levels after
+    /// each like the position reporter. Returns, per buffer, whether the first switch had
+    /// been carried out and the levels.
+    fn play_metered(
+        engine: &mut Engine,
+        out_ch: usize,
+        buffers: usize,
+    ) -> Vec<(bool, Option<Levels>, Vec<f32>)> {
+        let mut played = Vec::new();
+        for _ in 0..buffers {
+            let wait = Instant::now() + Duration::from_millis(500);
+            while engine.samples.slots() < 1_024 * out_ch
+                && !engine.shared().feeder_done.load(Ordering::Acquire)
+                && Instant::now() < wait
+            {
+                std::thread::sleep(Duration::from_micros(100));
+            }
+            let mut buf = vec![0.0; 256 * out_ch];
+            engine.render(&mut buf, Duration::ZERO);
+            let switched = engine.shared().applied_gen.load(Ordering::Acquire) > 0;
+            played.push((switched, engine.shared().levels(), buf));
+        }
+        played
+    }
+
+    #[test]
+    fn levels_are_per_file_channel_unaffected_by_volume_and_follow_what_is_heard() {
+        let src = ramp_source(80_000, 8_000);
+        let vol = Arc::new(AtomicU32::new(0.5f32.to_bits()));
+        let req = PlayRequest {
+            start: 0,
+            end: 80_000,
+            from: 0,
+        };
+        // Mono on a stereo device, at half volume.
+        let map = ChannelMap::new(1, 2, false);
+        let (mut engine, _feeder) = start(src.clone(), req, false, map, 8_000, vol, None);
+        engine.wait_prefilled(Duration::from_secs(2));
+        let played = play_metered(&mut engine, 2, 40);
+        // Nothing has been heard when the first buffer starts.
+        assert_eq!(played[0].1, None);
+        let mut one = Vec::new();
+        for (k, (_, levels, buf)) in played.iter().enumerate().skip(1) {
+            let levels = levels.as_ref().expect("a block was heard");
+            assert_eq!(
+                levels.len(),
+                1,
+                "one file channel, though the device has two"
+            );
+            // The block heard last ends at the start of buffer `k`; the ramp peaks there.
+            src.read(256 * k as u64 - 1, 1, &mut one);
+            assert_eq!(levels[0][0], one[0], "buffer {k}");
+            // The volume scales what is played, not the levels.
+            src.read(256 * k as u64, 1, &mut one);
+            assert_eq!(buf[0], one[0] * 0.5);
+        }
+        engine.shared().stop.store(true, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn levels_skip_audio_dropped_at_a_switch() {
+        let old = ramp_source(FRAMES, RATE);
+        let mut engine = start_playing(&old, 0, FRAMES as u64, 100_000, false);
+        let mut played = play_metered(&mut engine, 1, 16);
+        // Silence everything: from the switch on, only silence is heard. The old audio
+        // queued beyond the switch was measured but is never heard.
+        let new = edited(&old, |l| l.silence(0, FRAMES as u64).unwrap());
+        follow(&engine, &old, &new);
+        played.extend(play_metered(&mut engine, 1, 40));
+        assert!(played.iter().filter(|b| b.0).count() > 20);
+        // The ramp rises, so unheard old audio would read louder than anything played.
+        let mut loudest = 0.0f32;
+        for (k, (_, levels, buf)) in played.iter().enumerate() {
+            loudest = buf.iter().fold(loudest, |m, v| m.max(v.abs()));
+            if let Some(levels) = levels {
+                assert!(
+                    levels[0][0] <= loudest,
+                    "buffer {k}: {levels:?} > {loudest}"
+                );
+            }
+        }
+        // After the buffer that crossfades, nothing but silence is reported.
+        for (k, (_, levels, buf)) in played.iter().filter(|b| b.0).enumerate().skip(1) {
+            assert!(buf.iter().all(|v| *v == 0.0));
+            if let Some(levels) = levels {
+                assert_eq!(levels[0][0], 0.0, "buffer {k} after the switch");
+            }
+        }
+        engine.shared().stop.store(true, Ordering::Relaxed);
     }
 }

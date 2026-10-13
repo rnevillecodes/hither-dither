@@ -171,10 +171,12 @@ The audio is heard through the file's effect chain (see *Effect chains*), at the
 
 ```ts
 type PlaybackEvent =
-  | { kind: "position"; frame: number } // audible file frame, about every 16 ms, latency-compensated
+  | { kind: "position"; frame: number; levels: [number, number][] } // audible file frame, about every 16 ms, latency-compensated; levels below
   | { kind: "ended"; frame: number }    // reached `end` (not sent when looping or stopped)
   | { kind: "overload" };               // the effects can't keep up with real time
 ```
+
+`levels` holds `[peak, rms]` for each of the file's channels (not the device's), as linear amplitudes (1.0 is full scale), of the audio heard since the previous `position`: after the effect chain, before the volume, channel mapping and resampling. `peak` is the largest sample magnitude among the newly heard audio; `rms` is taken over the most recent 300 ms heard (a full-scale sine reads 0.707, as in the Levels statistics). Levels are measured in 256-frame blocks and reported once each block has been heard, so they are in step with `frame` to within a block. Audio skipped unheard when playback follows an edit is never reported. `levels` is empty when nothing more has been heard (before output starts, and after the end).
 
 `overload` is sent at most once per playback, when the output runs dry three or more times within 2 s in the middle of the range while effects are processing. The frontend shows it as a notice that the effects are too demanding to play smoothly; saving still renders them correctly.
 

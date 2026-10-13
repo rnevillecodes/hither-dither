@@ -1,6 +1,6 @@
 # Acceptance checklist
 
-Manual acceptance pass over every scenario in the four v1 specs (`openspec/changes/add-wav-analyser-app/specs/`), plus the multi-file tabs and app icon change (`openspec/changes/add-multi-file-tabs/specs/`; sections file-tabs, audio-stats: details panel, app-branding, and rows I2b–I13) the dark theme change (section app-theme), and the session restore, tab reordering and window change (`openspec/changes/tab-session-and-window-fit/specs/`; sections app-window, tab-reorder and session-restore), and the audio editing change (`openspec/changes/add-audio-editing/specs/`; sections transport-controls, audio-editing and wav-export), and the clip fades change (`openspec/changes/add-clip-fades-and-crossfades/specs/`; section clip-fades, plus rows E4b, E8b, E8c and X8b), and the live editing change (`openspec/changes/add-live-editing/specs/`; section live-editing, plus rows E9, E10b, F14, F14b, F19, X13b and X13c, and E11 removed), and the VST3 effect chain change (`openspec/changes/add-vst3-effect-chain/specs/`; sections plugin-editors, effect-chain and vst3-plugins), and the session files change (`openspec/changes/add-session-files/specs/`; section session-files), and the save/export change (`openspec/changes/save-sessions-export-audio/specs/`; sections wav-export and session-files, rows X2b–X17 and SF22–SF26), and the replace-audio change (`openspec/changes/replace-session-audio/specs/`; section replace-audio, rows SF13, SF14 and SF27–SF30).
+Manual acceptance pass over every scenario in the four v1 specs (`openspec/changes/add-wav-analyser-app/specs/`), plus the multi-file tabs and app icon change (`openspec/changes/add-multi-file-tabs/specs/`; sections file-tabs, app-branding, and rows I2b–I13) the dark theme change (section app-theme), and the session restore, tab reordering and window change (`openspec/changes/tab-session-and-window-fit/specs/`; sections app-window, tab-reorder and session-restore), and the audio editing change (`openspec/changes/add-audio-editing/specs/`; sections transport-controls, audio-editing and wav-export), and the clip fades change (`openspec/changes/add-clip-fades-and-crossfades/specs/`; section clip-fades, plus rows E4b, E8b, E8c and X8b), and the live editing change (`openspec/changes/add-live-editing/specs/`; section live-editing, plus rows E9, E10b, F14, F14b, F19, X13b and X13c, and E11 removed), and the VST3 effect chain change (`openspec/changes/add-vst3-effect-chain/specs/`; sections plugin-editors, effect-chain and vst3-plugins), and the session files change (`openspec/changes/add-session-files/specs/`; section session-files), and the save/export change (`openspec/changes/save-sessions-export-audio/specs/`; sections wav-export and session-files, rows X2b–X17 and SF22–SF26), and the replace-audio change (`openspec/changes/replace-session-audio/specs/`; section replace-audio, rows SF13, SF14 and SF27–SF30), and the tabbed sidebar change (`openspec/changes/tabbed-details-sidebar/specs/`; section details-sidebar, which replaces the audio-stats details panel rows, plus rows C3, C5 and FX1), and the level meter change (`openspec/changes/playback-level-meter/specs/`; section level-meter, plus row SB8).
 
 **Setup:** generate fixtures with `cd src-tauri && cargo run --release --example gen_fixtures -- ../fixtures --large`, then run `npm run tauri dev`. Fixture names below refer to files in `fixtures/`.
 
@@ -97,14 +97,61 @@ Below, "A" is `cd-16bit-stereo-10s.wav` and "B" is `beep-every-second-mono-60s.w
 | T16 | Play in another tab | Switch to A and press Space | A plays from its own playhead | | ⏳ |
 | T17 | Close the playing tab | Play B, then close its tab | Playback stops; no error | | ⏳ |
 
-## audio-stats: details panel
+## details-sidebar
+
+From the tabbed sidebar change (`openspec/changes/tabbed-details-sidebar/specs/details-sidebar/`); replaces the old details panel rows D1–D4. "A" is `cd-16bit-stereo-10s.wav` and "B" is `pcm24-stereo-48k.wav`. The activity bar is the icon strip on the window's right edge: a bar chart (Metrics) above a plug (Effects).
 
 | # | Scenario | Steps | Expected | Evidence | Result |
 |---|---|---|---|---|---|
-| D1 | No files open | Start the app (or close every tab) | No details panel and no panel toggle; the empty screen spans the full width | | ⏳ |
-| D2 | Hide the panel | Open a file, click the panel toggle at the right of the toolbar | Panel hides; the waveform widens to the full window | | ⏳ |
-| D3 | Choice is remembered | Hide the panel, switch tabs, quit, restart and open a file | Panel stays hidden until toggled back on | | ⏳ |
-| D4 | Narrow window | Make the window narrower than 820 px, toggle the panel | The bottom panel hides and shows | | ⏳ |
+| SB1 | No files open | Start the app (or close every tab) | No activity bar and no sidebar; the empty screen spans the full width | | ⏳ |
+| SB2 | Buttons identify their views | Open A, hover the plug icon, then the bar-chart icon | Tooltips name Effects and Metrics | | ⏳ |
+| SB3 | Active view is highlighted | With the Metrics view shown, look at the activity bar | The bar chart is teal; the plug is not | | ⏳ |
+| SB4 | Metrics view contents | Open A, show Metrics | Heading "Metrics", then the File and Levels sections; no Effects section | | ⏳ |
+| SB5 | Effects view contents | Show Effects; add, bypass, open controls, reorder and remove an effect | Heading "Effects" and the chain; every control works as before; no File or Levels section | | ⏳ |
+| SB6 | Playback continues while switching | Play A, then switch Metrics → Effects → Metrics | Playback carries on uninterrupted | | ⏳ |
+| SB7 | Switch view | With Metrics shown, click the plug | The sidebar shows Effects | Auto: `sidebar.test.ts` | ⏳ |
+| SB8 | Collapse by clicking the active button | With Effects shown, click the plug | The sidebar hides, the waveform widens up to the level meter (which stays beside it), no icon is highlighted | Auto: `sidebar.test.ts` | ⏳ |
+| SB9 | Reopen from collapsed | With the sidebar collapsed, click the bar chart | The sidebar opens on Metrics | Auto: `sidebar.test.ts` | ⏳ |
+| SB10 | Keyboard | Tab to the activity bar, use Up/Down to move between icons, press Enter and Space | Focus moves between the icons; Enter and Space act as a click | | ⏳ |
+| SB11 | Badge counts effects | Add 3 effects to A | The plug shows a "3" badge, with the sidebar open or collapsed | | ⏳ |
+| SB12 | Badge follows the active tab | With 2 effects on A and none on B, switch to B | No badge; switching back to A shows "2" | | ⏳ |
+| SB13 | Add Effect while collapsed | Collapse the sidebar, Effects › Add Effect…, choose an effect | The sidebar opens on Effects showing the new effect | | ⏳ |
+| SB14 | Add Effect while Metrics is shown | With Metrics shown, Effects › Add Effect…, choose an effect; then open Add Effect… again and cancel | The sidebar switches to Effects with the new effect; cancelling leaves the view as it was | | ⏳ |
+| SB15 | Remembered across restart | Show Effects, quit, restart and open a file | The sidebar is open on Effects | Auto: `sidebar.test.ts` | ⏳ |
+| SB16 | Collapsed state remembered | Collapse the sidebar, switch tabs, quit, restart and open a file | The sidebar stays collapsed until an icon is clicked | Auto: `sidebar.test.ts` | ⏳ |
+| SB17 | First launch | Clear the app's web storage (or use a fresh profile), start and open a file | The sidebar is open on Metrics | Auto: `sidebar.test.ts` | ⏳ |
+| SB18 | Upgrade with the panel hidden | In the previous build hide the details panel, then start this build and open a file | The sidebar starts collapsed | Auto: `sidebar.test.ts` | ⏳ |
+| SB19 | Narrow window | Make the window narrower than 820 px with Metrics open; use Left/Right on the icons | The icons sit in a row above the Metrics view, which is below the waveform; the shown view's icon is teal; Left/Right move focus | | ⏳ |
+
+## level-meter
+
+From the level meter change (`openspec/changes/playback-level-meter/specs/level-meter/`). "A" is `cd-16bit-stereo-10s.wav`, "S" is `float32-extensible-5.1.wav`, "F" is `full-scale-sine-and-silence.wav` (left: 0 dBFS 1 kHz sine, right: silence), "R" is `reference-minus18dbfs-stereo.wav` and "B" is `beep-every-second-mono-60s.wav`. "+6 dB" means Pro-Q 4 (or any EQ) with its output gain at +6 dB.
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| LM1 | Beside the sidebar | Open A with the sidebar open | The meter runs the height of the waveform area, between the waveform and the sidebar | | ⏳ |
+| LM2 | Sidebar collapsed | Collapse the sidebar | The meter stays, between the waveform and the activity bar | | ⏳ |
+| LM3 | No files open | Close every tab | No meter | | ⏳ |
+| LM4 | Stereo file | Open A | Two bars labelled L and R | | ⏳ |
+| LM5 | 5.1 file | Open S | Six bars with the file's six channel labels | | ⏳ |
+| LM6 | Effects are measured | Play R with +6 dB on the chain | Peaks at about −12 dBFS (−18 + 6) | Auto: `fx_tests::levels_are_measured_after_the_effects` | ⏳ |
+| LM7 | Bypass All | During LM6, turn on Bypass All | Within 0.25 s the peaks return to about −18 dBFS | | ⏳ |
+| LM8 | Volume does not move the meter | Play R, set the volume to 50% | Quieter, but the meter doesn't change | Auto: `engine::tests::levels_are_per_file_channel_unaffected_by_volume_and_follow_what_is_heard` | ⏳ |
+| LM9 | In step with the sound | Play B | Each beep's rise on the meter coincides with hearing it and with the playhead crossing it | Auto (alignment): `engine::tests::levels_are_per_file_channel_unaffected_by_volume_and_follow_what_is_heard` | ⏳ |
+| LM10 | Full-scale sine | Play F | L's peak bar reaches the top and its RMS bar settles at −3 dBFS within 0.5 s | Auto: `levels::tests::full_scale_sine_reads_0_db_peak_and_minus_3_db_rms` | ⏳ |
+| LM11 | Silence | Play F | R's bars stay empty | | ⏳ |
+| LM12 | Loud passage | Play F | The top of L's peak bar, above −6 dBFS, is amber; below is teal | | ⏳ |
+| LM13 | Peak falls back | Play A, pause on a loud passage | The peak bars fall to empty in about 3 s | Auto: `meter.test.ts` | ⏳ |
+| LM14 | Peak hold | Play A and watch a peak | The hold tick stays at the highest peak for 1.5 s, then falls | Auto: `meter.test.ts` | ⏳ |
+| LM15 | Clipping after effects | Play F with +6 dB on the chain | L's clip light turns red and stays on after playback stops; R's doesn't | Auto: `meter.test.ts` | ⏳ |
+| LM16 | No clipping | Play R with no effects | No clip light | Auto: `meter.test.ts` | ⏳ |
+| LM17 | Readout after playing | Play A for a few seconds, pause | Each readout shows that channel's highest peak to one decimal place | | ⏳ |
+| LM18 | Clear by clicking | After LM15, click the meter | The clip lights go out and the readouts show "–∞" | Auto: `meter.test.ts` | ⏳ |
+| LM19 | New playback clears | After LM17, press Space twice (pause, then play); then click in the waveform while playing | The readouts start afresh on play; seeking while playing keeps them | | ⏳ |
+| LM20 | Pause | Pause during a loud passage | The bars fall to empty; the readouts keep their values | | ⏳ |
+| LM21 | Switch tabs | Play A, then switch to B (mono) | One empty bar with a "–∞" readout | | ⏳ |
+| LM22 | Narrow window | Make the window narrower than 820 px and play A | Two horizontal bars below the waveform and above the activity bar, moving with the audio, scale along the bottom | | ⏳ |
+| LM23 | Keyboard clear | Tab to the meter, press Enter (and Space) | The readouts and clip lights clear; Space doesn't start playback | | ⏳ |
 
 ## app-branding
 
@@ -125,9 +172,9 @@ From `openspec/changes/teal-slate-dark-theme/specs/app-theme/`. Run with the OS 
 |---|---|---|---|---|---|
 | C1 | OS set to light mode | Set the OS to light mode and start the app | Slate-grey surfaces with whitish text | | ⏳ |
 | C2 | OS theme changes while running | Open a file, then switch the OS between dark and light | Nothing in the app changes colour, including the waveform | | ⏳ |
-| C3 | Panels stand out | Open a file with the details panel shown | Panel, toolbar and active tab are lighter than the window background; borders visible | | ⏳ |
+| C3 | Panels stand out | Open a file with the sidebar shown | Sidebar, activity bar, toolbar and active tab are lighter than the window background; borders visible | | ⏳ |
 | C4 | Reading the stats panel | Open `cd-16bit-stereo-10s.wav` | Values in whitish text, labels dimmed; both easy to read | Auto: `palette.test.ts` | ⏳ |
-| C5 | Active tab and toggles | Open two files with the details panel shown | Active tab marker and pressed panel toggle are teal; no blue anywhere (check the volume slider and progress bar too) | | ⏳ |
+| C5 | Active tab and toggles | Open two files with the sidebar shown | Active tab marker and the shown view's activity bar icon are teal; no blue anywhere (check the volume slider and progress bar too) | | ⏳ |
 | C6 | Selection | Drag a selection across the waveform | Translucent teal band with teal edges; the waveform stays visible under it | | ⏳ |
 | C7 | Playhead over a selection | Open `beep-every-second-mono-60s.wav`, select 1–5 s, press Space | Amber playhead clearly visible over the waveform and the teal band | Auto: `palette.test.ts` | ⏳ |
 | C8 | Clipped audio | Open `two-clip-runs.wav` | Clip markers in red, distinct from teal and amber | Auto: `palette.test.ts` | ⏳ |
@@ -358,10 +405,10 @@ From the VST3 effect chain change (`openspec/changes/add-vst3-effect-chain/specs
 
 | # | Scenario | Steps | Expected | Evidence | Result |
 |---|---|---|---|---|---|
-| FX1 | Empty chain | Open A | The Effects section, at the top of the details panel, has no effects, a short hint and Add Effect | | ⏳ |
+| FX1 | Empty chain | Open A, click the plug icon | The Effects view has an "+ Add" button at the top, no effects and a short hint | | ⏳ |
 | FX2 | Chains are per tab | Add Pro-C 3 to A, switch to B, play B | B's Effects section is empty and B plays unprocessed | | ⏳ |
 | FX3 | Add an EQ | Add Effect…, type "eq", choose Pro-Q 4 | Pro-Q 4 is last in the chain and its editor opens | | ⏳ |
-| FX4 | Full chain | Add 8 effects to A | Add Effect (panel and menu) is greyed out; hovering the button says the chain is full | Auto: `tests/state.rs::a_full_chain_refuses_another_effect` | ⏳ |
+| FX4 | Full chain | Add 8 effects to A | "+ Add" in the Effects view and Effects › Add Effect… are greyed out; hovering "+ Add" says the chain is full | Auto: `tests/state.rs::a_full_chain_refuses_another_effect` | ⏳ |
 | FX5 | Stereo-only plugin on a 5.1 file | Open S, Add Effect… | The stereo-only effect is greyed out with "Doesn't support 5.1 audio"; Pro-Q 4 isn't | Auto: `effectBrowser.test.ts`, `tests/state.rs::stereo_only_plugin_is_refused_for_a_5_1_file` | ⏳ |
 | FX6 | Scan progress in the browser | Rescan All in Manage Plugins, then open Add Effect at once | "Scanning plugins… n of m" with the effects found so far, updating | | ⏳ |
 | FX7 | Reorder | With Pro-Q 4 then Pro-C 3, drag Pro-C 3 above Pro-Q 4 | The chain is Pro-C 3 then Pro-Q 4; Undo puts it back | Auto: `chainOrder.test.ts`, `tests/state.rs::moving_an_effect_reorders_the_chain` | ⏳ |
@@ -374,7 +421,7 @@ From the VST3 effect chain change (`openspec/changes/add-vst3-effect-chain/specs
 | FX14 | Everything bypassed | Bypass A's only effect | No unsaved dot; Save is greyed out | Auto: `tests/state.rs::everything_bypassed_is_not_unsaved` | ⏳ |
 | FX15 | Adjust while listening | Play A through Pro-C 3, raise its ratio in the editor | Heard within 0.25 s; playback doesn't stop | Auto: `playback::engine::fx_tests::parameter_changes_are_heard_within_a_quarter_second` | ⏳ |
 | FX16 | Effect with latency | Add Pro-L 2 with lookahead, play A from 2.0 s | The first audio heard is at 2.0 s and the playhead matches what is heard | Auto: `playback::engine::fx_tests::effects_are_heard_in_time_and_end_with_the_range` | ⏳ |
-| FX17 | Effects not drawn | Add +12 dB of gain (Pro-Q 4 output gain) to A | The waveform and stats are unchanged, and the Effects section notes they show the audio before effects | Auto: `tests/state.rs::chain_changes_do_not_start_an_analysis` | ⏳ |
+| FX17 | Effects not drawn | Add +12 dB of gain (Pro-Q 4 output gain) to A | The waveform and stats are unchanged | Auto: `tests/state.rs::chain_changes_do_not_start_an_analysis` | ⏳ |
 | FX18 | After saving | Save FX17's file | The Effects section is empty, the editors close, and the waveform and stats show the louder audio; a notice says how many samples were clipped | Auto: `tests/state.rs::effects_are_baked_in`, `too_much_gain_counts_the_clamped_samples` | ⏳ |
 | FX19 | No output device | Disable every output device, start the app, add Pro-Q 4 to a copy of A and save | Effects can be added and edited; the saved file has the EQ | | ⏳ |
 | FX20 | Overloaded chain | Add 8 heavy instances (e.g. Supermassive at maximum), play A | One notice that the effects are too demanding to play smoothly; saving still renders them | Auto: `playback::engine::fx_tests::a_chain_too_slow_for_real_time_reports_one_overload` | ⏳ |
