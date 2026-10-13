@@ -20,8 +20,10 @@
   const NARROW = "(max-width: 820px)";
   /** Readouts and clip lights are refreshed at most this often. */
   const READOUT_INTERVAL_MS = 100;
-  const SCALE_W = 24;
   const COLUMN = 30;
+  const SCALE_W = 22;
+  /** Space between a bar and the scale beside it. */
+  const INSET = 2;
   const PEAK_W = 12;
   const RMS_W = 6;
   const PAD = 4;
@@ -33,6 +35,19 @@
   // svelte-ignore state_referenced_locally
   const meter: ChannelMeter[] = createMeter(labels.length);
   let starts = playbackStarts();
+  /** The scale sits between the left and right halves of the channels (after a mono bar). */
+  // svelte-ignore state_referenced_locally
+  const split = Math.ceil(labels.length / 2);
+  // svelte-ignore state_referenced_locally
+  const columns = [
+    ...Array(split).fill("var(--column)"),
+    "var(--scale)",
+    ...Array(labels.length - split).fill("var(--column)"),
+  ].join(" ");
+
+  /** Left edge of channel `i`'s column, and of the scale. */
+  const columnX = (i: number) => i * COLUMN + (i >= split ? SCALE_W : 0);
+  const scaleX = split * COLUMN;
 
   let shown = $state(readouts());
   let horizontal = $state(window.matchMedia(NARROW).matches);
@@ -82,23 +97,27 @@
     else drawUp(ctx, w, h, colours);
   }
 
-  /** Vertical meter: scale on the left, a column per channel, rising upwards. */
+  /** Vertical meter: a column per channel, rising upwards, with the scale between the halves. */
   function drawUp(ctx: CanvasRenderingContext2D, _w: number, h: number, c: NonNullable<typeof colours>) {
     const top = PAD;
     const len = Math.max(1, h - 2 * PAD);
     const y = (f: number) => top + len * (1 - f);
-    ctx.textAlign = "right";
+    const right = split < meter.length;
+    ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     for (const db of SCALE_MARKS) {
       const at = Math.round(y(levelToFraction(db))) + 0.5;
       ctx.fillStyle = c.dim;
-      ctx.fillText(String(db), SCALE_W - 5, Math.min(Math.max(at, top + 4), top + len - 4));
+      ctx.fillText(String(db), scaleX + SCALE_W / 2, Math.min(Math.max(at, top + 4), top + len - 4));
+      // Ticks point at the bars on either side.
       ctx.fillStyle = c.grid;
-      ctx.fillRect(SCALE_W - 3, at - 0.5, 3, 1);
+      ctx.fillRect(scaleX, at - 0.5, 3, 1);
+      if (right) ctx.fillRect(scaleX + SCALE_W - 3, at - 0.5, 3, 1);
     }
     const warnY = y(levelToFraction(WARN_DB));
     meter.forEach((m, i) => {
-      const x = SCALE_W + i * COLUMN + (COLUMN - PEAK_W) / 2;
+      // Bars hug the scale: left-half bars at their column's right edge, the rest at the left.
+      const x = i < split ? columnX(i) + COLUMN - PEAK_W - INSET : columnX(i) + INSET;
       ctx.fillStyle = c.track;
       ctx.fillRect(x, top, PEAK_W, len);
       const peakY = y(levelToFraction(m.peak));
@@ -239,13 +258,15 @@
   title="Click to clear the peak readouts and clip lights"
   tabindex="0"
   style:--channels={labels.length}
+  style:--columns={columns}
   onclick={clear}
   onkeydown={onKeydown}
 >
   <span id="level-meter-hint" class="sr-only">Press Enter to clear the peak readouts and clip lights.</span>
   <div class="readouts">
     {#each labels as label, i (i)}
-      <div class="channel">
+      {#if i === split}<span class="gap"></span>{/if}
+      <div class="channel" class:before={i < split}>
         <span class="clip" class:on={shown[i]?.clip} aria-hidden="true"></span>
         <span
           class="max mono"
@@ -259,13 +280,17 @@
   </div>
   <canvas bind:this={canvas} aria-hidden="true"></canvas>
   <div class="labels" aria-hidden="true">
-    {#each labels as label, i (i)}<span>{label}</span>{/each}
+    {#each labels as label, i (i)}
+      {#if i === split}<span class="gap"></span>{/if}
+      <span class:before={i < split}>{label}</span>
+    {/each}
   </div>
 </div>
 
 <style>
   .meter {
-    --scale: 24px;
+    --scale: 22px;
+    --inset: 2px;
     --column: 30px;
     display: flex;
     flex-direction: column;
@@ -292,8 +317,8 @@
   .readouts,
   .labels {
     display: grid;
-    grid-template-columns: repeat(var(--channels), var(--column));
-    padding-left: var(--scale);
+    /* Channel columns with the scale's column between the halves (see `columns`). */
+    grid-template-columns: var(--columns);
   }
   .channel {
     display: flex;
@@ -324,6 +349,25 @@
     width: 100%;
     display: block;
   }
+  /* Over and under each bar, which hugs the scale (see drawUp). */
+  .meter:not(.horizontal) .channel {
+    align-items: flex-start;
+    padding-left: var(--inset);
+  }
+  .meter:not(.horizontal) .channel.before {
+    align-items: flex-end;
+    padding-left: 0;
+    padding-right: var(--inset);
+  }
+  .meter:not(.horizontal) .labels span {
+    width: 12px;
+    margin-left: var(--inset);
+  }
+  .meter:not(.horizontal) .labels span.before {
+    justify-self: end;
+    margin-left: 0;
+    margin-right: var(--inset);
+  }
   .labels span {
     text-align: center;
     font-size: 10px;
@@ -345,7 +389,6 @@
   .horizontal .readouts {
     grid-template-columns: none;
     grid-template-rows: repeat(var(--channels), var(--row));
-    padding-left: 0;
     align-items: center;
   }
   .horizontal .labels {
@@ -366,6 +409,9 @@
     justify-content: flex-end;
     gap: 6px;
     padding-left: 6px;
+  }
+  .horizontal .gap {
+    display: none;
   }
   .horizontal .clip {
     width: 6px;

@@ -50,7 +50,7 @@ This logic lives in a new `src-tauri/src/playback/levels.rs` (`LevelBlock`, `Met
   - the whole meter is a `<button>`-like focusable element (`role="button"`, `aria-label="Level meter"`) that clears on click, Enter or Space. Readouts sit in an `aria-live="off"` region with `aria-label`s like "L maximum peak −4.2 dBFS".
 
 **Drawing.**
-- Each channel is a column 30px wide, so the readout fits. A shared scale column of about 24px sits on the left, with tick labels at 0, −6, −12, −18, −24, −36 and −60.
+- Each channel is a column 30px wide, so the readout fits. Each bar hugs the scale (2px away, at its column's inner edge), with the readout and label above and below it. A shared 22px scale column sits between the left and right halves of the channels (L | scale | R for stereo; after the bar for mono; after the first three of 5.1), its ticks pointing at the bars either side, with tick labels at 0, −6, −12, −18, −24, −36 and −60.
 - The peak bar is 12px wide, in `--accent` (or `--warning` from −6 dBFS up). The RMS bar is 6px wide, centred and lighter (`--wf-wave`).
 - The hold tick is a 2px line. The clip light is a 6px box in `--danger` when latched, otherwise `--border`.
 - Colours are read from CSS variables at mount, like `waveform/theme.ts`.
