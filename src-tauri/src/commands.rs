@@ -14,6 +14,8 @@ use crate::peaks::query_edited;
 use crate::playback::{PlayRequest, PlaybackInfo, Player};
 use crate::plugins::ClassId;
 use crate::plugins::cache::{Folders, PluginCache, PluginList, StartupNotice, standard_folders};
+use crate::plugins::editor::{EditorOpened, Editors};
+use crate::plugins::instance::Param;
 use crate::plugins::scan::Scanner;
 use crate::state::{
     AppState, ClipInfo, ClipRuns, ClipSettings, EditOp, EditOutcome, FadeSetting, FileId,
@@ -206,18 +208,20 @@ pub fn get_clip(state: State<'_, SharedState>, file_id: FileId) -> Option<ClipIn
 pub async fn undo_edit(
     state: State<'_, SharedState>,
     player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
     file_id: FileId,
 ) -> Result<EditOutcome, String> {
-    edit(state, player, file_id, move |s| s.undo(file_id)).await
+    chain_change(state, player, editors, file_id, move |s| s.undo(file_id)).await
 }
 
 #[tauri::command]
 pub async fn redo_edit(
     state: State<'_, SharedState>,
     player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
     file_id: FileId,
 ) -> Result<EditOutcome, String> {
-    edit(state, player, file_id, move |s| s.redo(file_id)).await
+    chain_change(state, player, editors, file_id, move |s| s.redo(file_id)).await
 }
 
 /// Write `file_id`'s audio to `path`, or over its own file when `path` is null.
@@ -225,16 +229,21 @@ pub async fn redo_edit(
 pub async fn save_file(
     state: State<'_, SharedState>,
     player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
     file_id: FileId,
     path: Option<PathBuf>,
     on_progress: Channel<LoadProgress>,
 ) -> Result<EditOutcome, String> {
     let state = state.inner().clone();
     let player = player.inner().clone();
+    let editors = editors.inner().clone();
     blocking(move || {
         // Playback holds the file's mapping, which must be released to replace it.
         stop_playing(&state, &player, file_id);
-        state.save(file_id, path.as_deref(), throttled(on_progress))
+        let saved = state.save(file_id, path.as_deref(), throttled(on_progress));
+        // A successful save empties the chain.
+        close_removed_editors(&state, &editors, file_id);
+        saved
     })
     .await?
 }
@@ -251,11 +260,14 @@ pub fn cancel_open(state: State<'_, SharedState>, file_id: FileId) {
 pub async fn close_file(
     state: State<'_, SharedState>,
     player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
     file_id: FileId,
 ) -> Result<(), String> {
     let state = state.inner().clone();
     let player = player.inner().clone();
+    let editors = editors.inner().clone();
     blocking(move || {
+        let _ = editors.retain(file_id, Vec::new());
         if let Some(file) = state.close(file_id) {
             player.stop_if_playing(&file.audio);
         }
@@ -508,22 +520,34 @@ pub fn take_startup_notices(plugins: State<'_, SharedPlugins>) -> Vec<StartupNot
 
 // --- Effect chains -------------------------------------------------------------------------
 
-/// Run a chain change to `file_id` on a worker thread (plugin calls wait for the UI thread),
-/// and let playback hear it at once.
+/// Run a change that may change `file_id`'s chain on a worker thread (plugin calls wait for
+/// the UI thread), let playback hear it at once, and close the editors of effects that left
+/// the chain.
 async fn chain_change(
     state: State<'_, SharedState>,
     player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
     file_id: FileId,
     change: impl FnOnce(&AppState) -> Result<EditOutcome, String> + Send + 'static,
 ) -> Result<EditOutcome, String> {
     let state = state.inner().clone();
     let player = player.inner().clone();
+    let editors = editors.inner().clone();
     blocking(move || {
         let outcome = change(&state)?;
         follow_playing(&state, &player, file_id);
+        close_removed_editors(&state, &editors, file_id);
         Ok(outcome)
     })
     .await?
+}
+
+/// Closes the editors of `file_id`'s effects that are no longer in its chain.
+fn close_removed_editors(state: &AppState, editors: &SharedEditors, file_id: FileId) {
+    let keep = state
+        .get_chain(file_id)
+        .map_or_else(Vec::new, |c| c.effects.iter().map(|e| e.slot_id).collect());
+    let _ = editors.retain(file_id, keep);
 }
 
 #[tauri::command]
@@ -535,12 +559,13 @@ pub fn get_chain(state: State<'_, SharedState>, file_id: FileId) -> Option<Chain
 pub async fn add_effect(
     state: State<'_, SharedState>,
     player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
     plugins: State<'_, SharedPlugins>,
     file_id: FileId,
     class_id: ClassId,
 ) -> Result<EditOutcome, String> {
     let plugins = plugins.inner().clone();
-    chain_change(state, player, file_id, move |s| {
+    chain_change(state, player, editors, file_id, move |s| {
         s.add_effect(file_id, &plugins, class_id)
     })
     .await
@@ -550,10 +575,11 @@ pub async fn add_effect(
 pub async fn remove_effect(
     state: State<'_, SharedState>,
     player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
     file_id: FileId,
     slot_id: SlotId,
 ) -> Result<EditOutcome, String> {
-    chain_change(state, player, file_id, move |s| {
+    chain_change(state, player, editors, file_id, move |s| {
         s.remove_effect(file_id, slot_id)
     })
     .await
@@ -563,11 +589,12 @@ pub async fn remove_effect(
 pub async fn move_effect(
     state: State<'_, SharedState>,
     player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
     file_id: FileId,
     slot_id: SlotId,
     index: usize,
 ) -> Result<EditOutcome, String> {
-    chain_change(state, player, file_id, move |s| {
+    chain_change(state, player, editors, file_id, move |s| {
         s.move_effect(file_id, slot_id, index)
     })
     .await
@@ -577,11 +604,12 @@ pub async fn move_effect(
 pub async fn set_effect_bypass(
     state: State<'_, SharedState>,
     player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
     file_id: FileId,
     slot_id: SlotId,
     on: bool,
 ) -> Result<EditOutcome, String> {
-    chain_change(state, player, file_id, move |s| {
+    chain_change(state, player, editors, file_id, move |s| {
         s.set_effect_bypass(file_id, slot_id, on)
     })
     .await
@@ -591,11 +619,113 @@ pub async fn set_effect_bypass(
 pub async fn set_bypass_all(
     state: State<'_, SharedState>,
     player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
     file_id: FileId,
     on: bool,
 ) -> Result<EditOutcome, String> {
-    chain_change(state, player, file_id, move |s| {
+    chain_change(state, player, editors, file_id, move |s| {
         s.set_bypass_all(file_id, on)
     })
     .await
+}
+
+// --- Effect editors ------------------------------------------------------------------------
+
+pub type SharedEditors = Arc<Editors>;
+
+/// Sent when an effect's editor window closes, by the user or because its effect went.
+pub const FX_EDITOR_CLOSED: &str = "fx-editor-closed";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorClosed {
+    pub file_id: FileId,
+    pub slot_id: SlotId,
+}
+
+/// Show an effect's controls: its own editor window, or with `generic` (or when that editor
+/// can't be shown) `native: false` for the frontend's generic controls.
+#[tauri::command]
+pub async fn open_editor(
+    state: State<'_, SharedState>,
+    editors: State<'_, SharedEditors>,
+    plugins: State<'_, SharedPlugins>,
+    file_id: FileId,
+    slot_id: SlotId,
+    generic: bool,
+) -> Result<EditorOpened, String> {
+    let state = state.inner().clone();
+    let editors = editors.inner().clone();
+    let plugins = plugins.inner().clone();
+    blocking(move || {
+        let (slot, file_name) = state.effect(file_id, slot_id)?;
+        if generic {
+            return Ok(EditorOpened {
+                native: false,
+                reason: None,
+            });
+        }
+        let title = format!("{} — {file_name}", slot.name());
+        editors
+            .open(file_id, slot, title, plugins)
+            .map_err(|e| e.to_string())
+    })
+    .await?
+}
+
+#[tauri::command]
+pub async fn close_editor(
+    editors: State<'_, SharedEditors>,
+    file_id: FileId,
+    slot_id: SlotId,
+) -> Result<(), String> {
+    let editors = editors.inner().clone();
+    blocking(move || editors.close(file_id, slot_id).map_err(|e| e.to_string())).await?
+}
+
+// --- Generic controls ----------------------------------------------------------------------
+
+/// Sent, at most 30 times a second per effect, with parameters changed in a plugin's own
+/// editor.
+pub const FX_PARAM_CHANGED: &str = "fx-param-changed";
+/// Sent when a plugin says its parameters' values or titles all changed.
+pub const FX_PARAMS_RESET: &str = "fx-params-reset";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParamsReset {
+    pub file_id: FileId,
+    pub slot_id: SlotId,
+}
+
+#[tauri::command]
+pub async fn get_fx_params(
+    state: State<'_, SharedState>,
+    file_id: FileId,
+    slot_id: SlotId,
+) -> Result<Vec<Param>, String> {
+    let state = state.inner().clone();
+    blocking(move || state.fx_params(file_id, slot_id)).await?
+}
+
+#[tauri::command]
+pub async fn set_fx_param(
+    state: State<'_, SharedState>,
+    file_id: FileId,
+    slot_id: SlotId,
+    param_id: u32,
+    value: f64,
+) -> Result<String, String> {
+    let state = state.inner().clone();
+    blocking(move || state.set_fx_param(file_id, slot_id, param_id, value)).await?
+}
+
+/// Show the editors of the active tab's file and hide the others (`null`: none is active).
+#[tauri::command]
+pub async fn set_active_file(
+    editors: State<'_, SharedEditors>,
+    file_id: Option<FileId>,
+) -> Result<(), String> {
+    let editors = editors.inner().clone();
+    blocking(move || editors.set_active_file(file_id).map_err(|e| e.to_string())).await?
 }

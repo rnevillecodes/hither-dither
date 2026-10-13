@@ -5,6 +5,7 @@
 //! holds a slot's processing lock.
 
 pub mod cache;
+pub mod editor;
 pub mod host;
 pub mod instance;
 pub mod main_thread;

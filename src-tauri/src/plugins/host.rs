@@ -127,6 +127,11 @@ impl PendingParams {
     pub fn is_empty(&self) -> bool {
         lock(&self.values).is_empty()
     }
+
+    /// Takes every pending value.
+    pub fn take(&self) -> Vec<(ParamID, f64)> {
+        std::mem::take(&mut *lock(&self.values))
+    }
 }
 
 /// What a plugin's controller tells the host, besides parameter values it already wrote to
@@ -137,6 +142,10 @@ pub enum HandlerEvent {
     Edited { id: ParamID, value: f64 },
     /// `restartComponent` with these `RestartFlags`.
     Restart(i32),
+    /// The processor reported output parameter values (such as meters), waiting in the
+    /// instance's [`outputs`](super::instance::Instance::outputs). Sent from the processing
+    /// thread.
+    Output,
 }
 
 pub type HandlerListener = Box<dyn Fn(HandlerEvent) + Send + Sync>;
@@ -161,7 +170,7 @@ impl ComponentHandler {
         *lock(&self.listener) = listener;
     }
 
-    fn notify(&self, event: HandlerEvent) {
+    pub(super) fn notify(&self, event: HandlerEvent) {
         if let Some(l) = lock(&self.listener).as_ref() {
             l(event);
         }
@@ -320,6 +329,21 @@ impl ParameterChanges {
                 data.1.last().map(|&(_, v)| (data.0, v))
             })
             .collect()
+    }
+
+    /// Sets the last value of each parameter in these changes in `target`, without
+    /// allocating. Returns whether there were any.
+    pub fn copy_last_into(&self, target: &PendingParams) -> bool {
+        let queues = lock(&self.queues);
+        let mut any = false;
+        for q in &queues.0[..queues.1] {
+            let data = lock(&q.data);
+            if let Some(&(_, v)) = data.1.last() {
+                target.set(data.0, v);
+                any = true;
+            }
+        }
+        any
     }
 
     fn queue_for(&self, id: ParamID) -> ComWrapper<ParamValueQueue> {

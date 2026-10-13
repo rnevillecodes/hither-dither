@@ -172,6 +172,7 @@ fn metadata_for_cd_quality_file() {
     );
     assert_eq!(m.duration_secs, 10.0);
     assert_eq!(m.channel_labels, ["L", "R"]);
+    assert_eq!((m.speaker_arrangement, m.layout.as_str()), (0x3, "stereo"));
     assert_eq!(m.size_bytes, std::fs::metadata(&p).unwrap().len());
     assert!(!m.truncated);
     assert_eq!(calls.last(), Some(&(441_000, 441_000)));
@@ -1286,4 +1287,122 @@ fn a_failed_save_with_effects_keeps_the_chain() {
     let copy = dir.path().join("retry.wav");
     state.save(1, Some(&copy), |_, _| {}).unwrap();
     assert!(native_samples(&copy).iter().any(|v| v.abs() > 16_384.0));
+}
+
+/// Runs `frames` frames of 0.25 in every channel through `slot`, as playback would, and
+/// returns the first channel of the output.
+fn process_quarter(state: &AppState, id: u32, slot: SlotId, frames: usize) -> Vec<f32> {
+    use hither_dither_lib::plugins::instance::Transport;
+    let slot = state.slot(id, slot).unwrap();
+    let instance = slot.instance();
+    let channels = instance.config().unwrap().channels as usize;
+    let input = vec![vec![0.25f32; frames]; channels];
+    let mut output = vec![vec![0.0f32; frames]; channels];
+    let ins: Vec<&[f32]> = input.iter().map(|c| c.as_slice()).collect();
+    let mut outs: Vec<&mut [f32]> = output.iter_mut().map(|c| c.as_mut_slice()).collect();
+    assert!(instance.process(&ins, &mut outs, frames, Transport::default()));
+    output.swap_remove(0)
+}
+
+#[test]
+fn generic_controls_list_the_gain_parameter() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let slot = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[0];
+
+    let params = state.fx_params(1, slot).unwrap();
+    assert_eq!(params.len(), 1);
+    let gain = &params[0];
+    assert_eq!(
+        (gain.id, gain.title.as_str(), gain.units.as_str()),
+        (GAIN_PARAM, "Gain", "dB")
+    );
+    assert_eq!((gain.step_count, gain.default_value), (0, 0.5));
+    assert_eq!((gain.value, gain.display.as_str()), (0.5, "0.0"));
+
+    // Only effects in the chain have controls.
+    state.remove_effect(1, slot).unwrap();
+    assert_eq!(
+        state.fx_params(1, slot).unwrap_err(),
+        "That effect isn't in the chain"
+    );
+}
+
+#[test]
+fn a_generic_control_is_heard_from_the_next_block() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let slot = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[0];
+
+    // At its default the gain passes audio through, after its 64 frames of latency.
+    let first = process_quarter(&state, 1, slot, 256);
+    assert!(first[64..].iter().all(|&v| v == 0.25));
+
+    let shown = state.set_fx_param(1, slot, GAIN_PARAM, plus_6db()).unwrap();
+    assert_eq!(shown, "6.0");
+    assert_eq!(gain_of(&state, 1, slot), plus_6db());
+    // The whole next block is doubled.
+    let next = process_quarter(&state, 1, slot, 256);
+    assert!(next.iter().all(|&v| (v - 0.5).abs() < 1e-6), "{next:?}");
+}
+
+#[test]
+fn generic_control_changes_are_not_undo_steps() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let slot = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[0];
+    let before = state.edit_state(1).unwrap();
+
+    state.set_fx_param(1, slot, GAIN_PARAM, plus_6db()).unwrap();
+    assert_eq!(state.edit_state(1).unwrap(), before);
+    // Undo takes the effect away, not the parameter change, and redo brings it back as set.
+    let undone = state.undo(1).unwrap();
+    assert!(undone.chain.effects.is_empty());
+    state.redo(1).unwrap();
+    assert_eq!(gain_of(&state, 1, slot), plus_6db());
+}
+
+#[test]
+fn changes_in_a_plugin_editor_reach_the_generic_controls() {
+    use std::time::{Duration, Instant};
+    use vst3::Steinberg::Vst::IComponentHandlerTrait;
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let slot = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[0];
+    let (tx, rx) = std::sync::mpsc::channel();
+    state.params.on_changed(move |changed| {
+        let _ = tx.send(changed);
+    });
+
+    // As the plugin's own editor reports a knob being turned.
+    let instance = state.slot(1, slot).unwrap();
+    let handler = instance.instance().handler();
+    unsafe {
+        handler.performEdit(GAIN_PARAM, 0.25);
+        handler.performEdit(GAIN_PARAM, plus_6db());
+    }
+
+    // The latest value arrives with its display string, possibly after the first.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let last = loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let changed = rx.recv_timeout(left).expect("no fx-param-changed");
+        assert_eq!((changed.file_id, changed.slot_id), (1, slot));
+        let change = changed.changes.last().unwrap().clone();
+        if change.value == plus_6db() {
+            break change;
+        }
+    };
+    assert_eq!((last.id, last.display.as_str()), (GAIN_PARAM, "6.0"));
+    // And the processor hears it (after the plugin's latency, which starts out silent).
+    let out = process_quarter(&state, 1, slot, 256);
+    assert!(out[64..].iter().all(|&v| (v - 0.5).abs() < 1e-6));
 }

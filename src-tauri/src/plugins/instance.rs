@@ -5,7 +5,10 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::kIsBypass;
+use serde::Serialize;
+use vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::{
+    kCanAutomate, kIsBypass, kIsHidden, kIsReadOnly,
+};
 use vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::{
     kPlaying, kProjectTimeMusicValid, kTempoValid, kTimeSigValid,
 };
@@ -15,7 +18,8 @@ use vst3::{ComPtr, ComWrapper};
 
 use super::ClassId;
 use super::host::{
-    ComponentHandler, EventList, HostApplication, MemoryStream, ParameterChanges, PendingParams,
+    ComponentHandler, EventList, HandlerEvent, HostApplication, MemoryStream, ParameterChanges,
+    PendingParams,
 };
 use super::module::Module;
 
@@ -111,8 +115,25 @@ pub struct Instance {
     handler: ComWrapper<ComponentHandler>,
     _host: ComWrapper<HostApplication>,
     pending: Arc<PendingParams>,
+    /// Output parameter values from the processor, for the controller.
+    outputs: PendingParams,
     bypass_param: Option<ParamID>,
     _module: Arc<Module>,
+}
+
+/// A parameter as generic controls show it. Values are normalised (0 to 1).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Param {
+    pub id: ParamID,
+    pub title: String,
+    pub units: String,
+    /// 0 for a continuous parameter, otherwise the number of steps (1 for a switch).
+    pub step_count: i32,
+    pub default_value: f64,
+    pub value: f64,
+    /// The value as the plugin shows it, without the units.
+    pub display: String,
 }
 
 // SAFETY: plugin calls are confined by the threading rules in the module docs: UI-thread
@@ -223,6 +244,7 @@ impl Instance {
             handler,
             _host: host,
             pending,
+            outputs: PendingParams::default(),
             bypass_param,
             _module: module,
         })
@@ -261,6 +283,63 @@ impl Instance {
             unsafe { c.setParamNormalized(id, value) };
         }
         self.pending.set(id, value);
+    }
+
+    /// Output parameter values the processor reported that the controller hasn't had yet.
+    pub fn outputs(&self) -> &PendingParams {
+        &self.outputs
+    }
+
+    /// Hands the processor's output parameter values to the controller. UI thread.
+    pub fn apply_outputs(&self) {
+        let values = self.outputs.take();
+        if let Some(c) = &self.controller {
+            for (id, value) in values {
+                unsafe { c.setParamNormalized(id, value) };
+            }
+        }
+    }
+
+    /// The parameters generic controls offer: automatable, visible and writable, except
+    /// bypass. UI thread.
+    pub fn params(&self) -> Vec<Param> {
+        let Some(c) = &self.controller else {
+            return Vec::new();
+        };
+        let hidden = (kIsReadOnly | kIsHidden | kIsBypass) as int32;
+        (0..unsafe { c.getParameterCount() })
+            .filter_map(|i| {
+                let mut info: ParameterInfo = unsafe { std::mem::zeroed() };
+                let usable = ok(unsafe { c.getParameterInfo(i, &mut info) })
+                    && info.flags & kCanAutomate as int32 != 0
+                    && info.flags & hidden == 0;
+                usable.then(|| {
+                    let value = unsafe { c.getParamNormalized(info.id) };
+                    Param {
+                        id: info.id,
+                        title: from_wstring(&info.title),
+                        units: from_wstring(&info.units),
+                        step_count: info.stepCount,
+                        default_value: info.defaultNormalizedValue,
+                        value,
+                        display: self.display(info.id, value),
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Parameter `id`'s `value` as the plugin shows it. UI thread.
+    pub fn display(&self, id: ParamID, value: f64) -> String {
+        let Some(c) = &self.controller else {
+            return String::new();
+        };
+        let mut s: String128 = [0; 128];
+        if ok(unsafe { c.getParamStringByValue(id, value, &mut s) }) {
+            from_wstring(&s)
+        } else {
+            format!("{value:.2}")
+        }
     }
 
     /// Negotiates the bus layout, sets up processing and activates the plugin, deactivating
@@ -531,7 +610,11 @@ impl Instance {
             outputEvents: events,
             processContext: &mut context,
         };
-        ok(unsafe { self.processor.process(&mut data) })
+        let processed = ok(unsafe { self.processor.process(&mut data) });
+        if proc.output_changes.copy_last_into(&self.outputs) {
+            self.handler.notify(HandlerEvent::Output);
+        }
+        processed
     }
 
     /// The plugin's state. UI thread.
@@ -597,6 +680,12 @@ impl Drop for Instance {
             self.component.terminate();
         }
     }
+}
+
+/// A NUL-terminated UTF-16 string from the plugin.
+fn from_wstring(s: &[TChar]) -> String {
+    let len = s.iter().position(|&c| c == 0).unwrap_or(s.len());
+    String::from_utf16_lossy(&s[..len])
 }
 
 fn find_bypass_param(controller: &ComPtr<IEditController>) -> Option<ParamID> {

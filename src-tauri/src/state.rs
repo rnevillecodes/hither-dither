@@ -12,11 +12,12 @@ use crate::edit::{Audio, ClipFade, Crossfade, Curve, EditList};
 use crate::fx;
 use crate::fx::chain::{Chain, ChainInfo, LIVE_BLOCK, MAX_EFFECTS, Slot, SlotId, layout_name};
 use crate::fx::live::LiveChain;
+use crate::fx::params::ParamSync;
 use crate::fx::render::Render;
 use crate::peaks::{PeakPyramid, PyramidBuilder};
 use crate::plugins::cache::{LoadStep, PluginCache};
 use crate::plugins::host::HandlerEvent;
-use crate::plugins::instance::{Config, Instance};
+use crate::plugins::instance::{Config, Instance, Param, speaker_arrangement};
 use crate::plugins::main_thread::{self, Inline, UiThread};
 use crate::plugins::{ClassId, module};
 use crate::stats::{self, Analysis, ClipRun, MAX_STORED_RUNS, Stats, StatsRunner, map_runs};
@@ -92,6 +93,10 @@ pub struct Metadata {
     pub sample_rate: u32,
     pub channels: u16,
     pub channel_labels: Vec<String>,
+    /// The VST3 speaker arrangement effects must accept to process this file.
+    pub speaker_arrangement: u64,
+    /// The channel layout as named in messages, such as "stereo" or "5.1".
+    pub layout: String,
     pub frames: u64,
     pub duration_secs: f64,
     /// The `data` chunk was cut short; only whole frames that exist were loaded.
@@ -362,6 +367,8 @@ pub struct AppState {
     ui: Arc<dyn UiThread>,
     next_slot: AtomicU32,
     fx_listener: Arc<Mutex<Option<FxListener>>>,
+    /// Keeps controllers and generic controls in step with the plugins.
+    pub params: Arc<ParamSync>,
 }
 
 impl Default for AppState {
@@ -380,6 +387,7 @@ impl AppState {
             analysers: Mutex::default(),
             signal: Arc::default(),
             stats: StatsRunner::default(),
+            params: Arc::new(ParamSync::new(ui.clone())),
             ui,
             next_slot: AtomicU32::new(1),
             fx_listener: Arc::default(),
@@ -650,6 +658,44 @@ impl AppState {
         history.get(&id)?.slots.get(&slot).cloned()
     }
 
+    /// An effect in file `id`'s current chain, with the file's name.
+    pub fn effect(&self, id: FileId, slot: SlotId) -> Result<(Arc<Slot>, String), String> {
+        let file = self.require(id)?;
+        let history = self.history.lock().unwrap();
+        let h = history.get(&id).ok_or(NO_FILE)?;
+        let s = h
+            .slots
+            .get(&slot)
+            .filter(|_| h.current().chain.contains(&slot))
+            .ok_or(NOT_IN_CHAIN)?;
+        Ok((s.clone(), file.metadata.name.clone()))
+    }
+
+    /// The parameters generic controls show for an effect in file `id`'s chain.
+    pub fn fx_params(&self, id: FileId, slot: SlotId) -> Result<Vec<Param>, String> {
+        let (slot, _) = self.effect(id, slot)?;
+        main_thread::run(&*self.ui, move || slot.instance().params()).map_err(|e| e.to_string())
+    }
+
+    /// Sets a parameter of an effect in file `id`'s chain from generic controls, and returns
+    /// its new display string. Heard from the next processed block; not an undo step.
+    pub fn set_fx_param(
+        &self,
+        id: FileId,
+        slot: SlotId,
+        param: u32,
+        value: f64,
+    ) -> Result<String, String> {
+        let (slot, _) = self.effect(id, slot)?;
+        let value = value.clamp(0.0, 1.0);
+        main_thread::run(&*self.ui, move || {
+            let instance = slot.instance();
+            instance.set_param(param, value);
+            instance.display(param, value)
+        })
+        .map_err(|e| e.to_string())
+    }
+
     /// What playback of file `id` runs through: the slots of its chain that process audio.
     pub fn live_chain(&self, id: FileId) -> Option<Arc<LiveChain>> {
         LiveChain::of(&self.get(id)?.chain)
@@ -668,14 +714,33 @@ impl AppState {
         Some(live)
     }
 
-    /// When the plugin in `slot` (of file `id`) reports a new latency, reactivate it so the
-    /// new latency applies, record it, and tell the listener.
-    fn watch_latency(&self, id: FileId, slot: &Arc<Slot>) {
-        use vst3::Steinberg::Vst::RestartFlags_::kLatencyChanged;
-        let weak = Arc::downgrade(slot);
-        let (ui, listener) = (self.ui.clone(), self.fx_listener.clone());
+    /// Follows what the plugin in `slot` (of file `id`) reports. A new latency reactivates
+    /// it so the latency applies, is recorded, and tells the listener; parameter changes from
+    /// its editor or processor go to [`AppState::params`].
+    fn watch_slot(&self, id: FileId, slot: &Arc<Slot>) {
+        use vst3::Steinberg::Vst::RestartFlags_::{
+            kLatencyChanged, kParamTitlesChanged, kParamValuesChanged,
+        };
+        self.params.watch(id, slot);
+        let (weak, slot_id) = (Arc::downgrade(slot), slot.id());
+        let (ui, listener, params) = (
+            self.ui.clone(),
+            self.fx_listener.clone(),
+            Arc::downgrade(&self.params),
+        );
         let on_event = move |event| {
-            if !matches!(event, HandlerEvent::Restart(flags) if flags & kLatencyChanged != 0) {
+            let Some(params) = params.upgrade() else {
+                return;
+            };
+            let flags = match event {
+                HandlerEvent::Edited { id, value } => return params.edited(slot_id, id, value),
+                HandlerEvent::Output => return params.output(slot_id),
+                HandlerEvent::Restart(flags) => flags,
+            };
+            if flags & (kParamValuesChanged | kParamTitlesChanged) != 0 {
+                params.reset(slot_id);
+            }
+            if flags & kLatencyChanged == 0 {
                 return;
             }
             let (weak, listener) = (weak.clone(), listener.clone());
@@ -750,7 +815,7 @@ impl AppState {
         .map_err(|e| e.to_string())?
         .map_err(|e| format!("“{name}” could not be loaded: {e}"))?;
         let slot = Arc::new(slot);
-        self.watch_latency(id, &slot);
+        self.watch_slot(id, &slot);
 
         self.change_chain(id, |h, file| {
             // The file was reopened while the plugin loaded.
@@ -1432,6 +1497,8 @@ impl Metadata {
             sample_rate: info.sample_rate,
             channels: info.channels,
             channel_labels: channel_labels(info.channels, info.channel_mask),
+            speaker_arrangement: speaker_arrangement(info.channels, info.channel_mask),
+            layout: layout_name(info.channels, info.channel_mask),
             frames: info.frames,
             duration_secs: info.duration_secs(),
             truncated: info.truncated,

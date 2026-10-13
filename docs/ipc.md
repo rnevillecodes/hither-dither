@@ -32,7 +32,7 @@ Cancels an `open_file` still running for `fileId`. Does nothing if there isn't o
 | --- | --- | --- |
 | `fileId` | number | The file to close |
 
-Forgets the file, releasing its memory mapping, and cancels its load if one is still running. If playback is playing this file, it stops first. Closing an ID that isn't open does nothing.
+Forgets the file, releasing its memory mapping, and cancels its load if one is still running. If playback is playing this file, it stops first. Closing an ID that isn't open does nothing. Its effects' editor windows close first.
 
 ### `get_metadata`
 
@@ -53,6 +53,8 @@ interface Metadata {
   sample_rate: number;     // Hz
   channels: number;
   channel_labels: string[];// from WAVE_FORMAT_EXTENSIBLE mask, else Mono / L,R / Ch n
+  speaker_arrangement: number; // the VST3 arrangement an effect needs in its layouts (see list_plugins)
+  layout: string;          // the channel layout as messages name it: "mono", "stereo", "5.1", "3-channel"…
   frames: number;
   duration_secs: number;
   truncated: boolean;      // data chunk was cut short; show a warning
@@ -534,3 +536,120 @@ Bypasses one effect, keeping its settings. A plugin with a bypass parameter bypa
 | `on` | boolean | |
 
 Bypasses the whole chain, keeping each effect's own bypass switch. Not an undo step.
+
+## Effect editors
+
+An effect's controls are shown either in the plugin's own editor, in a separate window the backend creates, or in generic controls the frontend draws. Each effect has at most one editor window, titled "<effect> — <file name>", sized to the plugin's editor and resizable only if the plugin allows. It stays above the main window without blocking it:
+- Windows: a window owned by the main window, which follows the display's scale;
+- macOS: a child window of the main window;
+- Linux: an X11 window (also under XWayland), kept above the main window when the app itself runs on X11.
+
+Editor windows close when their effect leaves the chain (`remove_effect`, or an undo or redo that takes it out), when their file closes, after a successful save (which empties the chain), and when the app quits. Opening an editor writes the crash marker the first time that plugin opens an editor in a session (see `take_startup_notices`).
+
+### Event `fx-editor-closed`
+
+A Tauri event sent whenever an editor window closes, whether the user closed it or it closed for one of the reasons above.
+
+```ts
+interface EditorClosed {
+  fileId: number;
+  slotId: number;
+}
+```
+
+### `open_editor`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `slotId` | number | An effect in the file's chain |
+| `generic` | boolean | `true` asks for the generic controls only |
+
+Opens the effect's editor window, or brings it to the front if it is already open. Returns:
+
+```ts
+interface EditorOpened {
+  native: boolean;   // the plugin's own editor is showing
+  reason?: string;   // why it isn't, to show with the generic controls
+}
+```
+
+With `generic: true`, returns `{ native: false }` without a reason and leaves any open editor window as it is. Otherwise `native: false` comes with a `reason` when the plugin has no editor for this platform, its editor fails to open, or (Linux) no X11 display is available. Rejects with `No file is loaded` or `That effect isn't in the chain`.
+
+### `close_editor`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `slotId` | number | |
+
+Closes the effect's editor window if it is open (sending `fx-editor-closed`).
+
+### `set_active_file`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number \| null | The active tab's file; `null` when no tab is active |
+
+Shows the active file's editor windows and hides the others. A hidden window comes back where it was when its tab is active again. Call it on every tab switch.
+
+## Generic controls
+
+Effect parameters drawn by the frontend, for plugins without an editor or on request. Values are normalised: 0 to 1, whatever the parameter's range.
+
+### `get_fx_params`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `slotId` | number | An effect in the file's chain |
+
+Returns the parameters a user can set: those the plugin marks automatable, except hidden, read-only and bypass parameters, in the plugin's order.
+
+```ts
+interface FxParam {
+  id: number;
+  title: string;
+  units: string;         // e.g. "dB"; may be empty
+  stepCount: number;     // 0: continuous; otherwise the number of steps (1 for an on/off switch)
+  defaultValue: number;
+  value: number;
+  display: string;       // the value as the plugin shows it, without the units, e.g. "-18.0"
+}
+```
+
+Rejects with `No file is loaded` or `That effect isn't in the chain`.
+
+### `set_fx_param`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `slotId` | number | |
+| `paramId` | number | |
+| `value` | number | Normalised; clamped to 0–1 |
+
+Sets the parameter on the plugin's controller, so its own editor follows, and for its processor, which hears it from the next block it processes (during playback, within 0.25 s). Returns the new display string. Not an undo step, and doesn't change the edit state. Rejects as `get_fx_params`.
+
+### Event `fx-param-changed`
+
+A Tauri event sent when parameters change in a plugin's own editor, at most 30 times a second per effect, with the latest value of each parameter that changed since the last one. Changes made with `set_fx_param` aren't echoed.
+
+```ts
+interface FxParamChanged {
+  fileId: number;
+  slotId: number;
+  changes: { id: number; value: number; display: string }[];
+}
+```
+
+### Event `fx-params-reset`
+
+A Tauri event sent when a plugin says its parameters' values or titles all changed (for example after loading one of its own presets). Fetch them again with `get_fx_params`.
+
+```ts
+interface FxParamsReset {
+  fileId: number;
+  slotId: number;
+}
+```

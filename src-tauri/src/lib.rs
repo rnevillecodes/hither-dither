@@ -10,7 +10,7 @@ pub mod wav;
 
 use std::sync::Arc;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -22,7 +22,7 @@ pub fn run() {
             app.manage(plugins.clone());
             commands::start_plugin_scan(app.handle(), &plugins, false);
             let ui = Arc::new(app.handle().clone());
-            let state = Arc::new(state::AppState::new(ui));
+            let state = Arc::new(state::AppState::new(ui.clone()));
             // A plugin's new latency is heard at once, off the UI thread.
             let (weak, player) = (
                 Arc::downgrade(&state),
@@ -36,7 +36,29 @@ pub fn run() {
                     }
                 });
             });
+            let emitter = app.handle().clone();
+            state.params.on_changed(move |changed| {
+                let _ = emitter.emit(commands::FX_PARAM_CHANGED, changed);
+            });
+            let emitter = app.handle().clone();
+            state.params.on_reset(move |file_id, slot_id| {
+                let reset = commands::ParamsReset { file_id, slot_id };
+                let _ = emitter.emit(commands::FX_PARAMS_RESET, reset);
+            });
             app.manage::<commands::SharedState>(state);
+            let (main, emitter) = (app.handle().clone(), app.handle().clone());
+            let editors = plugins::editor::Editors::new(
+                ui,
+                move || {
+                    let window = main.get_webview_window("main")?;
+                    plugins::editor::parent_of(&window)
+                },
+                move |file_id, slot_id| {
+                    let closed = commands::EditorClosed { file_id, slot_id };
+                    let _ = emitter.emit(commands::FX_EDITOR_CLOSED, closed);
+                },
+            );
+            app.manage::<commands::SharedEditors>(Arc::new(editors));
             Ok(())
         })
         .manage::<commands::SharedPlayer>(Arc::new(playback::Player::new()))
@@ -75,7 +97,19 @@ pub fn run() {
             commands::move_effect,
             commands::set_effect_bypass,
             commands::set_bypass_all,
+            commands::open_editor,
+            commands::close_editor,
+            commands::set_active_file,
+            commands::get_fx_params,
+            commands::set_fx_param,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event
+                && let Some(editors) = app.try_state::<commands::SharedEditors>()
+            {
+                editors.close_all();
+            }
+        });
 }

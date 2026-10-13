@@ -52,6 +52,9 @@ core-foundation = "0.10"
 x11rb = "0.13"
 # Same version as Tauri's GTK stack, so sources attach to its main context.
 glib = "0.18"
+# The main window's X11 ID, so editor windows stay above it (same versions as Tauri's).
+gtk = "0.18"
+gdkx11 = "0.18"
 
 [dev-dependencies]
 tempfile = "3"
