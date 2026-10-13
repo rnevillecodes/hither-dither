@@ -1,5 +1,5 @@
 // Open files, one tab each, and which one is active.
-import type { ClipInfo, ClipRuns, Metadata, PeakTile, Stats } from "./api";
+import type { ChainInfo, ClipInfo, ClipRuns, Metadata, PeakTile, Stats } from "./api";
 import type { Selection } from "./selection";
 import type { Viewport } from "./viewport";
 
@@ -24,8 +24,10 @@ export interface Tab {
   playhead: number;
   playStart: number;
   // Editing.
-  /** Unsaved changes: the audio differs from the file on disk. */
+  /** Unsaved changes: something changed since the session was last saved or opened. */
   dirty: boolean;
+  /** The audio is edited (differs from the WAV on disk), even with nothing to undo. */
+  edited: boolean;
   canUndo: boolean;
   canRedo: boolean;
   /** Backend revision of the audio shown; increases whenever the audio changes. */
@@ -34,12 +36,16 @@ export interface Tab {
   peaksVersion: number;
   /** The whole-file stats and clip markers are being brought up to date. */
   analysing: boolean;
-  /** A save is in progress: the tab can't be edited until it finishes. */
+  /** An export is in progress: the tab can't be edited until it finishes. */
   editing: boolean;
-  /** The user has agreed to Save overwriting this file. */
-  overwriteConfirmed: boolean;
   /** Trim window, end fades and joins, as the clip handles show them. */
   clip: ClipInfo | null;
+  /** The effects the audio is heard and exported through. */
+  chain: ChainInfo | null;
+  /** The session file this tab was opened from or last saved to; Save writes it. */
+  sessionPath: string | null;
+  /** The WAV was chosen by the user for `sessionPath`, instead of the session's own. */
+  relink: boolean;
 }
 
 export const tabs = $state({
@@ -52,7 +58,7 @@ export const overviewCache = new Map<number, { columns: number; version: number;
 
 let nextId = 1;
 
-export function newTab(path: string): Tab {
+export function newTab(path: string, sessionPath: string | null = null, relink = false): Tab {
   return {
     id: nextId++,
     path,
@@ -70,14 +76,17 @@ export function newTab(path: string): Tab {
     playhead: 0,
     playStart: 0,
     dirty: false,
+    edited: false,
     canUndo: false,
     canRedo: false,
     revision: 0,
     peaksVersion: 0,
     analysing: false,
     editing: false,
-    overwriteConfirmed: false,
     clip: null,
+    chain: null,
+    sessionPath,
+    relink,
   };
 }
 

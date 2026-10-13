@@ -27,6 +27,51 @@ The installers aren't code-signed yet, so the OS warns the first time you open t
 - **Windows:** if SmartScreen says "Windows protected your PC", click **More info**, then **Run anyway**.
 - **macOS:** if macOS says the app can't be opened, right-click (or Control-click) **HitherDither** in Applications and choose **Open**, then **Open** again. On newer macOS versions, open **System Settings › Privacy & Security** and click **Open Anyway** next to the HitherDither message.
 
+## VST3 effects
+
+Each tab can run its audio through a chain of up to 8 VST3 effect plugins: EQs, compressors, limiters, reverbs and so on. Add them from the **Effects** section of the details panel or **Effects › Add Effect…**. The chain is heard live as the file plays, and is written into the audio only when you export. The waveform and statistics always show the audio before effects. Instruments, VST2, AU, CLAP and LV2 plugins aren't supported.
+
+HitherDither looks for plugins in the standard VST3 folders, including their subfolders:
+
+| OS | Folders |
+| --- | --- |
+| Windows | `%COMMONPROGRAMFILES%\VST3` (usually `C:\Program Files\Common Files\VST3`) and `%LOCALAPPDATA%\Programs\Common\VST3` |
+| macOS | `/Library/Audio/Plug-Ins/VST3` and `~/Library/Audio/Plug-Ins/VST3` |
+| Linux | `~/.vst3`, `/usr/lib/vst3` and `/usr/local/lib/vst3` |
+
+You can add other folders, rescan, and enable or disable plugins in **Effects › Manage Plugins…**. Plugins are scanned in the background, each in a separate process, so one that crashes or hangs while being scanned is marked as failed and doesn't stop the app. If the app closes unexpectedly while a plugin is loading or opening its editor, that plugin is disabled the next time the app starts, and you can enable it again in Manage Plugins.
+
+Things to know:
+
+- **Plugin editors on Linux** need an X11 display: an X11 session, or a Wayland session with XWayland. Without one, effects show generic sliders instead of their own editor. Under XWayland, an editor window may not stay above the main window.
+- **On macOS**, a plugin must include a version for your Mac's processor. An Intel-only plugin is listed as incompatible on Apple Silicon.
+- **Exporting renders the effects offline.** Some plugins switch to a higher-quality mode for offline rendering, or have random modulation, so the exported file can differ slightly from what you heard.
+- Plugins run inside the app while they process audio or show their editor, so a plugin that crashes then takes the app with it, and unsaved changes are lost.
+
+VST is a registered trademark of Steinberg Media Technologies GmbH.
+
+## Saving and exporting
+
+HitherDither never changes the WAV you open. Your work is saved as a session, and the audio is written only when you export it.
+
+- **File › Save** (Ctrl/Cmd+S) saves the tab as a session file (`take.hdsession.json`), asking where the first time. **Save As…** (Ctrl/Cmd+Shift+S) saves it to a new session file. A session holds the edits, the effect chain in order with each effect's bypass switch, Bypass All, and every plugin's complete settings. It doesn't contain the audio: it points to the WAV.
+- **File › Export…** (Ctrl/Cmd+E) renders the edits and effects to a new WAV (`take-export.wav` by default). The tab carries on as it was, with its edits, effects and undo history, so you can keep working and export again. Export won't write over the WAV you're editing or one open in another tab.
+- **Unsaved changes** are anything since the session was last saved: edits, effect changes, bypass switches and plugin settings. Closing a tab or quitting asks whether to save the session.
+
+Open a session with **File › Open…** or by dropping it on the window. Its WAV opens in a new tab with the edits and effects as they were. Effect editors start closed, and there is nothing to undo until the next change. When the app starts, tabs that had a session file are reopened from their session.
+
+- **File › Replace Audio…** swaps a tab's WAV for another one, such as a different take or a new render of the mix, and keeps its effects with their settings and its session file. The edits and undo history are dropped (it asks first when there are any), because they belong to the old recording. Effects that can't process the new audio's channels are left out, with a notice.
+- **If a session's WAV is missing or has changed**, opening the session offers **Choose Another WAV…**. A WAV with the recorded format and length (one that was moved or renamed) gets the session's edits as well as its effects; any other WAV gets only the effects. Save the session afterwards so it points to the new WAV.
+
+Things to know:
+
+- **Keep the session with its WAV.** A session finds its WAV at the path it was saved with, or at the same place relative to the session, so moving or copying a folder holding both works. Renaming or moving only the WAV doesn't.
+- **A session only applies to the same recording.** If the WAV's format or length has changed, the session doesn't open. If only its date or size has changed, it opens with a warning.
+- **Some plugins report a change as soon as their editor opens**, which marks the tab as unsaved even though nothing was changed by hand.
+- **Missing effects are left out.** An effect that is no longer installed, is disabled, or fails to load is left out of the chain, with a notice. One that won't take its saved settings keeps its defaults.
+- **Plugins that depend on more than their settings** (random modulation, sample files that have moved) may not sound identical when a session is reopened.
+- The file is JSON, so it can be read in a text editor. Plugin settings are stored as the plugin's own data, in base64.
+
 ## Development
 
 ### Prerequisites
@@ -55,7 +100,8 @@ See the [Tauri prerequisites guide](https://tauri.app/start/prerequisites/) for 
 
 ### Layout
 
-- `src-tauri/`: Rust crate (WAV parsing, peak pyramid, statistics, playback, Tauri commands)
+- `src-tauri/`: Rust crate (WAV parsing, peak pyramid, statistics, playback, VST3 hosting in `plugins/` and effect chains in `fx/`, Tauri commands)
+- `src-tauri/test-plugins/`: small VST3 plugins built for the Rust tests
 - `src/`: Svelte frontend (`lib/` holds pure logic and the canvas renderer, `components/` holds UI panels)
 - `docs/`: IPC reference, performance and acceptance notes
 - `scripts/gen-icons.mjs`: generates the icon source (`src-tauri/icons/app-icon.svg`) and the empty-screen imprint (`src/assets/logo-shadow.svg`). After changing it, run `node scripts/gen-icons.mjs` and then `npx tauri icon src-tauri/icons/app-icon.svg`, and delete the generated `android/`, `ios/` and `64x64.png`, which the app doesn't use.

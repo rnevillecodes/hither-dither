@@ -2,12 +2,12 @@
 
 ## Purpose
 
-Writes edited audio back to disk as a WAV file. Save replaces the original and Save As creates a new file. Unsaved edits are protected from being lost when a tab is closed or the app quits.
+Writes the edited audio to a new WAV file with Export, never over the WAV being edited, and protects unsaved changes from being lost when a tab is closed or the app quits.
 
 ## Requirements
 
 ### Requirement: Unsaved marker
-A tab whose audio differs from its file on disk SHALL show an unsaved marker in the tab strip, and its tooltip SHALL say that it has unsaved changes. The marker SHALL go away when the edits are saved or every edit is undone.
+A tab SHALL show an unsaved marker in the tab strip, with a tooltip saying it has unsaved changes, while its state differs from its session as last saved or opened (or, for a tab without a session, from the WAV as opened). Edits, undo and redo, effect chain changes, bypass switches and plugin setting changes SHALL all count. The marker SHALL go away when the session is saved, or when undo or redo returns to the saved state with no setting changed since.
 
 #### Scenario: Edit marks the tab
 - **WHEN** the user silences a selection in `a.wav`
@@ -17,90 +17,50 @@ A tab whose audio differs from its file on disk SHALL show an unsaved marker in 
 - **WHEN** the user makes one edit to `a.wav` and then undoes it
 - **THEN** the unsaved marker disappears
 
-### Requirement: Save over the original
-File › Save (Ctrl/Cmd+S) SHALL write the active tab's edited audio to its own path. It SHALL be disabled when the tab has no unsaved changes. The first Save for a tab SHALL ask for confirmation that the original will be replaced; once confirmed, later Saves of that tab SHALL NOT ask again.
+#### Scenario: Plugin setting changed
+- **WHEN** the session of `a.wav` was just saved and the user turns a knob in an effect's editor
+- **THEN** the tab shows the unsaved marker, and undoing doesn't remove it
 
-#### Scenario: First save asks
-- **WHEN** the user crops `a.wav` and presses Ctrl/Cmd+S
-- **THEN** a dialog asks to confirm overwriting `a.wav`; choosing Overwrite saves it, and choosing Cancel leaves the file and the edits as they were
-
-#### Scenario: Later saves don't ask
-- **WHEN** the user has already confirmed one Save of `a.wav`, makes another edit and presses Ctrl/Cmd+S
-- **THEN** the file is saved without a dialog
-
-### Requirement: Save As
-File › Save As (Ctrl/Cmd+Shift+S) SHALL ask for a new file name with a native save dialog filtered to WAV, and write the active tab's audio there. It SHALL be available for any loaded tab, even without edits. Afterwards the tab SHALL refer to the new file (name, tooltip, remembered session), and the original file SHALL be unchanged.
-
-#### Scenario: Save a trimmed copy
-- **WHEN** the user crops `take1.wav` and saves it as `take1-trim.wav`
-- **THEN** `take1-trim.wav` contains the cropped audio, `take1.wav` is unchanged, and the tab is labelled `take1-trim.wav` with no unsaved marker
-
-#### Scenario: Cancel the dialog
-- **WHEN** the user opens Save As and cancels
-- **THEN** nothing is written and the tab keeps its edits and its unsaved marker
-
-#### Scenario: Name of another open file
-- **WHEN** the user chooses the path of a file that is open in another tab
-- **THEN** nothing is written and a notice explains that the file is open in another tab
+#### Scenario: Saving the session clears it
+- **WHEN** `a.wav` has unsaved edits and the user saves its session
+- **THEN** the marker disappears, `a.wav` is unchanged on disk, and Undo is still available
 
 ### Requirement: Output format
-Saved files SHALL be RIFF WAVE files containing exactly a `fmt ` chunk identical to the source's and a `data` chunk, with no other chunks. Sample format, bit depth, valid bits, sample rate, channel count and channel mask SHALL match the source. Samples that no edit, fade or crossfade changed SHALL be written bit-for-bit as in the source. Changed integer samples, including blended crossfade samples, SHALL be rounded to the nearest value and clamped to the format's range.
+Exported files SHALL be RIFF WAVE files containing exactly a `fmt ` chunk identical to the source's and a `data` chunk, with no other chunks. Sample format, bit depth, valid bits, sample rate, channel count and channel mask SHALL match the source. Samples that no edit, fade, crossfade or active effect changed SHALL be written bit-for-bit as in the source. Changed integer samples, including blended crossfade samples, SHALL be rounded to the nearest value and clamped to the format's range.
 
 #### Scenario: Untouched audio is bit-exact
-- **WHEN** the user deletes 1.0–2.0 s from a 24-bit file and saves it
-- **THEN** every sample of the saved file outside the crossfade at the join equals the source sample at the corresponding position
+- **WHEN** the user deletes 1.0–2.0 s from a 24-bit file and exports it
+- **THEN** every sample of the exported file outside the crossfade at the join equals the source sample at the corresponding position
 
 #### Scenario: Hard join is bit-exact
-- **WHEN** the user deletes 1.0–2.0 s from a 24-bit file, drags the join's crossfade to zero and saves it
-- **THEN** every sample of the saved file equals the source sample at the corresponding position
+- **WHEN** the user deletes 1.0–2.0 s from a 24-bit file, drags the join's crossfade to zero and exports it
+- **THEN** every sample of the exported file equals the source sample at the corresponding position
 
 #### Scenario: Metadata is not carried over
-- **WHEN** the source has `LIST` and `bext` chunks and the user saves an edit
-- **THEN** the saved file has only `fmt ` and `data` chunks, and HitherDither reopens it with the same format details
+- **WHEN** the source has `LIST` and `bext` chunks and the user exports an edit
+- **THEN** the exported file has only `fmt ` and `data` chunks, and HitherDither reopens it with the same format details
 
 #### Scenario: Result too large for WAV
 - **WHEN** the edited audio would make the `data` chunk larger than 4 GiB minus the header
-- **THEN** Save and Save As fail with a notice saying the result is too large, and nothing is written
-
-### Requirement: Safe writing
-Saving SHALL NOT leave a partial or corrupted file at the target path. If writing fails (for example the disk is full or access is denied), the system SHALL show an error notice, leave any existing file at the target unchanged, and keep the tab's edits and unsaved marker. Save SHALL refuse with a notice suggesting Save As if the original file has changed on disk since it was opened.
-
-#### Scenario: Read-only target
-- **WHEN** the user saves a file whose folder is read-only
-- **THEN** an error notice explains that it could not be saved, the original file is intact, and the edits are still there
-
-#### Scenario: File changed by another program
-- **WHEN** another program modifies `a.wav` after it was opened, and the user edits and saves it
-- **THEN** nothing is written and a notice says the file changed on disk and suggests Save As
-
-### Requirement: After saving
-Saving SHALL render the edited audio, first finishing any pending background analysis of it. Meanwhile the tab SHALL show the delayed progress indicator used for loads, and edits on it SHALL be disabled. After a successful Save or Save As, the tab SHALL have no unsaved marker and an empty undo/redo history; its view, selection, playhead and shown audio SHALL be unchanged; and its whole-file statistics, clip markers and waveform SHALL be exact, not marked as updating.
-
-#### Scenario: Keep working after save
-- **WHEN** the user zooms in, selects 1.0–2.0 s, applies Fade In and saves
-- **THEN** the zoom and the 1.0–2.0 s selection are unchanged, and Undo is greyed out
-
-#### Scenario: Save before the analysis finishes
-- **WHEN** the user edits a long file and saves it straight away, while the whole-file statistics are still updating
-- **THEN** the progress indicator appears if the save takes a moment, and afterwards the statistics are up to date and no longer marked as updating
-
-#### Scenario: Progress while rendering
-- **WHEN** the user saves a long edited file
-- **THEN** the delayed progress indicator shows how far the save has got, and other tabs stay usable
+- **THEN** Export fails with a notice saying the result is too large, and nothing is written
 
 ### Requirement: Closing a tab with unsaved edits
-Closing a tab that has unsaved changes (close button, middle-click, Ctrl/Cmd+W, File › Close Tab) SHALL ask whether to Save, Don't Save or Cancel. Save SHALL save the tab without asking for overwrite confirmation and then close it, unless saving fails. Don't Save SHALL close it and discard the edits. Cancel SHALL keep the tab open.
+Closing a tab that has unsaved changes (close button, middle-click, Ctrl/Cmd+W, File › Close Tab) SHALL ask whether to Save, Don't Save or Cancel. Save SHALL save the tab's session, asking where if the tab has no session file yet, and then close the tab, unless saving fails or the user cancels the dialog. Don't Save SHALL close it and discard the changes. Cancel SHALL keep the tab open. No choice SHALL write the WAV.
 
 #### Scenario: Cancel closing
 - **WHEN** `a.wav` has unsaved edits, the user presses Ctrl/Cmd+W and chooses Cancel
 - **THEN** the tab stays open with its edits
 
 #### Scenario: Save on close
-- **WHEN** `a.wav` has unsaved edits, the user closes its tab and chooses Save
-- **THEN** `a.wav` is written with the edits and the tab closes
+- **WHEN** `a.wav`, opened from `mix.hdsession.json`, has unsaved edits, and the user closes its tab and chooses Save
+- **THEN** `mix.hdsession.json` is written with the edits, `a.wav` is unchanged, and the tab closes
+
+#### Scenario: Save on close without a session
+- **WHEN** `a.wav` has no session file, has unsaved edits, and the user closes its tab and chooses Save
+- **THEN** a save dialog proposes `a.hdsession.json`; saving there closes the tab, and cancelling the dialog keeps it open
 
 ### Requirement: Quitting with unsaved edits
-Quitting the app (window close button, File › Quit, or the OS) while any tab has unsaved changes SHALL ask, for each such tab in tab order, whether to Save, Don't Save or Cancel. Cancel at any prompt SHALL abort the quit and keep every tab open. Quitting with no unsaved changes SHALL NOT ask.
+Quitting the app (window close button, File › Quit, or the OS) while any tab has unsaved changes SHALL ask, for each such tab in tab order, whether to Save, Don't Save or Cancel, where Save saves the tab's session as when closing it. Cancel at any prompt, or cancelling a session save dialog, SHALL abort the quit and keep every tab open. Quitting with no unsaved changes SHALL NOT ask.
 
 #### Scenario: Two edited files
 - **WHEN** `a.wav` and `b.wav` both have unsaved edits and the user closes the window
@@ -109,3 +69,47 @@ Quitting the app (window close button, File › Quit, or the OS) while any tab h
 #### Scenario: Cancel quitting
 - **WHEN** the user quits with unsaved edits and chooses Cancel at the first prompt
 - **THEN** the app keeps running with every tab and edit intact
+
+### Requirement: Export
+File › Export… (Ctrl/Cmd+E) SHALL ask for a file name with a native save dialog filtered to WAV, defaulting to the WAV's folder and name with `-export` (`take.wav` → `take-export.wav`), and write the active tab's audio there, rendered through its edits and active effects. It SHALL be available for any loaded tab that isn't already exporting, even without edits.
+
+#### Scenario: Export a trimmed copy
+- **WHEN** the user crops `take1.wav` and exports it as `take1-trim.wav`
+- **THEN** `take1-trim.wav` contains the cropped audio and `take1.wav` is unchanged
+
+#### Scenario: Cancel the dialog
+- **WHEN** the user opens Export and cancels
+- **THEN** nothing is written and the tab is unchanged
+
+### Requirement: Export never overwrites open audio
+Export SHALL refuse a target that is the tab's own WAV or a WAV open in another tab, writing nothing and showing a notice that explains why.
+
+#### Scenario: Export over the source
+- **WHEN** the user chooses `take1.wav` as the export target for the `take1.wav` tab
+- **THEN** nothing is written and a notice says the audio being edited can't be overwritten, suggesting another name
+
+#### Scenario: Name of another open file
+- **WHEN** the user chooses the path of a file that is open in another tab
+- **THEN** nothing is written and a notice explains that the file is open in another tab
+
+### Requirement: Export leaves the tab unchanged
+After an export, successful or not, the tab SHALL refer to the same WAV and keep its edits, clip settings, effect chain, plugin settings, bypass states, undo history, session file, unsaved marker, view, selection and playhead. Its waveform and statistics SHALL keep describing the edited audio before effects. While exporting, the tab SHALL show the delayed progress indicator used for loads, and edits on it SHALL be disabled; other tabs stay usable.
+
+#### Scenario: Keep working after export
+- **WHEN** the user adds an effect, fades in 1.0–2.0 s and exports
+- **THEN** the effect is still in the chain with its settings, the fade is still there, 1.0–2.0 s is still selected, and Undo removes the fade
+
+#### Scenario: Progress while rendering
+- **WHEN** the user exports a long edited file
+- **THEN** the delayed progress indicator shows how far the export has got, and other tabs stay usable
+
+### Requirement: Safe exporting
+Exporting SHALL NOT leave a partial or corrupted file at the target path. If writing fails (for example the disk is full or access is denied), the system SHALL show an error notice and leave any existing file at the target unchanged. The tab SHALL be unchanged whether the export succeeds or fails.
+
+#### Scenario: Read-only target
+- **WHEN** the user exports into a read-only folder
+- **THEN** an error notice explains that it could not be exported, and the tab keeps its edits, effects and unsaved marker
+
+#### Scenario: Replacing an earlier export
+- **WHEN** the user exports over `take-export.wav` from an earlier export and confirms replacing it in the dialog
+- **THEN** `take-export.wav` is replaced only once the new file is complete

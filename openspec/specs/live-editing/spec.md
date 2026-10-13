@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Makes editing feel live. Edits, undo and redo take effect immediately in the waveform and in playback, and handle drags and the fade curve can be heard as they change. Analysis runs in the background, and the edited audio is only rendered when the file is saved.
+Makes editing feel live. Edits, undo and redo take effect immediately in the waveform and in playback, and handle drags and the fade curve can be heard as they change. Analysis runs in the background, and the edited audio is only rendered when it is exported.
 
 ## Requirements
 
@@ -104,8 +104,12 @@ While the Fade In / Fade Out curve dialog is open, the waveform SHALL show the s
 - **THEN** the waveform and playback are as before, and Undo is unchanged
 
 ### Requirement: Audio rendered only when saving
-Edits, undo, redo and previews SHALL NOT write audio to disk or create rendered copies. The edited audio SHALL be rendered only by Save, Save As, or Save when a tab is closed or the app quits.
+Edits, undo, redo, previews and saving a session SHALL NOT write audio to disk or create rendered copies. The edited audio SHALL be rendered only by File › Export….
 
 #### Scenario: Many edits, no files
-- **WHEN** the user makes many edits to `a.wav` without saving
-- **THEN** no new files are created, and `a.wav` is unchanged on disk
+- **WHEN** the user makes many edits to `a.wav` and saves its session
+- **THEN** the only new file is the session file, and `a.wav` is unchanged on disk
+
+#### Scenario: Closing never renders
+- **WHEN** the user closes a tab with unsaved edits and chooses Save
+- **THEN** only the session file is written; no WAV is rendered

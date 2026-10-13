@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Lets users trim and clean up a WAV file in place, using the waveform selection as the target for crop, delete, silence and fade operations, with undo and redo. The rest of the app always shows the edited audio.
+Lets users trim and clean up a WAV file non-destructively, using the waveform selection as the target for crop, delete, silence and fade operations, with undo and redo. The rest of the app always shows the edited audio.
 
 ## Requirements
 
@@ -81,7 +81,7 @@ After each edit, undo or redo, the waveform, overview, ruler, duration, frame co
 - **THEN** the cropped waveform is shown with no progress box, and Edit menu items are available straight away
 
 ### Requirement: Undo and redo
-The system SHALL keep a per-tab history of edits since the file was opened or last saved. Undo (Ctrl/Cmd+Z, Edit › Undo) SHALL revert the most recent edit, and Redo (Ctrl/Cmd+Shift+Z, Ctrl+Y, Edit › Redo) SHALL reapply the most recently undone edit. Making a new edit after undoing SHALL discard the redo history. Undo and Redo SHALL be disabled when there is nothing to undo or redo.
+The system SHALL keep a per-tab history of edits since the tab was opened, from a WAV or from a session file. Saving the session or exporting SHALL NOT clear it. Undo (Ctrl/Cmd+Z, Edit › Undo) SHALL revert the most recent edit, and Redo (Ctrl/Cmd+Shift+Z, Ctrl+Y, Edit › Redo) SHALL reapply the most recently undone edit. Making a new edit after undoing SHALL discard the redo history. Undo and Redo SHALL be disabled when there is nothing to undo or redo.
 
 #### Scenario: Undo a delete
 - **WHEN** the user deletes 4.0–5.0 s of a 10.0 s file and presses Ctrl/Cmd+Z
@@ -99,6 +99,10 @@ The system SHALL keep a per-tab history of edits since the file was opened or la
 - **WHEN** the user edits `a.wav`, switches to `b.wav` and presses Ctrl/Cmd+Z
 - **THEN** nothing in either file changes, because `b.wav` has no edits
 
+#### Scenario: Undo after saving the session
+- **WHEN** the user fades in a selection, saves the session and presses Ctrl/Cmd+Z
+- **THEN** the fade is undone and the tab shows the unsaved marker
+
 ### Requirement: Selection after undo and redo
 After an undo or redo, the selection SHALL be cleared if the file length changed, and kept otherwise.
 
@@ -106,9 +110,13 @@ After an undo or redo, the selection SHALL be cleared if the file length changed
 - **WHEN** the user applies Fade In to 1.0–2.0 s and presses Undo
 - **THEN** the fade is gone and 1.0–2.0 s is still selected
 
-### Requirement: Original file untouched until saved
-Edits, undo and redo SHALL NOT modify the file on disk. Only Save SHALL change the original file.
+### Requirement: Original file never modified
+Edits, undo, redo, saving a session and exporting SHALL NOT modify the WAV a tab was opened from.
 
 #### Scenario: Close without saving
-- **WHEN** the user crops a file, closes its tab and chooses Discard, then reopens the file
+- **WHEN** the user crops a file, closes its tab and chooses Don't Save, then reopens the file
 - **THEN** the file has its original length and content
+
+#### Scenario: Save and export leave it alone
+- **WHEN** the user crops `a.wav`, saves its session and exports it to `a-export.wav`
+- **THEN** `a.wav` has its original length and content

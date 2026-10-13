@@ -4,6 +4,10 @@ version = "0.1.0"
 description = "Desktop WAV file analyser"
 edition = "2024"
 
+[workspace]
+# VST3 plugins built by the Rust tests (see tests/common/test_plugins.rs).
+members = ["test-plugins/*"]
+
 [lib]
 # The `_lib` suffix avoids a lib/bin name clash on Windows (cargo#8519).
 name = "hither_dither_lib"
@@ -16,13 +20,43 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Exact float parsing: session files must give back the same fade positions.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 memmap2 = "0.9"
 ebur128 = "0.1"
 cpal = "0.16"
 rubato = "0.16"
 rtrb = "0.3"
 thiserror = "2"
+base64 = "0.22"
+# VST3 hosting. `vst3` is MIT OR Apache-2.0 bindings generated from the
+# MIT-licensed SDK headers; pinned because its generated API changes freely.
+vst3 = "=0.3.0"
+libloading = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_LibraryLoader",
+  "Win32_UI_HiDpi",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+core-foundation = "0.10"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = "0.13"
+# Same version as Tauri's GTK stack, so sources attach to its main context.
+glib = "0.18"
+# The main window's X11 ID, so editor windows stay above it (same versions as Tauri's).
+gtk = "0.18"
+gdkx11 = "0.18"
 
 [dev-dependencies]
 tempfile = "3"

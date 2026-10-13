@@ -1,12 +1,15 @@
-// Editing actions shared by the Edit menu and keyboard shortcuts: edits, undo/redo and saving.
-import { message, save as saveDialog } from "@tauri-apps/plugin-dialog";
+// Editing actions shared by the Edit menu and keyboard shortcuts: edits, undo/redo, saving,
+// exporting and replacing the audio.
+import { message, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
-import { PROGRESS_DELAY_MS, setSelection } from "./app.svelte";
+import { PROGRESS_DELAY_MS, forgetStats, setSelection, showEffectWarnings, showLoaded } from "./app.svelte";
 import { askFadeCurve, curveDialog } from "./curveDialog.svelte";
-import { type EditKind, afterEdit, canApply, remapFrame } from "./editRules";
+import { type EditKind, afterEdit, canApply, remapFrame, replaceNeedsConfirmation } from "./editRules";
 import { notify } from "./notices.svelte";
+import { setEditState, showChainOutcome } from "./outcome";
+import { closePrompt, defaultExportPath, defaultSessionPath, withSessionExtension } from "./sessionFiles";
 import { samePath } from "./tabOrder";
-import { type Tab, activeTab, findTab, tabs } from "./tabs.svelte";
+import { type Tab, activeTab, findTab, overviewCache, tabs } from "./tabs.svelte";
 import { prefetchPeaks } from "./waveform/prefetch";
 import { haltPlayback, playback, transport } from "./transport.svelte";
 import { view } from "./view.svelte";
@@ -130,6 +133,8 @@ function run(
       if (!pending) return;
       const outcome = await pending;
       if (!findTab(tab.id)) return;
+      // Undoing or redoing a chain change: the audio, and everything drawn from it, stay.
+      if (!outcome.audioChanged) return showChainOutcome(tab, outcome);
       const after = afterEdit(kind, selection, playheadOf(tab), oldFrames, outcome.metadata.frames);
       await showOutcome(tab, kind, selection, oldClip, outcome, after);
     } catch (e) {
@@ -137,6 +142,84 @@ function run(
       if (findTab(tab.id)) notify("error", TITLES[kind], String(e));
     }
   });
+}
+
+/**
+ * Run a change to `tab`'s effect chain, in turn with its edits. Chain changes leave the
+ * audio, peaks and analysis alone. Resolves the outcome, or null if it failed (with a
+ * notice titled `title`) or no longer applies.
+ */
+function runChain(
+  tab: Tab,
+  title: string,
+  call: () => Promise<api.EditOutcome>,
+): Promise<api.EditOutcome | null> {
+  let result: api.EditOutcome | null = null;
+  return enqueue(tab, async () => {
+    if (!findTab(tab.id) || tab.editing) return;
+    try {
+      const outcome = await call();
+      if (!findTab(tab.id)) return;
+      showChainOutcome(tab, outcome);
+      result = outcome;
+    } catch (e) {
+      if (findTab(tab.id)) notify("error", title, String(e));
+    }
+  }).then(() => result);
+}
+
+/** The active tab, if its effects can be changed now. */
+function effectsTab(): Tab | null {
+  const tab = editableTab();
+  return tab?.chain ? tab : null;
+}
+
+export function canAddEffect(): boolean {
+  const chain = effectsTab()?.chain;
+  return !!chain && chain.effects.length < api.MAX_EFFECTS;
+}
+
+export function canBypassAll(): boolean {
+  return !!effectsTab()?.chain?.effects.length;
+}
+
+/** Add effect `classId` to the end of the active tab's chain; resolves the new effect. */
+export async function addEffect(classId: string): Promise<api.EffectInfo | null> {
+  const tab = effectsTab();
+  if (!tab || !canAddEffect()) return null;
+  const outcome = await runChain(tab, "Could not add the effect", () => api.addEffect(tab.id, classId));
+  return outcome?.chain.effects.at(-1) ?? null;
+}
+
+export async function removeEffect(slotId: number): Promise<void> {
+  const tab = effectsTab();
+  if (tab) await runChain(tab, "Could not remove the effect", () => api.removeEffect(tab.id, slotId));
+}
+
+/** Move an effect of the active tab to position `index` of its chain. */
+export async function moveEffect(slotId: number, index: number): Promise<void> {
+  const tab = effectsTab();
+  if (tab) await runChain(tab, "Could not move the effect", () => api.moveEffect(tab.id, slotId, index));
+}
+
+export async function setEffectBypass(slotId: number, on: boolean): Promise<void> {
+  const tab = effectsTab();
+  if (tab) await runChain(tab, "Could not bypass the effect", () => api.setEffectBypass(tab.id, slotId, on));
+}
+
+export async function setBypassAll(on: boolean): Promise<void> {
+  const tab = effectsTab();
+  if (tab) await runChain(tab, "Could not bypass the effects", () => api.setBypassAll(tab.id, on));
+}
+
+/** Whether Bypass All is on for the active tab. */
+export function bypassAllOn(): boolean {
+  return !!activeTab()?.chain?.bypassAll;
+}
+
+/** Effects › Bypass All Effects. */
+export function toggleBypassAll(): Promise<void> {
+  return canBypassAll() ? setBypassAll(!bypassAllOn()) : Promise.resolve();
 }
 
 /** The tab's playhead: live in `transport` while active, saved on the tab otherwise. */
@@ -168,6 +251,7 @@ async function showOutcome(
   tab.meta = outcome.metadata;
   if (clipRuns) tab.clipRuns = clipRuns;
   tab.clip = outcome.clip;
+  tab.chain = outcome.chain;
   setEditState(tab, outcome.edit_state);
   tab.revision = outcome.edit_state.revision;
   tab.peaksVersion = version;
@@ -210,7 +294,7 @@ async function showOutcome(
  * Mark `tab`'s whole-file stats as updating until revision `revision` has been analysed,
  * then show the exact stats, clip markers and peaks (unless a newer change came first).
  */
-function watchAnalysis(tab: Tab, revision: number) {
+export function watchAnalysis(tab: Tab, revision: number) {
   tab.analysing = true;
   void api
     .waitAnalysis(tab.id, revision)
@@ -237,17 +321,18 @@ async function showAnalysis(tab: Tab, whole: api.Stats, clipRuns: api.ClipRuns) 
   else if (tab.statsPending && tabs.activeId === tab.id) void setSelection(tab.selection);
 }
 
-function setEditState(tab: Tab, state: api.EditState) {
-  tab.dirty = state.dirty;
-  tab.canUndo = state.can_undo;
-  tab.canRedo = state.can_redo;
-}
-
+/** File › Save is available: loaded, not exporting, and unsaved or without a session file yet. */
 export function canSave(): boolean {
-  return !!editableTab()?.dirty;
+  const tab = editableTab();
+  return !!tab && (tab.dirty || !tab.sessionPath);
 }
 
+/** File › Save As and Export are available: the active tab is loaded and not exporting. */
 export function canSaveAs(): boolean {
+  return !!editableTab();
+}
+
+export function canExport(): boolean {
   return !!editableTab();
 }
 
@@ -260,66 +345,113 @@ function duplicatePress(): boolean {
   return dup;
 }
 
-/** File › Save: overwrite the active tab's file, confirming the first time. */
+/** File › Save: write the active tab's session file, or ask where the first time. */
 export async function save(): Promise<boolean> {
   const tab = editableTab();
-  if (!tab?.dirty || duplicatePress()) return false;
-  if (!tab.overwriteConfirmed) {
-    const choice = await message(
-      `Overwrite “${tab.name}”?
-
-Its original audio will be replaced and can't be recovered.`,
-      { title: "Save", kind: "warning", buttons: { ok: "Overwrite", cancel: "Cancel" } },
-    );
-    if (choice !== "Overwrite") return false;
-    tab.overwriteConfirmed = true;
-  }
-  return saveTab(tab, null);
+  if (!tab || duplicatePress()) return false;
+  return saveTabSession(tab);
 }
 
-/** File › Save As: write the active tab's audio to a new file and switch the tab to it. */
+/** File › Save As: save the active tab's session to a new session file. */
 export async function saveAs(): Promise<boolean> {
   const tab = editableTab();
   if (!tab || duplicatePress()) return false;
-  const path = await saveDialog({
+  return askSessionPath(tab);
+}
+
+/** Save `tab`'s session to its own session file, asking where if it has none. */
+function saveTabSession(tab: Tab): Promise<boolean> {
+  return tab.sessionPath ? writeSession(tab, tab.sessionPath, true) : askSessionPath(tab);
+}
+
+async function askSessionPath(tab: Tab): Promise<boolean> {
+  const chosen = await saveDialog({
     title: "Save As",
-    defaultPath: tab.path,
-    filters: [{ name: "WAV audio", extensions: ["wav"] }],
+    defaultPath: defaultSessionPath(tab),
+    filters: [{ name: "HitherDither sessions", extensions: ["hdsession.json"] }],
   });
-  if (!path || !findTab(tab.id)) return false;
-  const itself = samePath(path, tab.path);
-  const other = tabs.list.find((t) => t.id !== tab.id && samePath(t.path, path));
-  if (other) {
-    notify("error", "Could not save", `“${other.name}” is open in another tab. Close it first, or choose another name.`);
-    return false;
-  }
-  // The save dialog has already asked about replacing an existing file.
-  const ok = await saveTab(tab, itself ? null : path);
-  if (ok) tab.overwriteConfirmed = true;
-  return ok;
+  if (!chosen || !findTab(tab.id)) return false;
+  // The dialog has asked about replacing the name it was given, but not one completed here.
+  const path = withSessionExtension(chosen);
+  return writeSession(tab, path, path === chosen);
 }
 
 /**
- * Ask whether to save `tab`'s unsaved changes before it closes. Resolves true if it may
- * close (saved, or the user chose not to save), false to keep it open.
+ * Save `tab`'s session to `path`, which becomes the tab's session file. Unless `replace`,
+ * an existing file is only replaced once the user agrees. Resolves whether it was saved.
+ */
+async function writeSession(tab: Tab, path: string, replace: boolean): Promise<boolean> {
+  // Let changes already on their way land first, so the session has them.
+  await queues.get(tab.id);
+  if (!findTab(tab.id) || tab.editing) return false;
+  try {
+    const saved = await api.saveSession(tab.id, path, replace);
+    if (!saved.written) {
+      const name = path.split(/[\\/]/).pop();
+      const choice = await message(`“${name}” already exists. Replace it?`, {
+        title: "Save As",
+        kind: "warning",
+        buttons: { ok: "Replace", cancel: "Cancel" },
+      });
+      return choice === "Replace" && findTab(tab.id) !== null && writeSession(tab, path, true);
+    }
+    tab.sessionPath = path;
+    setEditState(tab, saved.editState);
+    return true;
+  } catch (e) {
+    if (findTab(tab.id)) notify("error", "Could not save", String(e));
+    return false;
+  }
+}
+
+/**
+ * Ask whether to save `tab`'s unsaved changes before it closes. Saving writes its session
+ * (asking where if it has none), never the WAV. Resolves true if it may close (saved, or
+ * the user chose not to save), false to keep it open.
  */
 export async function confirmClose(tab: Tab): Promise<boolean> {
   if (!tab.dirty) return true;
-  const choice = await message(`Save changes to “${tab.name}” before closing?`, {
+  const choice = await message(closePrompt(tab), {
     title: "Unsaved changes",
     kind: "warning",
     buttons: { yes: "Save", no: "Don't Save", cancel: "Cancel" },
   });
-  if (choice === "Save") return saveTab(tab, null);
+  if (choice === "Save") return saveTabSession(tab);
   return choice === "Don't Save";
 }
 
+/** File › Export: render the active tab's audio to a new WAV. The tab is left as it is. */
+export async function exportAudio(): Promise<boolean> {
+  const tab = editableTab();
+  if (!tab || duplicatePress()) return false;
+  const path = await saveDialog({
+    title: "Export",
+    defaultPath: defaultExportPath(tab.path),
+    filters: [{ name: "WAV audio", extensions: ["wav"] }],
+  });
+  if (!path || !findTab(tab.id)) return false;
+  if (samePath(path, tab.path)) {
+    notify(
+      "error",
+      "Could not export",
+      `“${tab.name}” is the audio being edited, so it can't be overwritten. Export to another name.`,
+    );
+    return false;
+  }
+  const other = tabs.list.find((t) => t.id !== tab.id && samePath(t.path, path));
+  if (other) {
+    notify("error", "Could not export", `“${other.name}” is open in another tab. Close it first, or choose another name.`);
+    return false;
+  }
+  // The dialog has already asked about replacing an existing file.
+  return exportTab(tab, path);
+}
+
 /**
- * Write `tab` to `path` (its own file when null), rendering its edits. Shows progress once
- * it has lasted a moment, and keeps the tab from being edited meanwhile. Resolves whether
- * it was saved.
+ * Render `tab`'s audio to `path`. Shows progress once it has lasted a moment, and keeps the
+ * tab from being edited meanwhile. Resolves whether it was exported.
  */
-async function saveTab(tab: Tab, path: string | null): Promise<boolean> {
+async function exportTab(tab: Tab, path: string): Promise<boolean> {
   if (tab.editing) return false;
   tab.editing = true;
   // Let changes already on their way land first.
@@ -328,22 +460,111 @@ async function saveTab(tab: Tab, path: string | null): Promise<boolean> {
   tab.progress = { fraction: 0, visible: false };
   const timer = setTimeout(() => (tab.progress.visible = true), PROGRESS_DELAY_MS);
   try {
-    const outcome = await api.saveFile(tab.id, path, (p) => {
+    const outcome = await api.exportFile(tab.id, path, (p) => {
+      tab.progress.fraction = p.totalFrames ? p.doneFrames / p.totalFrames : 1;
+    });
+    if (findTab(tab.id) && outcome.clampedSamples > 0) {
+      const n = outcome.clampedSamples;
+      const name = path.split(/[\\/]/).pop();
+      notify(
+        "warning",
+        `Some samples in “${name}” were clipped`,
+        `The effects pushed ${n.toLocaleString()} ${n === 1 ? "sample" : "samples"} past full scale, so ${n === 1 ? "it was" : "they were"} clipped to fit the file's format.`,
+      );
+    }
+    return true;
+  } catch (e) {
+    if (findTab(tab.id)) notify("error", "Could not export", String(e));
+    return false;
+  } finally {
+    clearTimeout(timer);
+    tab.editing = false;
+    tab.progress.visible = false;
+  }
+}
+
+/** File › Replace Audio is available: the active tab is loaded and not exporting. */
+export function canReplaceAudio(): boolean {
+  return !!editableTab();
+}
+
+/**
+ * File › Replace Audio: swap the active tab's WAV for another, keeping its effects and their
+ * settings and its session file. The edits and undo history are dropped, so it asks first
+ * when there is anything to lose.
+ */
+export async function replaceAudio(): Promise<boolean> {
+  const tab = editableTab();
+  if (!tab || duplicatePress()) return false;
+  const chosen = await openDialog({
+    title: "Replace Audio",
+    multiple: false,
+    directory: false,
+    filters: [{ name: "WAV audio", extensions: ["wav", "wave", "WAV"] }],
+  });
+  if (typeof chosen !== "string" || !findTab(tab.id)) return false;
+  const title = "Could not replace the audio";
+  if (samePath(chosen, tab.path)) {
+    notify("error", title, `“${tab.name}” is already this tab's audio.`);
+    return false;
+  }
+  const other = tabs.list.find((t) => t.id !== tab.id && samePath(t.path, chosen));
+  if (other) {
+    notify("error", title, `“${other.name}” is open in another tab. Close it first, or choose another file.`);
+    return false;
+  }
+  if (replaceNeedsConfirmation(tab)) {
+    const choice = await message(
+      `Replace the audio of “${tab.name}”?\n\nIts edits and undo history will be discarded. Its effects and their settings are kept.`,
+      { title: "Replace Audio", kind: "warning", buttons: { ok: "Replace", cancel: "Cancel" } },
+    );
+    if (choice !== "Replace" || !findTab(tab.id)) return false;
+  }
+  return replaceTabAudio(tab, chosen);
+}
+
+async function replaceTabAudio(tab: Tab, path: string): Promise<boolean> {
+  if (tab.editing) return false;
+  tab.editing = true;
+  // Let changes already on their way land first.
+  await queues.get(tab.id);
+  if (tabs.activeId === tab.id) haltPlayback();
+  const old = tab.meta;
+  // Shown as loading (the waveform goes) and not editable until the new audio is in.
+  tab.meta = null;
+  tab.progress = { fraction: 0, visible: false };
+  const timer = setTimeout(() => (tab.progress.visible = true), PROGRESS_DELAY_MS);
+  try {
+    const outcome = await api.replaceAudio(tab.id, path, (p) => {
       tab.progress.fraction = p.totalFrames ? p.doneFrames / p.totalFrames : 1;
     });
     if (!findTab(tab.id)) return true;
-    // Same audio, now analysed exactly: refresh anything drawn from estimates.
-    tab.meta = outcome.metadata;
+    // A different recording: nothing of the old audio's view, selection or caches applies.
     tab.path = outcome.metadata.path;
     tab.name = outcome.metadata.name;
-    tab.clip = outcome.clip;
-    tab.revision = outcome.edit_state.revision;
-    setEditState(tab, outcome.edit_state);
-    const [whole, clipRuns] = await Promise.all([api.computeStats(tab.id, null), api.getClipRuns(tab.id)]);
-    if (findTab(tab.id) && whole) await showAnalysis(tab, whole, clipRuns);
+    tab.selection = null;
+    tab.statsPending = false;
+    tab.vp = null;
+    tab.userScrolled = false;
+    tab.playhead = 0;
+    tab.playStart = 0;
+    tab.peaksVersion = nextPeaksVersion();
+    overviewCache.delete(tab.id);
+    forgetStats(tab.id);
+    if (tabs.activeId === tab.id) {
+      view.vp = null;
+      view.userScrolled = false;
+      transport.playhead = 0;
+      transport.playStart = 0;
+    }
+    await showLoaded(tab, outcome.metadata, outcome.editState);
+    showEffectWarnings(outcome.warnings);
     return true;
   } catch (e) {
-    if (findTab(tab.id)) notify("error", "Could not save", String(e));
+    if (findTab(tab.id)) {
+      tab.meta = old;
+      notify("error", "Could not replace the audio", String(e));
+    }
     return false;
   } finally {
     clearTimeout(timer);

@@ -1,7 +1,11 @@
 <script lang="ts">
   import CurveDialog from "./components/CurveDialog.svelte";
+  import EffectBrowser from "./components/EffectBrowser.svelte";
+  import EffectsPanel from "./components/EffectsPanel.svelte";
+  import GenericControls from "./components/GenericControls.svelte";
   import MetadataPanel from "./components/MetadataPanel.svelte";
   import Notices from "./components/Notices.svelte";
+  import PluginManager from "./components/PluginManager.svelte";
   import ProgressOverlay from "./components/ProgressOverlay.svelte";
   import StatsPanel from "./components/StatsPanel.svelte";
   import TabBar from "./components/TabBar.svelte";
@@ -16,42 +20,60 @@
   import { layout } from "./lib/layout.svelte";
   import {
     applyEdit,
+    bypassAllOn,
+    canAddEffect,
+    canBypassAll,
     canEdit,
     canRedo,
     canSave,
     canSaveAs,
+    canExport,
+    canReplaceAudio,
     canUndo,
     redo,
     save,
     saveAs,
+    exportAudio,
     undo,
   } from "./lib/editActions";
-  import { onQuit, setMenuEnabled } from "./lib/menu";
+  import { takeStartupNotices } from "./lib/api";
+  import { initEffects } from "./lib/effects.svelte";
+  import { onQuit, setMenuChecked, setMenuEnabled } from "./lib/menu";
+  import { notify } from "./lib/notices.svelte";
+  import { initPlugins } from "./lib/plugins.svelte";
   import { runScrollBenchmark } from "./lib/perf";
-  import { readSession, writeSession } from "./lib/session";
+  import { readSession, rememberedPath, rememberedTabs, writeSession } from "./lib/session";
   import { samePath } from "./lib/tabOrder";
   import { activeTab, tabs } from "./lib/tabs.svelte";
   import { goToStart, initTransport, seek, togglePlay, transport } from "./lib/transport.svelte";
   import { zoomIn, zoomOut, zoomToFit } from "./lib/view.svelte";
 
   void initTransport();
+  initEffects();
+  initPlugins();
 
-  // Reopen the last session. This pushes its tabs synchronously, so the save effect
-  // below never sees an empty list first and overwrites the remembered session.
+  // Plugins disabled because the app closed unexpectedly while one was loading.
+  void takeStartupNotices()
+    .then((list) => list.forEach((n) => notify("warning", `${n.name} was disabled`, n.message)))
+    .catch(() => {});
+
+  // Reopen the last session: WAVs and session files, as the tabs were remembered. Session
+  // files are read before their tabs appear, so nothing is remembered until this finishes,
+  // or an empty or partial list would overwrite the remembered one.
   const saved = readSession();
+  let restoring = $state(saved.paths.length > 0);
   if (saved.paths.length > 0) {
     void openPaths(saved.paths).then(() => {
+      restoring = false;
       const { active } = saved;
-      const tab = active === null ? undefined : tabs.list.find((t) => samePath(t.path, active));
+      const tab = active === null ? undefined : tabs.list.find((t) => samePath(rememberedPath(t), active));
       if (tab?.status === "ready") activateTab(tab.id);
     });
   }
 
   $effect(() => {
-    writeSession(
-      tabs.list.map((t) => t.path),
-      activeTab()?.path ?? null,
-    );
+    const remembered = rememberedTabs(tabs.list, activeTab());
+    if (!restoring) writeSession(remembered.paths, remembered.active);
   });
 
   const active = $derived(activeTab());
@@ -62,6 +84,8 @@
       "close-tab": tabs.list.length > 0,
       save: canSave(),
       "save-as": canSaveAs(),
+      export: canExport(),
+      "replace-audio": canReplaceAudio(),
       undo: canUndo(),
       redo: canRedo(),
       crop: canEdit("crop"),
@@ -69,7 +93,10 @@
       silence: canEdit("silence"),
       "fade-in": canEdit("fadeIn"),
       "fade-out": canEdit("fadeOut"),
+      "add-effect": canAddEffect(),
+      "bypass-all": canBypassAll(),
     });
+    void setMenuChecked({ "bypass-all": bypassAllOn() });
   });
 
   // Closing the window (or File › Quit) asks about unsaved changes first. Tauri closes
@@ -109,6 +136,11 @@
     if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === "y") {
       e.preventDefault();
       void redo();
+      return;
+    }
+    if (mod && !e.shiftKey && e.key.toLowerCase() === "e") {
+      e.preventDefault();
+      void exportAudio();
       return;
     }
     if (mod && e.key.toLowerCase() === "s") {
@@ -192,7 +224,7 @@
           />
         {/key}
         {#if active.editing && active.progress.visible}
-          <ProgressOverlay name={active.name} fraction={active.progress.fraction} verb="Saving" />
+          <ProgressOverlay name={active.name} fraction={active.progress.fraction} verb="Exporting" />
         {/if}
       {:else if active}
         <!-- Still loading. The progress box appears once the load has lasted a moment. -->
@@ -211,7 +243,8 @@
 
     {#if showDetails}
       <aside id="details-panel" aria-label="Details">
-        {#if app.meta}
+        {#if active && app.meta}
+          <EffectsPanel tab={active} />
           <MetadataPanel meta={app.meta} />
           <StatsPanel
             stats={app.stats}
@@ -228,10 +261,13 @@
   </main>
 
   {#if dropHover.active}
-    <div class="drop-hint">Drop WAV files to open them</div>
+    <div class="drop-hint">Drop WAV or session files to open them</div>
   {/if}
   <Notices />
   <CurveDialog />
+  <EffectBrowser />
+  <PluginManager />
+  <GenericControls />
 </div>
 
 <style>

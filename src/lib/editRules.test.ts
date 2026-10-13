@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ClipInfo } from "./api";
-import { afterEdit, canApply, remapFrame } from "./editRules";
+import { afterEdit, canApply, remapFrame, replaceNeedsConfirmation } from "./editRules";
 
 const sel = { start: 4_000, end: 5_000 };
 
@@ -77,5 +77,16 @@ describe("remapFrame", () => {
     expect(remapFrame("clip", null, 3_000, 9_500, clip(0), clip(500))).toBe(2_500);
     expect(remapFrame("undo", null, 2_500, 10_000, clip(500), clip(0))).toBe(3_000);
     expect(remapFrame("undo", null, 9_500, 9_000, clip(0, 10_000), clip(0, 9_000))).toBe(9_000);
+  });
+});
+
+describe("replaceNeedsConfirmation", () => {
+  it("asks when there are edits or anything to undo", () => {
+    expect(replaceNeedsConfirmation({ edited: true, canUndo: false })).toBe(true);
+    expect(replaceNeedsConfirmation({ edited: false, canUndo: true })).toBe(true);
+  });
+
+  it("doesn't ask for an unedited tab with nothing to undo", () => {
+    expect(replaceNeedsConfirmation({ edited: false, canUndo: false })).toBe(false);
   });
 });

@@ -1,9 +1,10 @@
 // User-triggered actions shared by the menu, toolbar, tab strip, keyboard and drag-and-drop.
-import { open } from "@tauri-apps/plugin-dialog";
-import { cancelOpen, closeFile } from "./api";
-import { forgetStats, loadIntoTab, setSelection } from "./app.svelte";
-import { confirmClose } from "./editActions";
+import { message, open } from "@tauri-apps/plugin-dialog";
+import { cancelOpen, closeFile, readSession, setActiveFile } from "./api";
+import { SessionMismatch, forgetStats, loadIntoTab, setSelection } from "./app.svelte";
+import { confirmClose, watchAnalysis } from "./editActions";
 import { notify } from "./notices.svelte";
+import { type OpenRequest, isSessionPath, planOpens } from "./sessionFiles";
 import { cycle, move, neighbourAfterClose, samePath } from "./tabOrder";
 import { type Tab, activeTab, findTab, newTab, overviewCache, tabs } from "./tabs.svelte";
 import { haltPlayback, transport } from "./transport.svelte";
@@ -20,7 +21,11 @@ export async function openDialog(): Promise<void> {
     const paths = await open({
       multiple: true,
       directory: false,
-      filters: [{ name: "WAV audio", extensions: ["wav", "wave", "WAV"] }],
+      filters: [
+        { name: "WAV audio and sessions", extensions: ["wav", "wave", "WAV", "hdsession.json"] },
+        { name: "WAV audio", extensions: ["wav", "wave", "WAV"] },
+        { name: "HitherDither sessions", extensions: ["hdsession.json"] },
+      ],
     });
     // Don't wait for the loads: Open must stay usable while files are loading.
     if (paths) void openPaths(paths);
@@ -38,18 +43,91 @@ export async function dropPaths(paths: string[]): Promise<void> {
 let queue: Promise<void> = Promise.resolve();
 
 /**
- * Open each path in its own tab. A path that is already open (or loading) activates
- * its tab instead. Resolves once all of these loads have finished.
+ * Open each path in its own tab: a WAV, or a session file, which opens its WAV and then
+ * restores the session. A WAV that is already open (or loading) activates its tab instead.
+ * Resolves once all of these loads have finished.
  */
 export function openPaths(paths: string[]): Promise<void> {
-  const batch: Tab[] = [];
+  // Without sessions, tabs appear at once, as before.
+  if (!paths.some(isSessionPath)) return openRequests(paths.map((path) => ({ kind: "wav", path })));
+  return readRequests(paths).then(openRequests);
+}
+
+/**
+ * Each path as a request, reading sessions one at a time: a session whose WAV is missing asks
+ * for another, and only one such dialog is open at once.
+ */
+async function readRequests(paths: string[]): Promise<OpenRequest[]> {
+  const requests: OpenRequest[] = [];
   for (const path of paths) {
-    const existing = tabs.list.find((t) => samePath(t.path, path));
-    if (existing) {
-      activateTab(existing.id);
+    if (!isSessionPath(path)) {
+      requests.push({ kind: "wav", path });
       continue;
     }
-    tabs.list.push(newTab(path));
+    try {
+      const info = await readSession(path);
+      if (info.audioPath !== null) {
+        requests.push({ kind: "session", sessionPath: path, audioPath: info.audioPath, relink: false });
+        continue;
+      }
+      const chosen = await chooseAnotherWav(path, `The audio file “${info.audioName}” could not be found.`);
+      if (chosen) requests.push({ kind: "session", sessionPath: path, audioPath: chosen, relink: true });
+    } catch (e) {
+      requests.push({ kind: "invalid", sessionPath: path, message: String(e) });
+    }
+  }
+  return requests;
+}
+
+/**
+ * Tell the user why session `sessionPath` can't use its own WAV, and let them pick another.
+ * Resolves the chosen WAV, or null if they cancelled.
+ */
+async function chooseAnotherWav(sessionPath: string, why: string): Promise<string | null> {
+  const name = sessionPath.split(/[\\/]/).pop();
+  const choice = await message(`${why}\n\nChoose another WAV to open “${name}” with it.`, {
+    title: "Could not open session",
+    kind: "warning",
+    buttons: { ok: "Choose Another WAV…", cancel: "Cancel" },
+  });
+  if (choice !== "Choose Another WAV…") return null;
+  const chosen = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "WAV audio", extensions: ["wav", "wave", "WAV"] }],
+  });
+  return typeof chosen === "string" ? chosen : null;
+}
+
+/** A session's WAV no longer matched it: offer another, and open the session with it. */
+async function relinkMismatched(mismatch: SessionMismatch): Promise<void> {
+  const chosen = await chooseAnotherWav(mismatch.sessionPath, `${mismatch.message} Its format or length changed.`);
+  if (chosen) {
+    await openRequests([{ kind: "session", sessionPath: mismatch.sessionPath, audioPath: chosen, relink: true }]);
+  }
+}
+
+function openRequests(requests: OpenRequest[]): Promise<void> {
+  const batch: Tab[] = [];
+  const isOpen = (path: string) => tabs.list.some((t) => samePath(t.path, path));
+  for (const action of planOpens(requests, isOpen)) {
+    if (action.kind === "error") {
+      notify("error", "Could not open session", action.message);
+      continue;
+    }
+    if (action.kind === "activate") {
+      const existing = tabs.list.find((t) => samePath(t.path, action.path));
+      if (existing) activateTab(existing.id);
+      if (existing && action.sessionPath) {
+        notify(
+          "warning",
+          `“${existing.name}” is already open`,
+          "Close its tab first to open the session, which would replace its edits and effects.",
+        );
+      }
+      continue;
+    }
+    tabs.list.push(newTab(action.path, action.sessionPath, action.relink));
     // Use the reactive proxy from the list, not the plain object.
     batch.push(tabs.list[tabs.list.length - 1]);
   }
@@ -65,7 +143,9 @@ export function openPaths(paths: string[]): Promise<void> {
         removeTab(tab.id);
         // The last file that loaded stays active, not whichever neighbour the close picked.
         if (wasActive && findTab(lastReady)) activateTab(lastReady);
-        notify("error", "Could not open file", result);
+        // Asked after this queue run, so the dialog doesn't hold up the other loads.
+        if (result instanceof SessionMismatch) void Promise.resolve().then(() => relinkMismatched(result));
+        else notify("error", tab.sessionPath ? "Could not open session" : "Could not open file", result);
       }
     }
   };
@@ -73,15 +153,18 @@ export function openPaths(paths: string[]): Promise<void> {
   return queue;
 }
 
-/** Load one queued tab: "ready", "closed" (by the user, meanwhile) or an error message. */
-async function loadTab(tab: Tab): Promise<string> {
+/**
+ * Load one queued tab: "ready", "closed" (by the user, meanwhile), an error message, or a
+ * session whose WAV no longer matches it.
+ */
+async function loadTab(tab: Tab): Promise<string | SessionMismatch> {
   if (!findTab(tab.id)) return "closed"; // closed while queued
   activateTab(tab.id);
-  let error: string | null = null;
+  let error: string | SessionMismatch | null = null;
   try {
     await loadIntoTab(tab);
   } catch (e) {
-    error = String(e);
+    error = e instanceof SessionMismatch ? e : String(e);
   }
   if (!findTab(tab.id)) {
     // Closed meanwhile. Cancelling may have come too late to stop the backend
@@ -91,6 +174,8 @@ async function loadTab(tab: Tab): Promise<string> {
   }
   if (error !== null) return error;
   activateTab(tab.id);
+  // A restored session's edits are still being analysed.
+  if (tab.analysing) watchAnalysis(tab, tab.revision);
   return "ready";
 }
 
@@ -109,6 +194,8 @@ export function activateTab(id: number | null) {
     out.playStart = transport.playStart;
   }
   tabs.activeId = id;
+  // Effect editor windows follow their tab.
+  void setActiveFile(id).catch(() => {});
   const tab = findTab(id);
   view.vp = tab?.vp ?? null;
   view.userScrolled = tab?.userScrolled ?? false;

@@ -79,6 +79,13 @@ export async function play() {
       if (token !== session) return;
       if (e.kind === "position") {
         reported = { frame: e.frame, at: performance.now() };
+      } else if (e.kind === "overload") {
+        // Sent at most once per playback.
+        notify(
+          "warning",
+          "The effects are too demanding to play smoothly",
+          "Playback may drop out. Saving still applies the effects in full.",
+        );
       } else {
         stopTicking();
         transport.playing = false;

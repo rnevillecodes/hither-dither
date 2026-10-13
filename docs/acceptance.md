@@ -1,6 +1,6 @@
 # Acceptance checklist
 
-Manual acceptance pass over every scenario in the four v1 specs (`openspec/changes/add-wav-analyser-app/specs/`), plus the multi-file tabs and app icon change (`openspec/changes/add-multi-file-tabs/specs/`; sections file-tabs, audio-stats: details panel, app-branding, and rows I2b–I13) the dark theme change (section app-theme), and the session restore, tab reordering and window change (`openspec/changes/tab-session-and-window-fit/specs/`; sections app-window, tab-reorder and session-restore), and the audio editing change (`openspec/changes/add-audio-editing/specs/`; sections transport-controls, audio-editing and wav-export), and the clip fades change (`openspec/changes/add-clip-fades-and-crossfades/specs/`; section clip-fades, plus rows E4b, E8b, E8c and X8b), and the live editing change (`openspec/changes/add-live-editing/specs/`; section live-editing, plus rows E9, E10b, F14, F14b, F19, X13b and X13c, and E11 removed).
+Manual acceptance pass over every scenario in the four v1 specs (`openspec/changes/add-wav-analyser-app/specs/`), plus the multi-file tabs and app icon change (`openspec/changes/add-multi-file-tabs/specs/`; sections file-tabs, audio-stats: details panel, app-branding, and rows I2b–I13) the dark theme change (section app-theme), and the session restore, tab reordering and window change (`openspec/changes/tab-session-and-window-fit/specs/`; sections app-window, tab-reorder and session-restore), and the audio editing change (`openspec/changes/add-audio-editing/specs/`; sections transport-controls, audio-editing and wav-export), and the clip fades change (`openspec/changes/add-clip-fades-and-crossfades/specs/`; section clip-fades, plus rows E4b, E8b, E8c and X8b), and the live editing change (`openspec/changes/add-live-editing/specs/`; section live-editing, plus rows E9, E10b, F14, F14b, F19, X13b and X13c, and E11 removed), and the VST3 effect chain change (`openspec/changes/add-vst3-effect-chain/specs/`; sections plugin-editors, effect-chain and vst3-plugins), and the session files change (`openspec/changes/add-session-files/specs/`; section session-files), and the save/export change (`openspec/changes/save-sessions-export-audio/specs/`; sections wav-export and session-files, rows X2b–X17 and SF22–SF26), and the replace-audio change (`openspec/changes/replace-session-audio/specs/`; section replace-audio, rows SF13, SF14 and SF27–SF30).
 
 **Setup:** generate fixtures with `cd src-tauri && cargo run --release --example gen_fixtures -- ../fixtures --large`, then run `npm run tauri dev`. Fixture names below refer to files in `fixtures/`.
 
@@ -217,28 +217,32 @@ Below, "A" is `cd-16bit-stereo-10s.wav`. Shortcuts: Delete, Ctrl/Cmd+T (Crop), C
 
 ## wav-export
 
+Since the save/export change (`openspec/changes/save-sessions-export-audio/`), Save writes the session and Export writes audio; the WAV a tab edits is never written.
+
 | # | Scenario | Steps | Expected | Evidence | Result |
 |---|---|---|---|---|---|
-| X1 | Edit marks the tab | Silence a selection in A | A dot replaces the tab's × (× on hover); tooltip says "Unsaved changes" | | ⏳ |
-| X2 | Undo back to the original | One edit, then Undo | The dot disappears | Auto: `tests/state.rs::edit_then_undo_restores_frames_and_stats` | ⏳ |
-| X3 | First save asks | Crop a copy of A, Ctrl/Cmd+S; try Cancel, then Overwrite | Cancel leaves file and edits; Overwrite saves | | ⏳ |
-| X4 | Later saves don't ask | After X3, edit again and Ctrl/Cmd+S | Saved without a dialog | | ⏳ |
-| X5 | Save a trimmed copy | Crop `take1.wav`, Save As `take1-trim.wav` | New file has the cropped audio; original unchanged; tab now "take1-trim.wav" with no dot; relaunch restores the new path | Auto: `tests/state.rs::save_as_leaves_the_source_alone` | ⏳ |
-| X6 | Cancel the dialog | Save As, then Cancel | Nothing written; edits and dot kept | | ⏳ |
-| X7 | Name of another open file | With B open in another tab, Save As over B's path | Nothing written; notice says it's open in another tab | | ⏳ |
-| X8 | Untouched audio is bit-exact | Delete 1.0–2.0 s from `pcm24-stereo-48k.wav`, Save As | Samples outside the join's crossfade identical to the source | Auto: `wav::writer::tests::untouched_samples_are_bit_exact_outside_the_crossfade` | ⏳ |
-| X8b | Hard join is bit-exact | As X8 but drag the join's crossfade to zero before saving | Every sample identical to the source | Auto: `wav::writer::tests::hard_join_is_bit_exact` | ⏳ |
-| X9 | Metadata is not carried over | Edit `with-list-bext-chunks.wav`, Save As, reopen | Only `fmt ` and `data` chunks; same format details | Auto: `wav::writer::tests::metadata_chunks_are_not_written`, `edited_file_keeps_the_format` | ⏳ |
-| X10 | Result too large for WAV | (Not practical by hand) | Save fails with "too large" and writes nothing | Auto: `wav::writer::tests::refuses_results_over_4_gib` | ⏳ |
-| X11 | Read-only target | Save As into a read-only folder | Error notice; original intact; edits kept | Auto: `tests/state.rs::failed_save_keeps_the_edits` | ⏳ |
-| X12 | File changed by another program | Open a copy of A, edit it in another program and save there, then edit and Save in HitherDither | Nothing written; notice says it changed on disk and suggests Save As | Auto: `tests/state.rs::save_refuses_when_the_original_changed` | ⏳ |
-| X13 | Keep working after save | Zoom in, select 1.0–2.0 s, Fade In, Save | Zoom and selection unchanged; Undo greyed out | Auto: `tests/state.rs::save_replaces_the_original` | ⏳ |
-| X13b | Save before the analysis finishes | Open `large-1gb.wav`, apply Fade Out to most of it, Save As straight away while the stats say "Updating…" | Progress box after a moment; afterwards the stats are current and not marked as updating | Auto: `tests/state.rs::save_before_the_analysis_finishes_is_exact` | ⏳ |
-| X13c | Progress while rendering | Edit `large-1gb.wav`, Save As | The delayed progress box shows how far the save has got; other tabs stay usable | Auto: `tests/state.rs::save_before_the_analysis_finishes_is_exact` (progress reaches the total) | ⏳ |
+| X1 | Edit marks the tab | Silence a selection in A | A dot replaces the tab's × (× on hover); tooltip says "Unsaved changes" | Auto: `tests/state.rs::an_edit_marks_the_tab_and_undoing_it_clears_the_mark` | ⏳ |
+| X2 | Undo back to the original | One edit, then Undo | The dot disappears | Auto: `tests/state.rs::an_edit_marks_the_tab_and_undoing_it_clears_the_mark` | ⏳ |
+| X2b | Plugin setting changed | Save A's session, turn a knob in an effect's editor, then Undo | The dot appears and stays after Undo | Auto: `tests/state.rs::a_change_in_a_plugin_editor_marks_the_tab`, `a_plugin_setting_marks_the_tab_until_saved` | ⏳ |
+| X2c | Saving the session clears it | Edit A, Ctrl/Cmd+S and save the session | The dot goes; A is unchanged on disk; Undo is still available | Auto: `tests/state.rs::saving_the_session_clears_the_unsaved_mark` | ⏳ |
+| X5 | Export a trimmed copy | Crop `take1.wav`, File › Export… as `take1-trim.wav` | New file has the cropped audio; original unchanged; the tab is still "take1.wav", still cropped, with its dot | Auto: `tests/state.rs::export_writes_the_edits_and_leaves_the_tab_alone` | ⏳ |
+| X5b | Default name | File › Export… on `take1.wav` | The dialog proposes `take1-export.wav` next to it | Auto: `sessionFiles.test.ts` | ⏳ |
+| X6 | Cancel the dialog | Export, then Cancel | Nothing written; the tab is unchanged | | ⏳ |
+| X6b | Export over the source | Export `take1.wav` choosing `take1.wav` itself | Nothing written; notice says the audio being edited can't be overwritten | Auto: `tests/state.rs::export_refuses_the_audio_being_edited` | ⏳ |
+| X7 | Name of another open file | With B open in another tab, Export over B's path | Nothing written; notice says it's open in another tab | | ⏳ |
+| X8 | Untouched audio is bit-exact | Delete 1.0–2.0 s from `pcm24-stereo-48k.wav`, Export | Samples outside the join's crossfade identical to the source | Auto: `wav::writer::tests::untouched_samples_are_bit_exact_outside_the_crossfade` | ⏳ |
+| X8b | Hard join is bit-exact | As X8 but drag the join's crossfade to zero before exporting | Every sample identical to the source | Auto: `wav::writer::tests::hard_join_is_bit_exact` | ⏳ |
+| X9 | Metadata is not carried over | Edit `with-list-bext-chunks.wav`, Export, reopen the export | Only `fmt ` and `data` chunks; same format details | Auto: `wav::writer::tests::metadata_chunks_are_not_written`, `edited_file_keeps_the_format` | ⏳ |
+| X10 | Result too large for WAV | (Not practical by hand) | Export fails with "too large" and writes nothing | Auto: `wav::writer::tests::refuses_results_over_4_gib` | ⏳ |
+| X11 | Read-only target | Export into a read-only folder | Error notice; the tab keeps its edits, effects and dot | Auto: `tests/state.rs::a_failed_export_keeps_everything` | ⏳ |
+| X11b | Replacing an earlier export | Export twice to the same name, confirming the replace | The file holds the second export; no temporary files are left | Auto: `tests/state.rs::exporting_again_replaces_an_earlier_export` | ⏳ |
+| X13 | Keep working after export | Add an effect, zoom in, select 1.0–2.0 s, Fade In, Export | The effect, its settings, zoom and selection are unchanged; Undo removes the fade | Auto: `tests/state.rs::exporting_keeps_the_effects_and_their_settings` | ⏳ |
+| X13c | Progress while rendering | Edit `large-1gb.wav`, Export | The delayed progress box ("Exporting") shows how far it has got; other tabs stay usable | | ⏳ |
 | X14 | Cancel closing | Edit A, Ctrl/Cmd+W, Cancel (also try ×, middle-click, File › Close Tab) | Tab stays open with its edits | | ⏳ |
-| X15 | Save on close | Edit A, close its tab, choose Save | A written with the edits (no overwrite prompt); tab closes | | ⏳ |
+| X15 | Save on close | Open A's session, edit, close its tab, choose Save | The session file is written; A is unchanged; the tab closes | | ⏳ |
+| X15b | Save on close without a session | Edit A (no session), close, choose Save; once Cancel the dialog | A dialog proposes `a.hdsession.json`; saving closes the tab; cancelling keeps it open | | ⏳ |
 | X16 | Two edited files | Edit A and B, close the window (also File › Quit) | Asked about A, then B; quits after both answered | | ⏳ |
-| X17 | Cancel quitting | Quit with edits, Cancel at the first prompt | App keeps running with every tab and edit; quitting with no edits doesn't prompt | | ⏳ |
+| X17 | Cancel quitting | Quit with edits, Cancel at the first prompt (and once by cancelling a Save dialog) | App keeps running with every tab and edit; quitting with no changes doesn't prompt | | ⏳ |
 
 ## clip-fades
 
@@ -293,3 +297,160 @@ Below, "A" is `cd-16bit-stereo-10s.wav` and "L" is `large-1gb.wav`. "Playing" me
 | L18 | Audition a curve | Loop a selection of A, Edit › Fade Out…, drag the point | Waveform under the dialog and the playing audio follow the bend | | ⏳ |
 | L19 | Cancel the preview | Edit › Fade In…, drag the point, Cancel | Waveform and playback as before; Undo unchanged | Auto: `tests/state.rs::previews_change_nothing` | ⏳ |
 | L20 | Many edits, no files | Make many edits to a copy of A without saving; watch its folder | No new files; the file is unchanged on disk | Auto: `tests/state.rs::edits_apply_back_to_back_without_analysis` | ⏳ |
+
+## plugin-editors
+
+From the VST3 effect chain change (`openspec/changes/add-vst3-effect-chain/specs/plugin-editors/`). The steps open editors with an effect's controls button in the Effects panel. "A" is `cd-16bit-stereo-10s.wav` and "B" is `pcm24-stereo-48k.wav`.
+
+**Plugins:** Valhalla Supermassive (free, fixed-size editor) and a plugin with a resizable editor: Voxengo SPAN (free) or FabFilter Pro-Q 4. On Linux, use a native Linux VST3 build, such as Surge XT (free, resizable). On macOS, also have an Intel-only VST3 bundle at hand for P15.
+
+**Before the in-app pass (Windows, 2026-10-13):** the editor manager was driven directly against the installed plugins, without the Effects panel. With Supermassive and Pro-Q 4: the window was owned by the main window and titled "<effect> — a.wav"; Pro-Q 4's window was resizable and Supermassive's wasn't; enlarging Pro-Q 4's window resized its editor; a drag to 60×60 was fitted to Pro-Q 4's 776×374 minimum; hiding for another file and showing again kept the window's place; opening again kept one window; closing the window, removing the effect, and destroying the main window each closed the editor and sent `fx-editor-closed`.
+
+### Windows
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| P1 | Open an editor | Open A, add Supermassive, click its controls button | A window titled "ValhallaSupermassive — a.wav" shows the editor at its size; the main window stays usable | Direct check above | ⏳ |
+| P2 | Open twice | With P1's editor behind the main window, click the controls button again | The same window comes to the front; no second window | Direct check above | ⏳ |
+| P3 | Stays above | Click the main window, then minimise and restore it | The editor stays above the main window, and hides and comes back with it | Direct check above (owner) | ⏳ |
+| P4 | Plugin resizes its editor | Add Pro-Q 4, open its editor, resize the editor from the plugin's own size control | The window grows and shrinks to fit the editor | | ⏳ |
+| P5 | Resize the window | Drag Pro-Q 4's window corner larger, then very small | The editor follows; the window stops at the plugin's minimum size. Supermassive's window can't be resized | Direct check above | ⏳ |
+| P6 | Display scaling | With two displays at different scales (e.g. 100 % and 150 %), drag Pro-Q 4's editor from one to the other | The editor redraws sharp at the new scale and keeps its proportions | | ⏳ |
+| P7 | Switch tabs | With A's editor open, switch to B, move nothing, switch back to A | The editor hides on B and reappears in the same place on A | Direct check above | ⏳ |
+| P8 | Remove the effect | With its editor open, remove the effect | The editor closes; Undo brings the effect back with its editor closed | Direct check above | ⏳ |
+| P9 | Close tab, save, quit | Open an editor, then in turn close its tab; save a file with an open editor; quit with an editor open | The editor closes each time; quitting doesn't hang or crash | Direct check above (owner destroyed) | ⏳ |
+| P10 | Close the window | Close the editor window with its close button | It closes; the effect's controls button shows it closed | | ⏳ |
+| P11 | Turn a knob, then save | Play A, turn Supermassive's Mix knob in its editor, close the editor, save | The change is heard within 0.25 s; the saved file has it; Undo is greyed out | | ⏳ |
+
+### macOS
+
+Check on Apple Silicon.
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| P12 | Open, twice, follow tabs | Repeat P1, P2, P7 and P8 | As on Windows; the editor is a child window that moves with the main window when the main window is dragged | | ⏳ |
+| P13 | Resizing | Repeat P4 and P5 | As on Windows | | ⏳ |
+| P14 | Close, save, quit | Repeat P9 and P10, and quit with Cmd+Q while an editor is open | As on Windows | | ⏳ |
+| P15 | Intel-only plugin | Put an Intel-only `.vst3` in `~/Library/Audio/Plug-Ins/VST3`, rescan | Manage Plugins lists it as Incompatible, "No version for this Mac's processor"; it can't be added | Auto: `plugins::scan` architecture check | ⏳ |
+
+### Linux
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| P16 | X11 session | In an X11 session, repeat P1, P2, P4, P5, P7, P8, P9 and P10 with Surge XT | As on Windows; the editor stays above the main window; its animations and meters run (run-loop timers) and it responds to the mouse (run-loop file descriptors) | | ⏳ |
+| P17 | Wayland with XWayland | In a Wayland session with XWayland, open Surge XT's editor | The editor shows in its own window and works; it may not stay above the main window | | ⏳ |
+| P18 | Wayland without XWayland | Run with `DISPLAY` unset in a Wayland session (`env -u DISPLAY npm run tauri dev`), open the controls of any effect | Generic controls show with the note that plugin editors need X11 or XWayland | | ⏳ |
+
+### Generic controls
+
+Check on any platform. Use a plugin without an editor of its own, or Show generic controls on one that has one.
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| P19 | Plugin without an editor | Open the controls of an effect that has no editor of its own | The generic controls panel lists its parameters with name, value and units (e.g. "Threshold −18.0 dB") and a slider each; the main window stays usable | Auto: `tests/state.rs::generic_controls_list_the_gain_parameter` | ⏳ |
+| P20 | Change and reset a parameter | Play A, drag a slider, then double-click it | The change is heard within 0.25 s; double-clicking returns it to the plugin's default; Undo is unchanged | Auto: `tests/state.rs::a_generic_control_is_heard_from_the_next_block`, `generic_control_changes_are_not_undo_steps` | ⏳ |
+| P21 | Both views agree | Open Pro-Q 4's editor and Show generic controls on it; turn a band's gain in the editor, then move that slider | The slider follows the knob; the editor follows the slider | Auto: `tests/state.rs::changes_in_a_plugin_editor_reach_the_generic_controls` | ⏳ |
+| P22 | Follows its tab | With generic controls open, switch to another tab and back; then remove the effect | The panel hides on the other tab and comes back; it closes when the effect is removed | | ⏳ |
+
+## effect-chain
+
+From the VST3 effect chain change (`openspec/changes/add-vst3-effect-chain/specs/effect-chain/`). "A" is `cd-16bit-stereo-10s.wav`, "B" is `pcm24-stereo-48k.wav` and "S" is `float32-extensible-5.1.wav`. Plugins: Pro-Q 4 (EQ), Pro-C 3 (compressor), Pro-L 2 (limiter, with lookahead latency), Supermassive (reverb), and a stereo-only effect for FX5.
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| FX1 | Empty chain | Open A | The Effects section, at the top of the details panel, has no effects, a short hint and Add Effect | | ⏳ |
+| FX2 | Chains are per tab | Add Pro-C 3 to A, switch to B, play B | B's Effects section is empty and B plays unprocessed | | ⏳ |
+| FX3 | Add an EQ | Add Effect…, type "eq", choose Pro-Q 4 | Pro-Q 4 is last in the chain and its editor opens | | ⏳ |
+| FX4 | Full chain | Add 8 effects to A | Add Effect (panel and menu) is greyed out; hovering the button says the chain is full | Auto: `tests/state.rs::a_full_chain_refuses_another_effect` | ⏳ |
+| FX5 | Stereo-only plugin on a 5.1 file | Open S, Add Effect… | The stereo-only effect is greyed out with "Doesn't support 5.1 audio"; Pro-Q 4 isn't | Auto: `effectBrowser.test.ts`, `tests/state.rs::stereo_only_plugin_is_refused_for_a_5_1_file` | ⏳ |
+| FX6 | Scan progress in the browser | Rescan All in Manage Plugins, then open Add Effect at once | "Scanning plugins… n of m" with the effects found so far, updating | | ⏳ |
+| FX7 | Reorder | With Pro-Q 4 then Pro-C 3, drag Pro-C 3 above Pro-Q 4 | The chain is Pro-C 3 then Pro-Q 4; Undo puts it back | Auto: `chainOrder.test.ts`, `tests/state.rs::moving_an_effect_reorders_the_chain` | ⏳ |
+| FX8 | Keyboard reorder | Tab to the second effect, press Alt+Up | It becomes first and keeps the focus | Auto: `chainOrder.test.ts` | ⏳ |
+| FX9 | A/B compare | Loop a selection of A with Pro-Q 4 cutting the lows hard; toggle Bypass All (panel button and Effects menu) | Playback switches between processed and dry within 0.25 s each time, without stopping; the menu item's tick follows | Auto: `playback::engine::fx_tests::bypass_all_is_heard_dry_after_one_flush` | ⏳ |
+| FX10 | Save with a bypassed effect | Bypass Supermassive, keep Pro-Q 4 active, Save As | The saved file has the EQ and no reverb | Auto: `tests/state.rs::effects_are_applied_with_latency_removed`, `a_bypassed_chain_saves_bit_exact` | ⏳ |
+| FX11 | Undo a removal | Set a Pro-Q 4 band to +6 dB, remove Pro-Q 4, Undo | Pro-Q 4 is back in its place with the +6 dB band | Auto: `tests/state.rs::undo_a_removal_brings_the_effect_back_with_its_settings` | ⏳ |
+| FX12 | Edits and effects in one history | Silence a selection of A, add Pro-L 2, Undo twice | The first Undo removes Pro-L 2, the second the silence | Auto: `tests/state.rs::edits_and_effects_share_one_history` | ⏳ |
+| FX13 | Effect alone marks the tab | Add Pro-Q 4 to an unedited A, close the tab | The tab shows the unsaved dot, and closing asks whether to save | Auto: `tests/state.rs::an_effect_alone_marks_the_file_unsaved` | ⏳ |
+| FX14 | Everything bypassed | Bypass A's only effect | No unsaved dot; Save is greyed out | Auto: `tests/state.rs::everything_bypassed_is_not_unsaved` | ⏳ |
+| FX15 | Adjust while listening | Play A through Pro-C 3, raise its ratio in the editor | Heard within 0.25 s; playback doesn't stop | Auto: `playback::engine::fx_tests::parameter_changes_are_heard_within_a_quarter_second` | ⏳ |
+| FX16 | Effect with latency | Add Pro-L 2 with lookahead, play A from 2.0 s | The first audio heard is at 2.0 s and the playhead matches what is heard | Auto: `playback::engine::fx_tests::effects_are_heard_in_time_and_end_with_the_range` | ⏳ |
+| FX17 | Effects not drawn | Add +12 dB of gain (Pro-Q 4 output gain) to A | The waveform and stats are unchanged, and the Effects section notes they show the audio before effects | Auto: `tests/state.rs::chain_changes_do_not_start_an_analysis` | ⏳ |
+| FX18 | After saving | Save FX17's file | The Effects section is empty, the editors close, and the waveform and stats show the louder audio; a notice says how many samples were clipped | Auto: `tests/state.rs::effects_are_baked_in`, `too_much_gain_counts_the_clamped_samples` | ⏳ |
+| FX19 | No output device | Disable every output device, start the app, add Pro-Q 4 to a copy of A and save | Effects can be added and edited; the saved file has the EQ | | ⏳ |
+| FX20 | Overloaded chain | Add 8 heavy instances (e.g. Supermassive at maximum), play A | One notice that the effects are too demanding to play smoothly; saving still renders them | Auto: `playback::engine::fx_tests::a_chain_too_slow_for_real_time_reports_one_overload` | ⏳ |
+| FX21 | Close with editors open | Open two effect editors on A, close A with Don't Save | Both editor windows close | | ⏳ |
+| FX22 | Effects menu without a file | Close every tab, open the Effects menu | Add Effect… and Bypass All Effects are greyed out; Manage Plugins… still works | | ⏳ |
+
+## vst3-plugins
+
+From the VST3 effect chain change (`openspec/changes/add-vst3-effect-chain/specs/vst3-plugins/`). Steps use Effects › Manage Plugins…. Plugins: those installed on the test machine, plus Vital (free synth) for V5.
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| V1 | Plugins in the standard folders | Start the app | Effects from the standard folders appear in Add Effect once scanned, and Manage Plugins lists the standard folders, which can't be removed | | ⏳ |
+| V2 | Standard folder missing | On Linux without `/usr/local/lib/vst3`, start the app | Scanning finishes with no error or notice | Auto: `tests/plugins.rs::missing_standard_folder_is_skipped_silently` | ⏳ |
+| V3 | Add a folder | Copy a plugin to `D:\Plugins\VST3`, Add Folder… there, then restart | Its effects appear once the rescan finishes, and the folder is still listed after restarting | Auto: `tests/plugins.rs::extra_folders_and_disabled_plugins_are_remembered` | ⏳ |
+| V4 | Remove a folder | With an effect from V3's folder in a chain, Remove the folder | Its plugins leave Manage Plugins and Add Effect; the effect in the chain keeps working until removed | | ⏳ |
+| V5 | Instrument plugin | Find Vital in Manage Plugins | It's listed as "No usable effects" and isn't offered in Add Effect | Auto: `tests/plugins.rs::scan_offers_effects_only_with_their_layouts` | ⏳ |
+| V6 | Bundle with two effects | Find a bundle with several effect classes | Each is offered in Add Effect as its own entry | Auto: `tests/plugins.rs::scan_offers_effects_only_with_their_layouts` | ⏳ |
+| V7 | Crashing or hanging plugin | Put `hd-test-crash.vst3` and `hd-test-hang.vst3` (from the Rust test helper) in an extra folder, Rescan All | The app keeps running; after 20 s they show as Failed with "Crashed while being scanned" and "Timed out while being scanned"; the others scan meanwhile | Auto: `tests/plugins.rs::crashing_plugin_is_reported_and_isolated`, `hanging_plugin_times_out_while_others_scan` | ⏳ |
+| V8 | Open files while scanning | Rescan All, then at once open, play and edit A | All work as normal | | ⏳ |
+| V9 | Second launch is quick | Restart the app with the same plugins | Every plugin is available straight away, with no scan progress shown | Auto: `tests/plugins.rs::second_scan_of_unchanged_bundles_launches_nothing` | ⏳ |
+| V10 | Updated plugin | Update one plugin to a new version, restart | Only it is scanned again; Manage Plugins shows the new version | Auto: `tests/plugins.rs::touching_one_bundle_rescans_only_it` | ⏳ |
+| V11 | Statuses | Look through Manage Plugins | Each plugin shows name, vendor, version, location and status (Ready, Failed, Incompatible, Disabled, No usable effects), with the reason when failed or incompatible | | ⏳ |
+| V12 | Disable a plugin | Untick Pro-C 3, restart | It's listed as Disabled and isn't offered in Add Effect; a Pro-C 3 already in a chain kept working before the restart | Auto: `tests/plugins.rs::extra_folders_and_disabled_plugins_are_remembered` | ⏳ |
+| V13 | Crash while adding an effect | End the app's process (Task Manager) while a large plugin is being added, then start it again | A notice says the plugin was disabled because the app closed unexpectedly while loading it; it's listed as Disabled | Auto: `tests/plugins.rs::leftover_marker_disables_the_class_with_one_notice` | ⏳ |
+| V14 | Re-enable after a crash | Tick V13's plugin again | It's offered in Add Effect again | Auto: `tests/plugins.rs::leftover_marker_disables_the_class_with_one_notice` | ⏳ |
+
+## session-files
+
+From the session files change (`openspec/changes/add-session-files/specs/session-files/`). "A" is a copy of `cd-16bit-stereo-10s.wav` in a folder of its own (here `takes/a.wav`). Plugins: a free plugin with a native editor and a bypass parameter, such as Valhalla Supermassive, and HD Test Gain or Pro-Q 4 for a second effect.
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| SF1 | First save asks | Open A, press Ctrl/Cmd+S | A save dialog proposes `a.hdsession.json` in `takes/` | | ⏳ |
+| SF2 | Edits and effects captured | Delete a selection, fade out the end, add Supermassive (change Mix and Decay in its editor) and Pro-Q 4, bypass Pro-Q 4, Save, then open the file in a text editor | The JSON lists the edits and both effects in order, Pro-Q 4 marked bypassed; `a.wav` is unchanged (same size and date) | Auto: `tests/state.rs::a_session_captures_the_edits_and_effects` | ⏳ |
+| SF3 | Round trip | Quit the app (Don't Save), start it, close `a.wav`'s restored tab, open `a.hdsession.json` | A tab for `a.wav` with the same waveform, clip handles and chain; Pro-Q 4 bypassed; Supermassive's editor shows the same Mix and Decay; Undo is greyed out and the tab has no unsaved dot; playback sounds the same | Auto: `tests/state.rs::a_restored_session_sounds_and_saves_the_same` | ⏳ |
+| SF4 | Exported output matches | Before SF3's quit, Export `first.wav`; after SF3, Export `second.wav`; compare the two files | Identical | Auto: `tests/state.rs::a_restored_session_sounds_and_saves_the_same` | ⏳ |
+| SF5 | Later saves overwrite | In SF3's tab, change Decay, press Ctrl/Cmd+S | No dialog; reopening the session shows the new Decay | | ⏳ |
+| SF6 | Name typed without the extension | File › Save As…, type `mix`, then again with `mix.json` | Saved as `mix.hdsession.json` both times; the second asks before replacing it | Auto: `sessionFiles.test.ts` | ⏳ |
+| SF7 | Cancel the dialog | File › Save As…, Cancel | Nothing is written; Save still writes the tab's previous session file | | ⏳ |
+| SF8 | Not available while loading | Open a large fixture and open the File menu while it loads; again while exporting | Save and Save As… are greyed out | | ⏳ |
+| SF9 | Change made while stopped | Stopped, set HD Test Gain to +6 dB in its generic controls, Save, close the tab, reopen the session | Gain shows +6.0 dB and is heard on play | Auto: `tests/state.rs::a_session_includes_changes_made_while_stopped` | ⏳ |
+| SF10 | Effects all bypassed | Session of an unedited file whose only effect is bypassed; reopen it | No unsaved dot | Auto: `tests/state.rs::a_restored_session_with_only_bypassed_effects_is_not_unsaved` | ⏳ |
+| SF11 | Mixed selection | Open… and pick `cd-16bit-stereo-10s.wav` and `a.hdsession.json` together | Each opens in its own tab, in that order, the session restored | Auto: `sessionFiles.test.ts` (`planOpens`) | ⏳ |
+| SF12 | Folder moved | Close the tabs, move `takes/` elsewhere, open the session from its new place | `a.wav` opens from the new folder with the session restored | Auto: `session::tests::resolves_absolute_then_relative` | ⏳ |
+| SF13 | WAV missing | Delete `a.wav`, open the session, choose Cancel in the dialog | A dialog says the audio file `a.wav` could not be found and offers Choose Another WAV…; after Cancel no tab is left open | Auto: `tests/state.rs::a_missing_wav_is_reported_by_name` | ⏳ |
+| SF14 | WAV re-rendered shorter | Overwrite `a.wav` with a shorter WAV, open the session, choose Cancel | Its tab closes; the dialog says the audio file no longer matches the session and offers Choose Another WAV… | Auto: `tests/state.rs::a_session_is_not_applied_to_a_different_recording` | ⏳ |
+| SF15 | WAV touched but same format | Copy `a.wav` over itself (new date), open the session | The session is restored, with a warning that the audio file has changed since the session was saved | Auto: `tests/state.rs::a_touched_wav_is_restored_with_a_warning` | ⏳ |
+| SF16 | Same WAV open | With `a.wav` open, open its session | `a.wav`'s tab becomes active, unchanged, and a notice says to close it first | | ⏳ |
+| SF17 | Plugin uninstalled | Disable Supermassive in Manage Plugins, open SF2's session | The chain is Pro-Q 4 alone, with its settings; one notice names Supermassive and why | Auto: `tests/state.rs::effects_that_cant_be_found_are_left_out` | ⏳ |
+| SF18 | Saved state rejected | In the session's JSON, replace an effect's `state.component` with `AQID`, open it | The effect is in the chain at its defaults; the notice says its settings could not be restored | Auto: `tests/state.rs::an_effect_that_rejects_its_settings_keeps_its_defaults` | ⏳ |
+| SF19 | Not a session | Write "hello" into `x.hdsession.json`, open it | No tab; the notice says it is not a valid session file | Auto: `session::tests::rejects_other_files_and_newer_versions` | ⏳ |
+| SF20 | Newer format | Set `"version": 99` in a session, open it | No tab; the notice says it was made by a newer version of HitherDither | Auto: `session::tests::rejects_other_files_and_newer_versions` | ⏳ |
+| SF21 | Other JSON file dropped | Drop `notes.json` on the window | "Could not open file", not a session | Auto: `sessionFiles.test.ts` | ⏳ |
+| SF22 | Restored session is clean | Open a saved session | No unsaved dot; bypassing one of its effects shows it | Auto: `tests/state.rs::a_change_after_restoring_marks_the_tab` | ⏳ |
+| SF23 | Save As switches session | From `mix.hdsession.json`, Save As `mix-alt.hdsession.json`, change something, Ctrl/Cmd+S | `mix.hdsession.json` is unchanged; `mix-alt.hdsession.json` has the change | | ⏳ |
+| SF24 | Nothing new to save | Open a session and change nothing | File › Save is greyed out; Save As… and Export… aren't | | ⏳ |
+| SF25 | Session tab after a restart | Open `mix.hdsession.json` and `b.wav`, quit (Don't Save after editing the session tab), start the app | The session reopens as last saved, then `b.wav` as a plain file, in that order | Auto: `session.test.ts` (`rememberedTabs`) | ⏳ |
+| SF26 | Shaped take in a session | Trim both ends, add fades, save the session, close, reopen it | The handles show the same trims and fades | Auto: `tests/state.rs::a_restored_session_sounds_and_saves_the_same` | ⏳ |
+| SF27 | Renamed WAV | Rename `a.wav` to `a-final.wav`, open the session, Choose Another WAV…, pick `a-final.wav` | The tab shows `a-final.wav` with the session's edits and effects, and the unsaved dot | Auto: `tests/state.rs::a_renamed_wav_keeps_the_session_edits` | ⏳ |
+| SF28 | Different recording | With SF14's shorter `a.wav`, open the session, Choose Another WAV…, pick a WAV of another length | The tab shows it unedited with the session's effects and settings; a notice says the edits were left out | Auto: `tests/state.rs::a_different_recording_keeps_only_the_effects` | ⏳ |
+| SF29 | Saving points the session at the new WAV | After SF27, Ctrl/Cmd+S, close the tab, open the session again | It opens `a-final.wav` with no dialog | | ⏳ |
+| SF30 | Chosen WAV already open | With `b.wav` open, open a broken session and choose `b.wav` | `b.wav`'s tab becomes active, unchanged; a notice says to close it first | Auto: `sessionFiles.test.ts` (`planOpens`) | ⏳ |
+
+## replace-audio
+
+From the replace-audio change (`openspec/changes/replace-session-audio/specs/replace-audio/`). "A" is `takes/take1.wav` (stereo) with Supermassive and HD Test Gain (+6 dB) in its chain, the second bypassed; "B" is `takes/take2.wav` (stereo) and "M" a mono WAV.
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| RA1 | Replace with another take | With Supermassive's editor open, File › Replace Audio…, pick B | The editor closes; the tab shows `take2.wav` with both effects in order, the same settings (reopen Supermassive's editor) and HD Test Gain still bypassed | Auto: `tests/state.rs::replacing_the_audio_keeps_the_effects` | ⏳ |
+| RA2 | Cancel the dialog | Replace Audio…, Cancel | The tab is unchanged | | ⏳ |
+| RA3 | Confirmation shown | Fade in a selection, Replace Audio…, pick B; first Cancel, then Replace | Cancel leaves the fade; Replace shows B unedited with Undo greyed out | | ⏳ |
+| RA4 | No confirmation without edits | Open a session with effects and no edits, Replace Audio…, pick B | Replaced without a dialog | Auto: `editRules.test.ts` | ⏳ |
+| RA5 | Open in another tab | With B open in another tab, Replace Audio… in A's tab, pick B | Nothing changes; a notice says B is open in another tab | | ⏳ |
+| RA6 | Not a WAV | Replace Audio…, pick a text file renamed `.wav` | A keeps its audio, edits and effects; "Could not replace the audio" gives the reason | Auto: `tests/state.rs::a_failed_replacement_changes_nothing` | ⏳ |
+| RA7 | Session follows the new audio | A opened from `mix.hdsession.json`: Replace Audio with B, Ctrl/Cmd+S, close, reopen the session | It opens `take2.wav` with the same effects | Auto: `tests/state.rs::replacing_marks_a_saved_tab_unsaved` | ⏳ |
+| RA8 | Stereo-only effect, mono take | With a stereo-only effect in A's chain, Replace Audio with M | The stereo-only effect is left out; a notice says it doesn't support mono audio | Auto: `tests/state.rs::effects_that_dont_fit_the_new_audio_are_left_out` | ⏳ |
+| RA9 | Marked unsaved | Save A's session, then Replace Audio with B | The unsaved dot appears; Export renders B through the kept effects | Auto: `tests/state.rs::replacing_marks_a_saved_tab_unsaved`, `replacing_the_audio_keeps_the_effects` | ⏳ |

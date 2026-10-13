@@ -1,7 +1,19 @@
 // Native application menu.
-import { Menu, MenuItem, PredefinedMenuItem, Submenu } from "@tauri-apps/api/menu";
+import { CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu } from "@tauri-apps/api/menu";
 import { closeActiveTab, openDialog } from "./actions";
-import { applyEdit, fadeWithCurve, redo, save, saveAs, undo } from "./editActions";
+import {
+  applyEdit,
+  bypassAllOn,
+  fadeWithCurve,
+  redo,
+  save,
+  saveAs,
+  exportAudio,
+  replaceAudio,
+  toggleBypassAll,
+  undo,
+} from "./editActions";
+import { effectsUi } from "./effects.svelte";
 import { zoomIn, zoomOut, zoomToFit } from "./view.svelte";
 
 /** Menu items whose enabled state follows the app (see `setMenuEnabled`). */
@@ -9,17 +21,26 @@ export type ToggleId =
   | "close-tab"
   | "save"
   | "save-as"
+  | "export"
+  | "replace-audio"
   | "undo"
   | "redo"
   | "crop"
   | "delete"
   | "silence"
   | "fade-in"
-  | "fade-out";
+  | "fade-out"
+  | "add-effect"
+  | "bypass-all";
 
-const items = new Map<ToggleId, MenuItem>();
+/** Check items whose checked state follows the app (see `setMenuChecked`). */
+export type CheckId = "bypass-all";
+
+const items = new Map<ToggleId, MenuItem | CheckMenuItem>();
 /** Wanted enabled states, applied once the menu exists. */
 const wanted = new Map<ToggleId, boolean>();
+const checks = new Map<CheckId, CheckMenuItem>();
+const wantedChecks = new Map<CheckId, boolean>();
 
 /** Enable or disable menu items, e.g. Close Tab only while a tab is open. */
 export async function setMenuEnabled(states: Partial<Record<ToggleId, boolean>>): Promise<void> {
@@ -29,6 +50,18 @@ export async function setMenuEnabled(states: Partial<Record<ToggleId, boolean>>)
     wanted.set(id, enabled);
     const item = items.get(id);
     if (item) changes.push(item.setEnabled(enabled));
+  }
+  await Promise.all(changes);
+}
+
+/** Tick or untick check items, e.g. Bypass All Effects for the active tab. */
+export async function setMenuChecked(states: Partial<Record<CheckId, boolean>>): Promise<void> {
+  const changes: Promise<void>[] = [];
+  for (const [id, checked] of Object.entries(states) as [CheckId, boolean][]) {
+    if (wantedChecks.get(id) === checked) continue;
+    wantedChecks.set(id, checked);
+    const item = checks.get(id);
+    if (item) changes.push(item.setChecked(checked));
   }
   await Promise.all(changes);
 }
@@ -55,6 +88,9 @@ export async function installMenu(): Promise<void> {
       await toggle("save", "Save", () => void save(), "CmdOrCtrl+S"),
       await toggle("save-as", "Save As…", () => void saveAs(), "CmdOrCtrl+Shift+S"),
       await PredefinedMenuItem.new({ item: "Separator" }),
+      await toggle("export", "Export…", () => void exportAudio(), "CmdOrCtrl+E"),
+      await toggle("replace-audio", "Replace Audio…", () => void replaceAudio()),
+      await PredefinedMenuItem.new({ item: "Separator" }),
       await toggle("close-tab", "Close Tab", closeActiveTab, "CmdOrCtrl+W"),
       await PredefinedMenuItem.new({ item: "Separator" }),
       quit,
@@ -75,6 +111,29 @@ export async function installMenu(): Promise<void> {
       await toggle("fade-out", "Fade Out…", () => void fadeWithCurve("fadeOut")),
     ],
   });
+  const bypassAll = await CheckMenuItem.new({
+    id: "bypass-all",
+    text: "Bypass All Effects",
+    enabled: wanted.get("bypass-all") ?? false,
+    checked: wantedChecks.get("bypass-all") ?? false,
+    // The item ticks itself when clicked; the tab's state decides, even if the change failed.
+    action: () =>
+      void toggleBypassAll().then(() => {
+        wantedChecks.set("bypass-all", bypassAllOn());
+        return bypassAll.setChecked(bypassAllOn());
+      }),
+  });
+  items.set("bypass-all", bypassAll);
+  checks.set("bypass-all", bypassAll);
+  const effects = await Submenu.new({
+    text: "Effects",
+    items: [
+      await toggle("add-effect", "Add Effect…", () => (effectsUi.browserOpen = true)),
+      bypassAll,
+      await PredefinedMenuItem.new({ item: "Separator" }),
+      await MenuItem.new({ id: "manage-plugins", text: "Manage Plugins…", action: () => (effectsUi.managerOpen = true) }),
+    ],
+  });
   const viewMenu = await Submenu.new({
     text: "View",
     items: [
@@ -83,7 +142,7 @@ export async function installMenu(): Promise<void> {
       await MenuItem.new({ id: "zoom-fit", text: "Zoom to Fit\tF", action: zoomToFit }),
     ],
   });
-  const menuItems = [file, edit, viewMenu];
+  const menuItems = [file, edit, effects, viewMenu];
   if (isMac) {
     menuItems.unshift(
       await Submenu.new({
@@ -99,5 +158,8 @@ export async function installMenu(): Promise<void> {
   const menu = await Menu.new({ items: menuItems });
   await menu.setAsAppMenu();
   // The wanted states may have changed while the menu was being built.
-  await Promise.all([...items].map(([id, item]) => item.setEnabled(wanted.get(id) ?? false)));
+  await Promise.all([
+    ...[...items].map(([id, item]) => item.setEnabled(wanted.get(id) ?? false)),
+    ...[...checks].map(([id, item]) => item.setChecked(wantedChecks.get(id) ?? false)),
+  ]);
 }

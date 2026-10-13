@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { readSession, writeSession } from "./session";
+import { readSession, rememberedTabs, writeSession } from "./session";
 
 const KEY = "hither-dither.session";
 let store: Map<string, string>;
@@ -52,5 +52,18 @@ describe("session", () => {
     });
     expect(() => writeSession(["/a.wav"], null)).not.toThrow();
     expect(readSession()).toEqual({ paths: [], active: null });
+  });
+});
+
+describe("rememberedTabs", () => {
+  it("remembers session tabs by their session file and plain tabs by their WAV", () => {
+    const mix = { path: "/t/take.wav", sessionPath: "/t/mix.hdsession.json" };
+    const plain = { path: "/t/b.wav", sessionPath: null };
+    expect(rememberedTabs([mix, plain], mix)).toEqual({
+      paths: ["/t/mix.hdsession.json", "/t/b.wav"],
+      active: "/t/mix.hdsession.json",
+    });
+    expect(rememberedTabs([mix, plain], plain).active).toBe("/t/b.wav");
+    expect(rememberedTabs([], null)).toEqual({ paths: [], active: null });
   });
 });

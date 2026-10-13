@@ -1,18 +1,32 @@
 //! Open-file state, independent of the Tauri runtime so it can be tested directly.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
 use crate::edit::{Audio, ClipFade, Crossfade, Curve, EditList};
+use crate::fx;
+use crate::fx::chain::{Chain, ChainInfo, LIVE_BLOCK, MAX_EFFECTS, Slot, SlotId, layout_name};
+use crate::fx::live::LiveChain;
+use crate::fx::params::ParamSync;
+use crate::fx::render::Render;
 use crate::peaks::{PeakPyramid, PyramidBuilder};
+use crate::plugins::cache::{LoadStep, PluginCache};
+use crate::plugins::host::HandlerEvent;
+use crate::plugins::instance::{
+    Config, Instance, Param, State as PluginState, speaker_arrangement,
+};
+use crate::plugins::main_thread::{self, Inline, UiThread};
+use crate::plugins::{ClassId, module};
+use crate::session::{self, AudioRef, SessionFile, StoredChain, StoredEffect};
 use crate::stats::{self, Analysis, ClipRun, MAX_STORED_RUNS, Stats, StatsRunner, map_runs};
 use crate::wav::{
-    SampleFormat, SampleSource, WavError, WavInfo, check_size, write_wav_with_progress,
+    NativeFrames, SampleFormat, SampleSource, WavError, WavInfo, check_size,
+    write_wav_with_progress,
 };
 
 /// Everything known about one open file.
@@ -31,6 +45,9 @@ pub struct LoadedFile {
     pub source_whole: Arc<Analysis>,
     /// Analysis of `audio`, once the background pass has finished.
     pub analysis: Option<EditAnalysis>,
+    /// The effects the audio is heard and saved through. Changing them doesn't change
+    /// `audio` or `revision`.
+    pub chain: Arc<Chain>,
 }
 
 /// Peaks and whole-file analysis of one edit state.
@@ -79,6 +96,10 @@ pub struct Metadata {
     pub sample_rate: u32,
     pub channels: u16,
     pub channel_labels: Vec<String>,
+    /// The VST3 speaker arrangement effects must accept to process this file.
+    pub speaker_arrangement: u64,
+    /// The channel layout as named in messages, such as "stereo" or "5.1".
+    pub layout: String,
     pub frames: u64,
     pub duration_secs: f64,
     /// The `data` chunk was cut short; only whole frames that exist were loaded.
@@ -240,52 +261,203 @@ pub struct EditState {
     pub can_undo: bool,
     pub can_redo: bool,
     pub dirty: bool,
-    /// Increases whenever the audio changes (edit, undo, redo, save).
+    /// The audio is edited: it differs from the WAV as it is on disk.
+    pub edited: bool,
+    /// Increases whenever the audio changes (edit, undo, redo, restore).
     pub revision: u64,
 }
 
-/// Result of an edit, undo, redo or save: the file's new metadata and edit state.
+/// Result of an edit, chain change, undo or redo: the file's new metadata, edit state and
+/// chain.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct EditOutcome {
     pub metadata: Metadata,
     pub edit_state: EditState,
     pub clip: ClipInfo,
+    pub chain: ChainInfo,
+    /// The edited audio changed (and with it `edit_state.revision`). False for chain changes,
+    /// which leave the peaks and analysis as they are.
+    #[serde(rename = "audioChanged")]
+    pub audio_changed: bool,
 }
 
-/// Every edit state of one file since it was opened or saved.
+/// Result of an export.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportOutcome {
+    /// Processed samples the export had to clamp to fit the file's integer format.
+    pub clamped_samples: u64,
+}
+
+/// Result of replacing a file's audio.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceOutcome {
+    /// The new WAV's.
+    pub metadata: Metadata,
+    pub edit_state: EditState,
+    /// Effects left out, or kept at their defaults, in chain order.
+    pub warnings: Vec<EffectWarning>,
+}
+
+/// Result of saving a session.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSaved {
+    /// False when the file existed and replacing it wasn't allowed: nothing was written.
+    pub written: bool,
+    pub edit_state: EditState,
+}
+
+/// Result of restoring a session onto a freshly opened file.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreOutcome {
+    /// False when the WAV no longer matches the session (`Exact` mode): nothing changed.
+    pub applied: bool,
+    pub edit_state: EditState,
+    /// The WAV's size or modification time differ from when the session was saved.
+    pub wav_changed: bool,
+    /// The session had edits that were left out, because the WAV is a different recording.
+    pub edits_dropped: bool,
+    /// Effects left out or kept at their defaults, in chain order.
+    pub warnings: Vec<EffectWarning>,
+}
+
+/// How much of a session is applied to the WAV it is restored onto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreMode {
+    /// The session's own WAV: everything, but nothing if its format or length changed.
+    Exact,
+    /// A WAV the user chose for the session: its edits too only if it has the recorded
+    /// format and length (it was moved or renamed). Afterwards the tab is unsaved.
+    Relink,
+    /// Effects only, for a replaced WAV. Afterwards the tab is unsaved.
+    EffectsOnly,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct EffectWarning {
+    /// The effect's name, as saved in the session.
+    pub effect: String,
+    pub reason: String,
+}
+
+/// One step of a file's history: its edits and the effects in its chain, in order.
+#[derive(Clone)]
+struct Snapshot {
+    /// Unique within its history, so the saved state can be recognised after undo/redo.
+    id: u64,
+    edits: Arc<EditList>,
+    chain: Vec<SlotId>,
+}
+
+/// Every edit and chain state of one file since its tab was opened.
 struct History {
-    states: Vec<Arc<EditList>>,
+    states: Vec<Snapshot>,
     pos: usize,
-    /// The state that matches the file on disk.
-    saved_pos: Option<usize>,
+    next_id: u64,
     revision: u64,
+    /// Every slot the states refer to, so undo can bring an effect back as it was.
+    slots: HashMap<SlotId, Arc<Slot>>,
+    /// Bypass All, which isn't part of the history.
+    bypass_all: bool,
+    /// Counts changes outside the history (bypass switches and plugin settings). Shared with
+    /// the plugins' listeners, which bump it on the UI thread without the history lock.
+    settings: Arc<AtomicU64>,
+    /// `(snapshot id, settings)` when the session was last saved, or the tab was opened.
+    saved: (u64, u64),
 }
 
 impl History {
-    fn new(list: Arc<EditList>) -> Self {
+    fn new(edits: Arc<EditList>) -> Self {
+        Self::restored(edits, Vec::new(), false, 0, Arc::default())
+    }
+
+    /// A history starting at a restored session: `edits` with `slots` as the chain, in
+    /// order, and nothing unsaved. `revision` and `settings` carry on from the history it
+    /// replaces.
+    fn restored(
+        edits: Arc<EditList>,
+        slots: Vec<Arc<Slot>>,
+        bypass_all: bool,
+        revision: u64,
+        settings: Arc<AtomicU64>,
+    ) -> Self {
+        let chain = slots.iter().map(|s| s.id()).collect();
+        let saved = (0, settings.load(Ordering::Relaxed));
         Self {
-            states: vec![list],
+            states: vec![Snapshot {
+                id: 0,
+                edits,
+                chain,
+            }],
             pos: 0,
-            saved_pos: Some(0),
-            revision: 0,
+            next_id: 1,
+            revision,
+            slots: slots.into_iter().map(|s| (s.id(), s)).collect(),
+            bypass_all,
+            settings,
+            saved,
         }
     }
 
-    fn current(&self) -> &Arc<EditList> {
+    fn current(&self) -> &Snapshot {
         &self.states[self.pos]
     }
 
+    /// Where the history is now, as `saved` records it.
+    fn mark(&self) -> (u64, u64) {
+        (self.current().id, self.settings.load(Ordering::Relaxed))
+    }
+
+    /// Notes a change outside the history, such as a bypass switch.
+    fn touch(&self) {
+        self.settings.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The current state's chain.
+    fn chain(&self) -> Chain {
+        let slots = self.current().chain.iter();
+        let slots = slots.filter_map(|id| self.slots.get(id).cloned());
+        Chain::new(slots.collect(), self.bypass_all)
+    }
+
+    /// Unsaved: something changed since the session was last saved, or the tab was opened.
     fn state(&self) -> EditState {
         EditState {
             can_undo: self.pos > 0,
             can_redo: self.pos + 1 < self.states.len(),
-            dirty: self.saved_pos != Some(self.pos),
+            dirty: self.mark() != self.saved,
+            edited: !self.current().edits.is_identity(),
             revision: self.revision,
         }
     }
+
+    /// Adds a state with `edits` and `chain` after the current one, discarding the redo
+    /// history.
+    fn push(&mut self, edits: Arc<EditList>, chain: Vec<SlotId>) {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.states.truncate(self.pos + 1);
+        self.states.push(Snapshot { id, edits, chain });
+        self.pos += 1;
+        self.release_unreferenced();
+    }
+
+    /// Forgets slots no state refers to any more. The last reference to a slot releases its
+    /// plugin on the UI thread.
+    fn release_unreferenced(&mut self) {
+        let used: HashSet<SlotId> = self.states.iter().flat_map(|s| &s.chain).copied().collect();
+        self.slots.retain(|id, _| used.contains(id));
+    }
 }
 
-#[derive(Default)]
+const NOT_IN_CHAIN: &str = "That effect isn't in the chain";
+
+/// Called on the UI thread when a file's effects change how they process by themselves.
+pub type FxListener = Arc<dyn Fn(FileId) + Send + Sync>;
+
 pub struct AppState {
     files: Arc<RwLock<HashMap<FileId, Arc<LoadedFile>>>>,
     /// Cancel flags of loads and saves in progress.
@@ -295,9 +467,43 @@ pub struct AppState {
     analysers: Mutex<HashMap<FileId, Job>>,
     signal: Arc<Signal>,
     pub stats: StatsRunner,
+    /// Where plugin calls that must run on the UI thread go.
+    ui: Arc<dyn UiThread>,
+    next_slot: AtomicU32,
+    fx_listener: Arc<Mutex<Option<FxListener>>>,
+    /// Keeps controllers and generic controls in step with the plugins.
+    pub params: Arc<ParamSync>,
+}
+
+impl Default for AppState {
+    /// Runs plugin calls on the calling thread, for tests.
+    fn default() -> Self {
+        AppState::new(Arc::new(Inline))
+    }
 }
 
 impl AppState {
+    pub fn new(ui: Arc<dyn UiThread>) -> Self {
+        AppState {
+            files: Arc::default(),
+            loading: Mutex::default(),
+            history: Mutex::default(),
+            analysers: Mutex::default(),
+            signal: Arc::default(),
+            stats: StatsRunner::default(),
+            params: Arc::new(ParamSync::new(ui.clone())),
+            ui,
+            next_slot: AtomicU32::new(1),
+            fx_listener: Arc::default(),
+        }
+    }
+
+    /// Sets what to call when a file's effects change how they process by themselves (a
+    /// plugin reports a new latency), so playback can follow.
+    pub fn on_fx_changed(&self, listener: impl Fn(FileId) + Send + Sync + 'static) {
+        *self.fx_listener.lock().unwrap() = Some(Arc::new(listener));
+    }
+
     pub fn get(&self, id: FileId) -> Option<Arc<LoadedFile>> {
         self.files.read().unwrap().get(&id).cloned()
     }
@@ -374,7 +580,7 @@ impl AppState {
             .lock()
             .unwrap()
             .get(&id)
-            .map(|h| ClipInfo::of(h.current()))
+            .map(|h| ClipInfo::of(&h.current().edits))
     }
 
     /// Apply `op` to frames `[start, end)` of file `id`. `bend` shapes fades. Discards
@@ -443,19 +649,13 @@ impl AppState {
         let mut history = self.history.lock().unwrap();
         let h = history.get_mut(&id).ok_or(NO_FILE)?;
         let file = self.require(id)?;
-        let next = edit(h.current())?;
-        if next == **h.current() {
-            return Ok(EditOutcome {
-                metadata: file.metadata.clone(),
-                edit_state: h.state(),
-                clip: ClipInfo::of(&next),
-            });
+        let next = edit(&h.current().edits)?;
+        if next == *h.current().edits {
+            return Ok(Self::outcome(&file.metadata, h, false));
         }
-        let next = Arc::new(next);
-        h.states.truncate(h.pos + 1);
-        h.states.push(next.clone());
-        h.pos += 1;
-        Ok(self.install(id, &file, h, next))
+        let chain = h.current().chain.clone();
+        h.push(Arc::new(next), chain);
+        Ok(self.install(id, &file, h))
     }
 
     /// Revert the most recent edit of file `id`.
@@ -479,19 +679,28 @@ impl AppState {
             true => return Err("Nothing to undo".to_string()),
             false => return Err("Nothing to redo".to_string()),
         };
-        let target = h.current().clone();
-        Ok(self.install(id, &file, h, target))
+        let outcome = self.install(id, &file, h);
+        drop(history);
+        self.sync_bypass(id);
+        Ok(outcome)
     }
 
-    /// Serve file `id` through `edits` as the next revision, and (re)start its analysis.
-    /// Called with the history lock held, so changes to one file are serialized.
-    fn install(
-        &self,
-        id: FileId,
-        file: &LoadedFile,
-        h: &mut History,
-        edits: Arc<EditList>,
-    ) -> EditOutcome {
+    /// Serve file `id` as the current state of `h`. If the edits changed, that is the next
+    /// revision and its analysis (re)starts; a change to the chain alone keeps the revision
+    /// and analysis. Called with the history lock held, so changes to one file are serialized.
+    fn install(&self, id: FileId, file: &LoadedFile, h: &mut History) -> EditOutcome {
+        let edits = h.current().edits.clone();
+        let chain = Arc::new(h.chain());
+        if Arc::ptr_eq(&edits, file.audio.edits()) {
+            let mut files = self.files.write().unwrap();
+            // Re-read under the lock: the analysis may have finished meanwhile.
+            if let Some(next) = files.get(&id).map(|f| Arc::new(f.with_chain(chain))) {
+                files.insert(id, next);
+            }
+            drop(files);
+            self.signal.notify();
+            return Self::outcome(&file.metadata, h, false);
+        }
         h.revision += 1;
         let audio = Arc::new(Audio::with_edits(file.audio.source().clone(), edits));
         let mut metadata = file.metadata.clone();
@@ -506,22 +715,618 @@ impl AppState {
                 source_pyramid: file.source_pyramid.clone(),
                 source_whole: file.source_whole.clone(),
                 analysis: None,
+                chain,
             }
             .seeded(),
         );
         self.files.write().unwrap().insert(id, next.clone());
         self.restart_analysis(id, &next);
         self.signal.notify();
+        Self::outcome(&metadata, h, true)
+    }
+
+    fn outcome(metadata: &Metadata, h: &History, audio_changed: bool) -> EditOutcome {
         EditOutcome {
-            metadata,
+            metadata: metadata.clone(),
             edit_state: h.state(),
-            clip: ClipInfo::of(h.current()),
+            clip: ClipInfo::of(&h.current().edits),
+            chain: h.chain().info(),
+            audio_changed,
         }
+    }
+
+    /// Sends file `id`'s bypass states to plugins that bypass themselves, on the UI thread.
+    /// Call without the history lock, which the UI thread may be waiting for.
+    fn sync_bypass(&self, id: FileId) {
+        let Some(chain) = self.get(id).map(|f| f.chain.clone()) else {
+            return;
+        };
+        if !chain.is_empty() {
+            let _ = main_thread::run(&*self.ui, move || chain.apply_bypass());
+        }
+    }
+
+    /// File `id`'s effect chain.
+    pub fn get_chain(&self, id: FileId) -> Option<ChainInfo> {
+        let history = self.history.lock().unwrap();
+        history.get(&id).map(|h| h.chain().info())
+    }
+
+    /// An effect of file `id`, in its chain or kept for undo.
+    pub fn slot(&self, id: FileId, slot: SlotId) -> Option<Arc<Slot>> {
+        let history = self.history.lock().unwrap();
+        history.get(&id)?.slots.get(&slot).cloned()
+    }
+
+    /// An effect in file `id`'s current chain, with the file's name.
+    pub fn effect(&self, id: FileId, slot: SlotId) -> Result<(Arc<Slot>, String), String> {
+        let file = self.require(id)?;
+        let history = self.history.lock().unwrap();
+        let h = history.get(&id).ok_or(NO_FILE)?;
+        let s = h
+            .slots
+            .get(&slot)
+            .filter(|_| h.current().chain.contains(&slot))
+            .ok_or(NOT_IN_CHAIN)?;
+        Ok((s.clone(), file.metadata.name.clone()))
+    }
+
+    /// The parameters generic controls show for an effect in file `id`'s chain.
+    pub fn fx_params(&self, id: FileId, slot: SlotId) -> Result<Vec<Param>, String> {
+        let (slot, _) = self.effect(id, slot)?;
+        main_thread::run(&*self.ui, move || slot.instance().params()).map_err(|e| e.to_string())
+    }
+
+    /// Sets a parameter of an effect in file `id`'s chain from generic controls, and returns
+    /// its new display string. Heard from the next processed block; not an undo step.
+    pub fn set_fx_param(
+        &self,
+        id: FileId,
+        slot: SlotId,
+        param: u32,
+        value: f64,
+    ) -> Result<String, String> {
+        let (slot, _) = self.effect(id, slot)?;
+        let value = value.clamp(0.0, 1.0);
+        let shown = main_thread::run(&*self.ui, move || {
+            let instance = slot.instance();
+            instance.set_param(param, value);
+            instance.display(param, value)
+        })
+        .map_err(|e| e.to_string())?;
+        self.touch(id);
+        Ok(shown)
+    }
+
+    /// Notes a change to file `id` outside its history, such as a plugin setting, so the
+    /// tab counts as unsaved.
+    pub fn touch(&self, id: FileId) {
+        let _ = self.with_history(id, History::touch);
+    }
+
+    /// File `id`'s count of changes outside its history, for listeners that can't take
+    /// the history lock.
+    fn settings_counter(&self, id: FileId) -> Option<Arc<AtomicU64>> {
+        self.with_history(id, |h| h.settings.clone()).ok()
+    }
+
+    /// What playback of file `id` runs through: the slots of its chain that process audio.
+    pub fn live_chain(&self, id: FileId) -> Option<Arc<LiveChain>> {
+        LiveChain::of(&self.get(id)?.chain)
+    }
+
+    /// [`AppState::live_chain`], with the slots' tails and delay lines cleared on the UI
+    /// thread, so audio from an earlier play doesn't leak into a new one.
+    pub fn start_live_chain(&self, id: FileId) -> Option<Arc<LiveChain>> {
+        let chain = self.get(id)?.chain.clone();
+        let live = LiveChain::of(&chain)?;
+        let _ = main_thread::run(&*self.ui, move || {
+            for s in chain.processed() {
+                s.instance().reset();
+            }
+        });
+        Some(live)
+    }
+
+    /// Follows what the plugin in `slot` (of file `id`) reports. A new latency reactivates
+    /// it so the latency applies, is recorded, and tells the listener; parameter changes from
+    /// its editor or processor go to [`AppState::params`].
+    fn watch_slot(&self, id: FileId, slot: &Arc<Slot>) {
+        use vst3::Steinberg::Vst::RestartFlags_::{
+            kLatencyChanged, kParamTitlesChanged, kParamValuesChanged,
+        };
+        self.params.watch(id, slot);
+        let (weak, slot_id) = (Arc::downgrade(slot), slot.id());
+        let (ui, listener, params) = (
+            self.ui.clone(),
+            self.fx_listener.clone(),
+            Arc::downgrade(&self.params),
+        );
+        // Settings changed in the plugin's editor are unsaved changes. Bumped here, on the
+        // UI thread, without the history lock.
+        let settings = self.settings_counter(id).unwrap_or_default();
+        let touch = move || settings.fetch_add(1, Ordering::Relaxed);
+        let on_event = move |event| {
+            let Some(params) = params.upgrade() else {
+                return;
+            };
+            let flags = match event {
+                HandlerEvent::Edited { id, value } => {
+                    touch();
+                    return params.edited(slot_id, id, value);
+                }
+                HandlerEvent::Output => return params.output(slot_id),
+                HandlerEvent::Restart(flags) => flags,
+            };
+            if flags & kParamValuesChanged != 0 {
+                touch();
+            }
+            if flags & (kParamValuesChanged | kParamTitlesChanged) != 0 {
+                params.reset(slot_id);
+            }
+            if flags & kLatencyChanged == 0 {
+                return;
+            }
+            let (weak, listener) = (weak.clone(), listener.clone());
+            let _ = ui.post(Box::new(move || {
+                let Some(slot) = weak.upgrade() else { return };
+                slot.instance().reset();
+                slot.set_latency(slot.instance().latency());
+                let listener = listener.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                if let Some(f) = listener {
+                    f(id);
+                }
+            }));
+        };
+        let handler = slot.instance().handler();
+        handler.set_listener(Some(Box::new(on_event)));
+    }
+
+    /// Load effect `class_id` from `plugins`, configured for live playback with `config`.
+    /// Fails when the effect isn't available, is disabled, can't process the channels, or
+    /// the plugin fails to load.
+    ///
+    /// With `saved` settings (plugin state, plus parameter changes it hadn't processed),
+    /// the state is restored before processing is set up, as DAWs load projects, and the
+    /// changes are then applied. Also returns whether the plugin accepted the state; if it
+    /// didn't, it keeps its defaults.
+    fn load_slot(
+        &self,
+        plugins: &Arc<PluginCache>,
+        class_id: ClassId,
+        config: Config,
+        saved: Option<(PluginState, Vec<(u32, f64)>)>,
+    ) -> Result<(Slot, bool), String> {
+        let (bundle, class) = plugins
+            .find_class(class_id)
+            .filter(|(_, c)| c.error.is_none())
+            .ok_or("That effect isn't available. Rescan the plugins and try again.")?;
+        if plugins.settings().disabled.contains(&class_id) {
+            return Err(format!(
+                "{} is disabled. You can enable it in Manage Plugins.",
+                class.name
+            ));
+        }
+        let (channels, mask) = (config.channels, config.channel_mask);
+        if !class.supports(channels, mask) {
+            return Err(format!(
+                "{} doesn't support {} audio",
+                class.name,
+                layout_name(channels, mask)
+            ));
+        }
+        let slot_id = self.next_slot.fetch_add(1, Ordering::Relaxed);
+        let (cache, ui, name) = (plugins.clone(), self.ui.clone(), class.name.clone());
+        main_thread::run(&*self.ui, move || {
+            let mut loading = Some(cache.loading(class_id, LoadStep::Create));
+            let module = module::load(&bundle).map_err(|e| e.to_string())?;
+            let instance = Instance::create(module, class_id).map_err(|e| e.to_string())?;
+            let restored = match &saved {
+                None => true,
+                Some((state, _)) => {
+                    // A crash while restoring a bad state is that session's fault, not
+                    // the plugin's, so the marker ends before it.
+                    loading = None;
+                    instance.set_state(state)
+                }
+            };
+            let latency = instance.configure(config).map_err(|e| e.to_string())?;
+            drop(loading);
+            for &(param, value) in saved.iter().flat_map(|(_, pending)| pending) {
+                instance.set_param(param, value);
+            }
+            Ok::<_, String>((Slot::new(slot_id, &class, instance, latency, ui), restored))
+        })
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("“{name}” could not be loaded: {e}"))
+    }
+
+    /// Load effect `class_id` from `plugins` and add it to the end of file `id`'s chain, as
+    /// one undo step. Fails, leaving the chain as it was, when the chain is full, the effect
+    /// can't process the file's channels, or the plugin fails to load.
+    pub fn add_effect(
+        &self,
+        id: FileId,
+        plugins: &Arc<PluginCache>,
+        class_id: ClassId,
+    ) -> Result<EditOutcome, String> {
+        const FULL: &str = "The effect chain is full";
+        self.check_not_saving(id)?;
+        let file = self.require(id)?;
+        let full = |h: &History| h.current().chain.len() >= MAX_EFFECTS;
+        if self.with_history(id, full)? {
+            return Err(FULL.to_string());
+        }
+        let config = live_config(file.audio.info());
+        let source = file.audio.source().clone();
+        drop(file);
+
+        let (slot, _) = self.load_slot(plugins, class_id, config, None)?;
+        let (slot_id, slot) = (slot.id(), Arc::new(slot));
+        self.watch_slot(id, &slot);
+
+        self.change_chain(id, |h, file| {
+            // The file was reopened while the plugin loaded.
+            if !Arc::ptr_eq(file.audio.source(), &source) {
+                return Err(CANCELLED.to_string());
+            }
+            if full(h) {
+                return Err(FULL.to_string());
+            }
+            h.slots.insert(slot_id, slot);
+            let mut chain = h.current().chain.clone();
+            chain.push(slot_id);
+            Ok(chain)
+        })
+    }
+
+    /// Remove an effect from file `id`'s chain, as one undo step.
+    pub fn remove_effect(&self, id: FileId, slot: SlotId) -> Result<EditOutcome, String> {
+        self.change_chain(id, |h, _| {
+            let mut chain = h.current().chain.clone();
+            let index = chain.iter().position(|&s| s == slot).ok_or(NOT_IN_CHAIN)?;
+            chain.remove(index);
+            Ok(chain)
+        })
+    }
+
+    /// Move an effect of file `id` to position `index` of its chain (clamped), as one undo
+    /// step. Moving it to where it already is adds nothing.
+    pub fn move_effect(
+        &self,
+        id: FileId,
+        slot: SlotId,
+        index: usize,
+    ) -> Result<EditOutcome, String> {
+        self.change_chain(id, |h, _| {
+            let mut chain = h.current().chain.clone();
+            let from = chain.iter().position(|&s| s == slot).ok_or(NOT_IN_CHAIN)?;
+            chain.remove(from);
+            chain.insert(index.min(chain.len()), slot);
+            Ok(chain)
+        })
+    }
+
+    /// Bypass one effect of file `id`, or stop bypassing it. Not an undo step.
+    pub fn set_effect_bypass(
+        &self,
+        id: FileId,
+        slot: SlotId,
+        on: bool,
+    ) -> Result<EditOutcome, String> {
+        self.change_bypass(id, |h| {
+            let in_chain = h.current().chain.contains(&slot);
+            let s = h
+                .slots
+                .get(&slot)
+                .filter(|_| in_chain)
+                .ok_or(NOT_IN_CHAIN)?;
+            s.set_bypassed(on);
+            Ok(())
+        })
+    }
+
+    /// Bypass file `id`'s whole chain, or stop bypassing it. Not an undo step.
+    pub fn set_bypass_all(&self, id: FileId, on: bool) -> Result<EditOutcome, String> {
+        self.change_bypass(id, |h| {
+            h.bypass_all = on;
+            Ok(())
+        })
+    }
+
+    // --- Sessions -----------------------------------------------------------------------
+
+    /// File `id`'s current edits and effects, with each plugin's settings, as a session to
+    /// be saved at `session_path`. Fails, naming it, if an effect can't report its state.
+    pub fn capture_session(&self, id: FileId, session_path: &Path) -> Result<SessionFile, String> {
+        self.capture(id, session_path).map(|(session, _)| session)
+    }
+
+    /// [`capture_session`](Self::capture_session), with where the history was when it was
+    /// captured. Settings are read after that mark, so a change while the plugins report
+    /// their state may be in the session but still counts as unsaved.
+    fn capture(
+        &self,
+        id: FileId,
+        session_path: &Path,
+    ) -> Result<(SessionFile, (u64, u64)), String> {
+        self.check_not_saving(id)?;
+        let file = self.require(id)?;
+        let (edits, chain, mark) =
+            self.with_history(id, |h| (h.current().edits.clone(), h.chain(), h.mark()))?;
+        let slots = chain.slots.clone();
+        let effects = main_thread::run(&*self.ui, move || {
+            slots
+                .iter()
+                .map(|s| {
+                    let state = s
+                        .instance()
+                        .get_state()
+                        .ok_or_else(|| format!("“{}” could not save its settings", s.name()))?;
+                    Ok(StoredEffect {
+                        class_id: s.class_id(),
+                        name: s.name().to_string(),
+                        vendor: s.vendor().to_string(),
+                        version: s.version().to_string(),
+                        bypassed: s.bypassed(),
+                        state: state.into(),
+                        pending_params: s.instance().pending().values(),
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .map_err(|e| e.to_string())??;
+
+        let chain = StoredChain {
+            bypass_all: chain.bypass_all,
+            effects,
+        };
+        let session = SessionFile::new(file.audio_ref(session_path), &edits, chain);
+        Ok((session, mark))
+    }
+
+    /// Apply the session at `session_path` to file `id`, freshly opened from the session's
+    /// WAV, or from a WAV the user chose instead (`relink`). See [`RestoreMode`]. Fails,
+    /// changing nothing, if the session is invalid.
+    pub fn restore_session(
+        &self,
+        id: FileId,
+        session_path: &Path,
+        relink: bool,
+        plugins: &Arc<PluginCache>,
+    ) -> Result<RestoreOutcome, String> {
+        let session = SessionFile::read(session_path).map_err(|e| e.to_string())?;
+        let mode = if relink {
+            RestoreMode::Relink
+        } else {
+            RestoreMode::Exact
+        };
+        self.restore(id, &session, session_path, mode, plugins)
+    }
+
+    /// Apply `session` to file `id`, freshly opened: its edits (as `mode` allows), Bypass
+    /// All and effects with their settings, as a new history. Effects that can't be
+    /// restored are left out, or kept at their defaults, with warnings.
+    fn restore(
+        &self,
+        id: FileId,
+        session: &SessionFile,
+        session_path: &Path,
+        mode: RestoreMode,
+        plugins: &Arc<PluginCache>,
+    ) -> Result<RestoreOutcome, String> {
+        self.check_not_saving(id)?;
+        let file = self.require(id)?;
+        let loaded = file.audio_ref(session_path);
+        let matches = session.audio.format_matches(&loaded);
+        if mode == RestoreMode::Exact && !matches {
+            return Ok(RestoreOutcome {
+                applied: false,
+                edit_state: self.edit_state(id).ok_or(NO_FILE)?,
+                wav_changed: false,
+                edits_dropped: false,
+                warnings: Vec::new(),
+            });
+        }
+        let keep_edits = match mode {
+            RestoreMode::Exact => true,
+            RestoreMode::Relink => matches,
+            RestoreMode::EffectsOnly => false,
+        };
+        let session_edits = session.edit_list();
+        let edits_dropped = !keep_edits && !session_edits.is_identity();
+        let mut edits = Arc::new(session_edits);
+        if !keep_edits || *edits == **file.audio.edits() {
+            // Unedited: keep the source's own list, and with it its analysis.
+            edits = file.audio.edits().clone();
+        }
+        let config = live_config(file.audio.info());
+        let source = file.audio.source().clone();
+        drop(file);
+
+        let mut warnings = Vec::new();
+        let mut slots = Vec::new();
+        for effect in &session.chain.effects {
+            let mut warn = |reason: String| {
+                warnings.push(EffectWarning {
+                    effect: effect.name.clone(),
+                    reason,
+                })
+            };
+            if slots.len() >= MAX_EFFECTS {
+                warn("The effect chain is full".to_string());
+                continue;
+            }
+            let saved = (
+                PluginState::from(&effect.state),
+                effect.pending_params.clone(),
+            );
+            match self.load_slot(plugins, effect.class_id, config, Some(saved)) {
+                Ok((slot, restored)) => {
+                    if !restored {
+                        warn("Its settings could not be restored, so it has its defaults.".into());
+                    }
+                    slot.set_bypassed(effect.bypassed);
+                    // Its restored state may hold either bypass value.
+                    slot.resend_bypass();
+                    slots.push(Arc::new(slot));
+                }
+                Err(reason) => warn(reason),
+            }
+        }
+        for slot in &slots {
+            self.watch_slot(id, slot);
+        }
+
+        let mut history = self.history.lock().unwrap();
+        let h = history.get_mut(&id).ok_or(NO_FILE)?;
+        let file = self.require(id)?;
+        let fresh = h.states.len() == 1
+            && h.current().chain.is_empty()
+            && Arc::ptr_eq(&h.current().edits, file.audio.edits());
+        // Reopened or edited while the plugins loaded (the frontend never allows it).
+        if !fresh || !Arc::ptr_eq(file.audio.source(), &source) {
+            return Err(CANCELLED.to_string());
+        }
+        let settings = h.settings.clone();
+        *h = History::restored(edits, slots, session.chain.bypass_all, h.revision, settings);
+        if mode != RestoreMode::Exact {
+            // Not the session as saved: it now belongs to another WAV.
+            h.touch();
+        }
+        let outcome = self.install(id, &file, h);
+        drop(history);
+        self.sync_bypass(id);
+        Ok(RestoreOutcome {
+            applied: true,
+            edit_state: outcome.edit_state,
+            wav_changed: mode == RestoreMode::Exact && !session.audio.stamp_matches(&loaded),
+            edits_dropped,
+            warnings,
+        })
+    }
+
+    /// Replace file `id`'s audio with the WAV at `path`, keeping its effect chain with every
+    /// effect's settings and bypass switch, and Bypass All. The edits are dropped and the
+    /// history starts again at the new audio, which counts as unsaved. Effects that can't
+    /// process the new audio are left out, with warnings. If the new WAV can't be opened,
+    /// nothing changes. `progress(done, total)` is the load's progress.
+    pub fn replace_audio(
+        &self,
+        id: FileId,
+        path: &Path,
+        plugins: &Arc<PluginCache>,
+        progress: impl FnMut(u64, u64),
+    ) -> Result<ReplaceOutcome, String> {
+        let file = self.require(id)?;
+        if same_file(path, &file.metadata.path) {
+            return Err(format!(
+                "“{}” is already this tab's audio",
+                file.metadata.name
+            ));
+        }
+        drop(file);
+        // The chain as a session would hold it; its WAV and edits don't matter here.
+        let (chain, _) = self.capture(id, path)?;
+        self.open(id, path, progress).map_err(|e| e.to_string())?;
+        let restored = self.restore(id, &chain, path, RestoreMode::EffectsOnly, plugins)?;
+        Ok(ReplaceOutcome {
+            metadata: self.require(id)?.metadata.clone(),
+            edit_state: restored.edit_state,
+            warnings: restored.warnings,
+        })
+    }
+
+    /// Save file `id`'s session to `path`, replacing the file there only once the new one
+    /// is complete. The WAV itself is never written. Unless `replace`, an existing file is
+    /// left alone and this returns false, so the caller can ask first.
+    pub fn save_session(
+        &self,
+        id: FileId,
+        path: &Path,
+        replace: bool,
+    ) -> Result<SessionSaved, String> {
+        if !replace && path.exists() {
+            let edit_state = self.edit_state(id).ok_or(NO_FILE)?;
+            return Ok(SessionSaved {
+                written: false,
+                edit_state,
+            });
+        }
+        let (session, mark) = self.capture(id, path)?;
+        let fail = |e: std::io::Error| format!("Could not save “{}”: {e}", file_name(path));
+        let temp = temp_path(path);
+        let written = (|| {
+            let mut out = std::fs::File::create_new(&temp)?;
+            std::io::Write::write_all(&mut out, session.to_json().as_bytes())?;
+            out.sync_all()?;
+            drop(out);
+            rename_with_retry(&temp, path)
+        })();
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&temp);
+            return Err(fail(e));
+        }
+        // What was captured is saved now; anything since is still unsaved.
+        let mut history = self.history.lock().unwrap();
+        let h = history.get_mut(&id).ok_or(NO_FILE)?;
+        h.saved = mark;
+        Ok(SessionSaved {
+            written: true,
+            edit_state: h.state(),
+        })
+    }
+
+    fn with_history<T>(&self, id: FileId, f: impl FnOnce(&History) -> T) -> Result<T, String> {
+        let history = self.history.lock().unwrap();
+        Ok(f(history.get(&id).ok_or(NO_FILE)?))
+    }
+
+    /// Derive file `id`'s next chain from its current state and add it to the history
+    /// (discarding redo). A chain that stays the same adds nothing.
+    fn change_chain(
+        &self,
+        id: FileId,
+        edit: impl FnOnce(&mut History, &LoadedFile) -> Result<Vec<SlotId>, String>,
+    ) -> Result<EditOutcome, String> {
+        self.check_not_saving(id)?;
+        let mut history = self.history.lock().unwrap();
+        let h = history.get_mut(&id).ok_or(NO_FILE)?;
+        let file = self.require(id)?;
+        let next = edit(h, &file)?;
+        let outcome = if next == h.current().chain {
+            Self::outcome(&file.metadata, h, false)
+        } else {
+            let edits = h.current().edits.clone();
+            h.push(edits, next);
+            self.install(id, &file, h)
+        };
+        drop(history);
+        self.sync_bypass(id);
+        Ok(outcome)
+    }
+
+    /// Change file `id`'s bypass settings, which are outside the history.
+    fn change_bypass(
+        &self,
+        id: FileId,
+        edit: impl FnOnce(&mut History) -> Result<(), String>,
+    ) -> Result<EditOutcome, String> {
+        self.check_not_saving(id)?;
+        let mut history = self.history.lock().unwrap();
+        let h = history.get_mut(&id).ok_or(NO_FILE)?;
+        let file = self.require(id)?;
+        edit(h)?;
+        h.touch();
+        let outcome = self.install(id, &file, h);
+        drop(history);
+        self.sync_bypass(id);
+        Ok(outcome)
     }
 
     fn check_not_saving(&self, id: FileId) -> Result<(), String> {
         if self.loading.lock().unwrap().contains_key(&id) {
-            return Err("The file is being saved".to_string());
+            return Err("The file is being exported".to_string());
         }
         Ok(())
     }
@@ -601,27 +1406,25 @@ impl AppState {
         self.signal.completed.load(Ordering::Relaxed)
     }
 
-    /// Write file `id`'s audio to `target`, or over its own file when `None`. If the
-    /// current edit state hasn't been analysed yet, it is analysed first, so the saved
-    /// file starts with exact peaks and statistics. `progress(done, total)` covers both.
-    /// Afterwards the file is served from the saved copy, with an empty history. On
-    /// failure any existing file at the target is untouched and the edits are kept.
-    pub fn save(
+    /// Render file `id`'s edited audio, through its active effects, to a new WAV at
+    /// `target`. The file, its history and its chain are left exactly as they were.
+    /// `progress(done, total)` is called with frames written.
+    pub fn export(
         &self,
         id: FileId,
-        target: Option<&Path>,
+        target: &Path,
         progress: impl FnMut(u64, u64),
-    ) -> Result<EditOutcome, String> {
+    ) -> Result<ExportOutcome, String> {
         let token = {
             let mut loading = self.loading.lock().unwrap();
             if loading.contains_key(&id) {
-                return Err("The file is still being saved".to_string());
+                return Err("The file is still being exported".to_string());
             }
             let token = Arc::new(AtomicBool::new(false));
             loading.insert(id, token.clone());
             token
         };
-        let result = self.save_inner(id, target, &token, progress);
+        let result = self.export_inner(id, target, &token, progress);
         let mut loading = self.loading.lock().unwrap();
         if loading.get(&id).is_some_and(|t| Arc::ptr_eq(t, &token)) {
             loading.remove(&id);
@@ -629,145 +1432,82 @@ impl AppState {
         result
     }
 
-    fn save_inner(
+    fn export_inner(
         &self,
         id: FileId,
-        target: Option<&Path>,
+        target: &Path,
         cancel: &AtomicBool,
         mut progress: impl FnMut(u64, u64),
-    ) -> Result<EditOutcome, String> {
-        // Range-stats workers and the background analysis hold the audio (and so the
-        // mapping) while they run.
-        self.stats.cancel();
-        self.stop_analysis(id);
+    ) -> Result<ExportOutcome, String> {
         let file = self.require(id)?;
-        let target = target.map_or_else(|| file.metadata.path.clone(), Path::to_path_buf);
-        let overwrite = same_file(&target, &file.metadata.path);
-        if overwrite && file.changed_on_disk() {
+        if same_file(target, &file.metadata.path) {
             return Err(format!(
-                "“{}” changed on disk since it was opened, so it wasn't overwritten. Use Save As to keep your edits in a new file.",
+                "“{}” is the audio being edited, so it can't be overwritten. Export to another name.",
                 file.metadata.name
             ));
         }
-        let target_name = file_name(&target);
-        let fail = |e: &dyn std::fmt::Display| format!("Could not save “{target_name}”: {e}");
+        let target_name = file_name(target);
+        let fail = |e: &dyn std::fmt::Display| format!("Could not export “{target_name}”: {e}");
         check_size(&file.audio).map_err(|e| fail(&e))?;
 
-        // Analyse first if the background pass hasn't finished, then write.
         let frames = file.audio.frames();
-        let (analysis, written_from, total) = match &file.analysis {
-            Some(a) => (a.clone(), 0, frames),
-            None => {
-                let a = analyse_audio(&file.audio, file.revision, cancel, |done| {
-                    progress(done, 2 * frames)
-                })
-                .ok_or(CANCELLED)?;
-                (a, frames, 2 * frames)
-            }
+        let chain = file.chain.clone();
+        let effects = chain.is_active();
+        let temp = temp_path(target);
+        let written = if effects {
+            let rendered =
+                self.render_file(&file, &chain, &temp, cancel, |done| progress(done, frames));
+            // The chain goes on playing in real time, whatever happened.
+            let _ = fx::render::realtime(&*self.ui, &chain);
+            rendered.map(|(_, clamped)| clamped)
+        } else {
+            write_file(&*file.audio, &temp, |done| progress(done, frames))
+                .map(|()| 0)
+                .map_err(|e| e.to_string())
         };
-        let temp = temp_path(&target);
-        let written = write_file(&file.audio, &temp, |done| {
-            progress(written_from + done, total)
-        });
-        if let Err(e) = written {
-            let _ = std::fs::remove_file(&temp);
-            return Err(fail(&e));
-        }
-        if cancel.load(Ordering::Relaxed) {
-            let _ = std::fs::remove_file(&temp);
-            return Err(CANCELLED.to_string());
-        }
-
-        let mut history = self.history.lock().unwrap();
-        let mut files = self.files.write().unwrap();
-        if overwrite {
-            // Windows can't replace a file that is still memory-mapped: release ours first.
-            files.remove(&id);
-        }
-        let old_meta = file.metadata.clone();
-        let old_stamp = file.disk_stamp;
-        let old_revision = file.revision;
-        let (old_pyramid, old_whole) = (file.source_pyramid.clone(), file.source_whole.clone());
-        let edits = file.audio.edits().clone();
         drop(file);
-
-        if let Err(e) = rename_with_retry(&temp, &target) {
-            let _ = std::fs::remove_file(&temp);
-            if overwrite {
-                // The original is unchanged: map it again with the same edits.
-                match SampleSource::open(&old_meta.path) {
-                    Ok(src) => {
-                        let audio = Arc::new(Audio::with_edits(Arc::new(src), edits));
-                        files.insert(
-                            id,
-                            Arc::new(LoadedFile {
-                                metadata: old_meta,
-                                disk_stamp: old_stamp,
-                                audio,
-                                revision: old_revision,
-                                source_pyramid: old_pyramid,
-                                source_whole: old_whole,
-                                analysis: Some(analysis),
-                            }),
-                        );
-                    }
-                    Err(_) => {
-                        history.remove(&id);
-                    }
-                }
-            }
-            drop((files, history));
-            self.signal.notify();
-            return Err(fail(&e));
-        }
-
-        let opened = std::fs::metadata(&target)
-            .map_err(WavError::from)
-            .and_then(|m| Ok((m, SampleSource::open(&target)?)));
-        let (fs_meta, src) = match opened {
-            Ok(v) => v,
-            Err(e) => {
-                files.remove(&id);
-                history.remove(&id);
-                drop((files, history));
-                self.signal.notify();
-                return Err(format!(
-                    "Saved “{target_name}”, but could not reopen it: {e}"
-                ));
+        let clamped = match written {
+            Ok(clamped) if !cancel.load(Ordering::Relaxed) => clamped,
+            failed => {
+                let _ = std::fs::remove_file(&temp);
+                return Err(match failed {
+                    Err(e) if !cancel.load(Ordering::Relaxed) => fail(&e),
+                    _ => CANCELLED.to_string(),
+                });
             }
         };
-        let audio = Arc::new(Audio::new(Arc::new(src)));
-        let size = fs_meta.len();
-        let metadata = Metadata::new(&target, target_name, size, audio.info());
-        let revision = history.get(&id).map_or(old_revision, |h| h.revision) + 1;
-        let mut fresh = History::new(audio.edits().clone());
-        fresh.revision = revision;
-        let edit_state = fresh.state();
-        let clip = ClipInfo::of(fresh.current());
-        history.insert(id, fresh);
-        // Saving doesn't change the audio, so its analysis becomes the source's.
-        files.insert(
-            id,
-            Arc::new(
-                LoadedFile {
-                    metadata: metadata.clone(),
-                    disk_stamp: (size, fs_meta.modified().ok()),
-                    audio,
-                    revision,
-                    source_pyramid: analysis.pyramid,
-                    source_whole: analysis.whole,
-                    analysis: None,
-                }
-                .seeded(),
-            ),
-        );
-        drop((files, history));
-        self.signal.notify();
-        Ok(EditOutcome {
-            metadata,
-            edit_state,
-            clip,
+        if let Err(e) = rename_with_retry(&temp, target) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(fail(&e));
+        }
+        Ok(ExportOutcome {
+            clamped_samples: clamped,
         })
+    }
+
+    /// Write `file`'s audio through its active `chain` to a new file at `path`, analysing what
+    /// is written in the same pass. Returns that analysis and the number of samples clamped.
+    /// Leaves the chain's slots set up for offline rendering.
+    fn render_file(
+        &self,
+        file: &LoadedFile,
+        chain: &Chain,
+        path: &Path,
+        cancel: &AtomicBool,
+        progress: impl FnMut(u64),
+    ) -> Result<(EditAnalysis, u64), String> {
+        fx::render::offline(&*self.ui, chain)?;
+        // Built after going offline, which may change the slots' latency.
+        let live = LiveChain::of(chain).ok_or("No effect processes the audio")?;
+        let render = Render::new(&file.audio, live, cancel);
+        write_file(&render, path, progress).map_err(|e| e.to_string())?;
+        let rendered = render.finish().ok_or(CANCELLED)?;
+        let analysis = EditAnalysis {
+            revision: file.revision,
+            pyramid: Arc::new(rendered.pyramid),
+            whole: Arc::new(rendered.whole),
+        };
+        Ok((analysis, rendered.clamped))
     }
 
     /// Stats for `[start, end)` of file `id`, or its whole-file stats when `range` is
@@ -905,6 +1645,7 @@ fn load(
             source_pyramid: analysis.pyramid,
             source_whole: analysis.whole,
             analysis: None,
+            chain: Arc::default(),
         }
         .seeded(),
     ))
@@ -924,6 +1665,23 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Milliseconds since the Unix epoch, as session files store modification times.
+fn epoch_millis(time: std::time::SystemTime) -> Option<u64> {
+    let since = time.duration_since(std::time::UNIX_EPOCH).ok()?;
+    u64::try_from(since.as_millis()).ok()
+}
+
+/// How effects process a file with `info` during playback.
+fn live_config(info: &WavInfo) -> Config {
+    Config {
+        channels: info.channels,
+        channel_mask: info.channel_mask,
+        sample_rate: info.sample_rate as f64,
+        max_block: LIVE_BLOCK,
+        offline: false,
+    }
+}
+
 /// A unique hidden file next to `target`, so the final rename stays on one volume.
 fn temp_path(target: &Path) -> PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -938,7 +1696,7 @@ fn temp_path(target: &Path) -> PathBuf {
 
 /// Write `audio` to a new file at `path` and flush it to disk.
 fn write_file(
-    audio: &Audio,
+    audio: &impl NativeFrames,
     path: &Path,
     progress: impl FnMut(u64),
 ) -> Result<(), crate::wav::WriteError> {
@@ -965,6 +1723,27 @@ fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 impl LoadedFile {
+    /// The file as a session saved at `session_path` describes it.
+    fn audio_ref(&self, session_path: &Path) -> AudioRef {
+        let (meta, info) = (&self.metadata, self.audio.info());
+        let (size_bytes, modified) = self.disk_stamp;
+        AudioRef {
+            path: meta.path.clone(),
+            relative_path: session_path
+                .parent()
+                .and_then(|dir| session::relative_path(dir, &meta.path)),
+            sample_rate: meta.sample_rate,
+            channels: meta.channels,
+            channel_mask: info.channel_mask,
+            encoding: meta.encoding.to_string(),
+            bit_depth: meta.bit_depth,
+            valid_bits: meta.valid_bits,
+            frames: self.audio.edits().source_frames(),
+            size_bytes,
+            modified: modified.and_then(epoch_millis),
+        }
+    }
+
     /// With the source's analysis as the analysis of `audio` when it is the source
     /// unedited (as opened, saved, or undone back to that).
     fn seeded(self) -> Self {
@@ -981,13 +1760,21 @@ impl LoadedFile {
 
     fn with_analysis(&self, analysis: EditAnalysis) -> Self {
         Self {
+            analysis: Some(analysis),
+            ..self.with_chain(self.chain.clone())
+        }
+    }
+
+    fn with_chain(&self, chain: Arc<Chain>) -> Self {
+        Self {
             metadata: self.metadata.clone(),
             disk_stamp: self.disk_stamp,
             audio: self.audio.clone(),
             revision: self.revision,
             source_pyramid: self.source_pyramid.clone(),
             source_whole: self.source_whole.clone(),
-            analysis: Some(analysis),
+            analysis: self.analysis.clone(),
+            chain,
         }
     }
 
@@ -1021,6 +1808,8 @@ impl Metadata {
             sample_rate: info.sample_rate,
             channels: info.channels,
             channel_labels: channel_labels(info.channels, info.channel_mask),
+            speaker_arrangement: speaker_arrangement(info.channels, info.channel_mask),
+            layout: layout_name(info.channels, info.channel_mask),
             frames: info.frames,
             duration_secs: info.duration_secs(),
             truncated: info.truncated,
@@ -1060,6 +1849,23 @@ pub fn channel_labels(channels: u16, mask: Option<u32>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_change_after_the_captured_mark_stays_unsaved() {
+        let mut h = History::new(Arc::new(EditList::identity(100)));
+        h.push(
+            Arc::new(EditList::identity(100).set_trim(10, 100)),
+            Vec::new(),
+        );
+        // A session captured here, while a plugin setting changes before it is written.
+        let captured = h.mark();
+        h.touch();
+        h.saved = captured;
+        assert!(h.state().dirty);
+        // Saving again with nothing new in between is clean.
+        h.saved = h.mark();
+        assert!(!h.state().dirty);
+    }
 
     #[test]
     fn labels_follow_mask_or_position() {

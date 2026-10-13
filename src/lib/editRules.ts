@@ -79,3 +79,11 @@ export function remapFrame(
   }
   return Math.max(0, Math.min(f, newFrames));
 }
+
+/**
+ * Replacing a tab's audio drops its edits and undo history, so it asks first when there
+ * is anything to lose.
+ */
+export function replaceNeedsConfirmation(tab: { edited: boolean; canUndo: boolean }): boolean {
+  return tab.edited || tab.canUndo;
+}

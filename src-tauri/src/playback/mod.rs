@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 
 use crate::edit::{Audio, Located};
+use crate::fx::live::LiveChain;
 use device::AudioThread;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -68,12 +69,13 @@ impl Player {
         self.info.clone()
     }
 
-    /// Start playing `req`, replacing any current playback.
+    /// Start playing `req` through the effects `fx`, replacing any current playback.
     pub fn play(
         &self,
         src: Arc<Audio>,
         req: PlayRequest,
         looping: bool,
+        fx: Option<Arc<LiveChain>>,
     ) -> Result<Arc<Shared>, String> {
         let audio = self
             .audio
@@ -92,6 +94,7 @@ impl Player {
             map,
             format.sample_rate,
             self.volume.clone(),
+            fx,
         );
         let shared = engine.shared().clone();
         engine.wait_prefilled(std::time::Duration::from_millis(150));
@@ -110,17 +113,20 @@ impl Player {
         Ok(shared)
     }
 
-    /// If `audio`'s file is playing, switch playback to this edit state of it: playing
-    /// continues from the same source audio (or the join that replaced it), and the play
-    /// range is mapped the same way. A range covering the whole file stays the whole file.
-    pub fn follow(&self, audio: &Arc<Audio>) {
+    /// If `audio`'s file is playing, switch playback to this edit state of it, heard through
+    /// the effects `fx`: playing continues from the same source audio (or the join that
+    /// replaced it), and the play range is mapped the same way. A range covering the whole
+    /// file stays the whole file. Queued audio is flushed only if something changed.
+    pub fn follow(&self, audio: &Arc<Audio>, fx: Option<Arc<LiveChain>>) {
         let mut guard = self.session.lock().unwrap();
-        let Some(s) = guard
-            .as_mut()
-            .filter(|s| s.source.same_source(audio) && !Arc::ptr_eq(&s.source, audio))
-        else {
+        let Some(s) = guard.as_mut().filter(|s| s.source.same_source(audio)) else {
             return;
         };
+        let same_fx = LiveChain::same(s.shared.fx().as_ref(), fx.as_ref());
+        if Arc::ptr_eq(&s.source, audio) && same_fx {
+            return;
+        }
+        s.shared.set_fx(fx);
         s.range = follow_range(&s.source, audio, s.range);
         s.source = audio.clone();
         s.shared.retarget(Retarget {

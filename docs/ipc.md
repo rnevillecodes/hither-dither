@@ -32,7 +32,7 @@ Cancels an `open_file` still running for `fileId`. Does nothing if there isn't o
 | --- | --- | --- |
 | `fileId` | number | The file to close |
 
-Forgets the file, releasing its memory mapping, and cancels its load if one is still running. If playback is playing this file, it stops first. Closing an ID that isn't open does nothing.
+Forgets the file, releasing its memory mapping, and cancels its load if one is still running. If playback is playing this file, it stops first. Closing an ID that isn't open does nothing. Its effects' editor windows close first.
 
 ### `get_metadata`
 
@@ -53,6 +53,8 @@ interface Metadata {
   sample_rate: number;     // Hz
   channels: number;
   channel_labels: string[];// from WAVE_FORMAT_EXTENSIBLE mask, else Mono / L,R / Ch n
+  speaker_arrangement: number; // the VST3 arrangement an effect needs in its layouts (see list_plugins)
+  layout: string;          // the channel layout as messages name it: "mono", "stereo", "5.1", "3-channel"…
   frames: number;
   duration_secs: number;
   truncated: boolean;      // data chunk was cut short; show a warning
@@ -165,11 +167,16 @@ interface PlaybackInfo {
 
 Replaces any current playback, whichever file it was playing (only one file plays at a time). Rejects if no device is available, the output can't be opened, or the file changed on disk since it was loaded.
 
+The audio is heard through the file's effect chain (see *Effect chains*), at the file's sample rate before any resampling. Each play starts with the effects' tails and delay lines cleared. Their processing delay is compensated: the first audio heard is at `from`, `position` frames match what is heard, and the end of the range is heard in full before `ended`.
+
 ```ts
 type PlaybackEvent =
   | { kind: "position"; frame: number } // audible file frame, about every 16 ms, latency-compensated
-  | { kind: "ended"; frame: number };   // reached `end` (not sent when looping or stopped)
+  | { kind: "ended"; frame: number }    // reached `end` (not sent when looping or stopped)
+  | { kind: "overload" };               // the effects can't keep up with real time
 ```
+
+`overload` is sent at most once per playback, when the output runs dry three or more times within 2 s in the middle of the range while effects are processing. The frontend shows it as a notice that the effects are too demanding to play smoothly; saving still renders them correctly.
 
 ### `stop_playback`
 
@@ -200,9 +207,11 @@ Changes the range of the current playback without restarting it: playing carries
 
 An edit, undo, redo, clip change or preview of the file that is playing doesn't stop playback. Within about 0.25 s it switches to the new audio with a 5 ms crossfade, carrying on from the same source audio. If that audio was removed, it continues from the join that replaced it, or ends (an `ended` event) if nothing after it is heard. The play range is mapped the same way, and a range covering the whole file becomes the whole new file. `position` events then report frames of the new audio.
 
+Chain changes to the file that is playing (adding, removing, moving or bypassing an effect, Bypass All, or undo and redo of these) switch the same way, with the same audio and range, so they are heard within about 0.25 s. So does a plugin reporting a new processing delay. Bypassing a plugin that has its own bypass parameter, and parameter changes, reach it without a switch, at the start of its next processed block. While effects are processing, less audio is queued ahead (0.15 s instead of 0.2 s) to keep parameter changes within 0.25 s.
+
 ## Editing
 
-Edits are non-destructive: the file on disk is untouched until it's saved. Each file keeps an undo history from when it was opened (or last saved). `get_metadata`, `get_peaks`, `compute_stats`, `get_clip_runs` and `play` always serve the current edited audio, with frame positions in the edited timeline.
+Edits are non-destructive: the app never writes the file on disk; `export_file` writes the edited audio to a new file. Each file keeps an undo history from when it was opened (or its session restored). `get_metadata`, `get_peaks`, `compute_stats`, `get_clip_runs` and `play` always serve the current edited audio, with frame positions in the edited timeline.
 
 Edits, undo and redo return at once: nothing is analysed or written before they return, and the next edit can follow straight away. If the file is playing, playback follows the change (see *Playback follows edits*). The edited audio is analysed in the background (exact peaks, whole-file stats and clip runs), starting 300 ms after the last change; a further change cancels and restarts it. Until it finishes, `compute_stats(null)` returns `null`, `get_clip_runs` is `pending`, and `get_peaks` draws through the edits. Edits made while the file is being saved reject with `The file is being saved`.
 
@@ -213,15 +222,22 @@ interface EditOutcome {
   metadata: Metadata;      // frames and duration_secs reflect the edited audio
   edit_state: EditState;
   clip: ClipInfo;          // what the clip handles show (see get_clip)
+  chain: ChainInfo;        // the file's effect chain (see get_chain)
+  audioChanged: boolean;   // false for chain changes: the revision, peaks and analysis are unchanged,
+                           // so don't invalidate peaks or call wait_analysis
 }
 
 interface EditState {
   can_undo: boolean;
   can_redo: boolean;
-  dirty: boolean;          // the audio differs from the file on disk
+  dirty: boolean;          // unsaved: something changed since the session was last saved or the tab
+                           // was opened (edits, effects, bypass, plugin settings)
+  edited: boolean;         // the audio is edited (it differs from the WAV on disk), even with nothing to undo
   revision: number;        // increases whenever the audio changes; invalidate cached peaks
 }
 ```
+
+The undo history holds edits and chain changes (adding, removing and moving effects) as one list of steps. It lasts from when the file was opened (or its session restored); saving a session or exporting doesn't clear it.
 
 ### `wait_analysis`
 
@@ -230,7 +246,7 @@ interface EditState {
 | `fileId` | number | |
 | `revision` | number | An `edit_state.revision` |
 
-Resolves `true` once that revision's background analysis has finished (at once if it already has, as for a file just opened or saved). Resolves `false` if a newer revision replaces it first or the file is closed. After `true`, fetch the whole-file stats, clip runs and peaks again.
+Resolves `true` once that revision's background analysis has finished (at once if it already has, as for a file just opened). Resolves `false` if a newer revision replaces it first or the file is closed. After `true`, fetch the whole-file stats, clip runs and peaks again.
 
 ### `apply_edit`
 
@@ -252,28 +268,43 @@ Applies the edit to `[start, end)` across all channels and discards the redo his
 
 Step back or forward one edit. Rejects with `Nothing to undo` / `Nothing to redo` at either end of the history.
 
-### `save_file`
+### `export_file`
 
 | Arg | Type | Notes |
 | --- | --- | --- |
 | `fileId` | number | |
-| `path` | `string | null` | Where to write; `null` overwrites the file's own path |
-| `onProgress` | `Channel<LoadProgress>` | Progress of the save, as for `open_file` |
+| `path` | string | Where to write the WAV; never the file's own path |
+| `onProgress` | `Channel<LoadProgress>` | Progress of the export, as for `open_file`; `totalFrames` is the length |
 
-This is the only command that renders the edited audio. If the current edit state hasn't been analysed yet, it is analysed first, so the saved tab has exact peaks and stats; progress then covers both passes (`totalFrames` is twice the length). Only one save can run per file at a time. Writes the current audio as a WAV file: the source's `fmt ` chunk followed by a `data` chunk, and no other chunks. Unedited samples are copied byte for byte. Scaled samples are converted in the file's own format (integers rounded to nearest and clamped). The file is written to a temporary file next to the target and then renamed over it, so a failure never leaves a partial file. If the file is playing, playback stops first.
+This is the only command that renders the edited audio. It writes the current audio as a WAV file: the source's `fmt ` chunk followed by a `data` chunk, and no other chunks. Unedited samples are copied byte for byte. Scaled samples are converted in the file's own format (integers rounded to nearest and clamped). The file is written to a temporary file next to the target and then renamed over it, so a failure never leaves a partial file. Only one export can run per file at a time, and the file can't be changed meanwhile. If the file is playing, playback stops first.
 
-Returns an `EditOutcome`. Afterwards the file is served from the saved copy (its `metadata.path` and `name` are the target's), the history is empty, and the peaks and stats are unchanged.
+With an active effect chain (an effect that isn't bypassed, and Bypass All off), the audio is rendered through the effects:
+- the effects are switched to offline rendering, and parameter changes not yet heard reach them first;
+- the chain's latency is removed, so every frame lines up with the input and the length is unchanged;
+- every sample is the effects' output, converted to the file's format: integers are rounded and clamped, and `clampedSamples` counts the clamped samples, while floats are written as they are, above full scale included;
+- afterwards the effects go back to real-time processing, whether the export succeeded or not.
 
-Rejects, leaving any existing file at the target and the edits as they were:
-- with `“x.wav” changed on disk since it was opened…` when overwriting a file that changed since it was loaded;
-- with `Could not save “x.wav”: the result is too large for a WAV file (over 4 GiB)`;
-- with `Could not save “x.wav”: …` for I/O errors such as a read-only folder.
+With a bypassed chain, the export is the same as with no effects, so unedited samples stay bit-exact.
 
-The frontend asks for confirmation before the first overwrite and rejects targets that are open in another tab.
+The file is left exactly as it was: the same source, edits, clip settings, chain and plugin settings, history, edit state, peaks and statistics. Nothing describes the exported audio; open it to inspect it.
+
+```ts
+interface ExportOutcome {
+  clampedSamples: number;  // processed samples clamped to fit an integer format; show a notice when above 0
+}
+```
+
+Rejects, leaving any existing file at the target as it was:
+- with `“x.wav” is the audio being edited, so it can't be overwritten. Export to another name.` when `path` is the file's own path;
+- with `Could not export “x.wav”: the result is too large for a WAV file (over 4 GiB)`;
+- with `Could not export “x.wav”: …` for I/O errors such as a read-only folder;
+- with `The file is still being exported` if an export of the file is already running.
+
+The frontend also refuses targets that are open in another tab.
 
 ## Clip handles
 
-The whole file behaves like a clip: a trim window over the edited audio, a fade at each end, and a crossfade at every join that `delete` made. These are settings rather than one-off edits: each call replaces the previous setting and adds one undo step. Calls that leave everything as it was add nothing. Saving bakes them into the file, after which the clip state is empty again.
+The whole file behaves like a clip: a trim window over the edited audio, a fade at each end, and a crossfade at every join that `delete` made. These are settings rather than one-off edits: each call replaces the previous setting and adds one undo step. Calls that leave everything as it was add nothing. Exporting writes them into the exported file and leaves them in place.
 
 A fade curve's `bend` runs from -1 to 1: 0 is linear, positive values bow the fade line upward (louder through the fade), negative downward. The gain at position t (0..1) of a fade-in is t^(4^-bend); a fade-out is its mirror image.
 
@@ -338,3 +369,396 @@ type Preview =
 ```
 
 If `fileId` is playing, playback switches to the current edits with `preview` applied, exactly as `set_clip`, `set_crossfade` or `apply_edit` would apply it. Nothing else changes: not the history, the revision, the unsaved state, the peaks or the stats. Used while a handle is dragged and while the fade curve dialog is open. The committing command (or `null`, on cancel) follows. Does nothing if the file isn't playing. Rejects for a `fade` with another `op`, or a crossfade `join` that isn't a join.
+
+## Plugins
+
+VST3 effect plugins are found in the standard folders and the user's extra folders, then scanned in the background, each in its own process. The scan starts when the app starts. Results are remembered in `plugins.json` in the app data folder, so on later launches only new or changed plugins are scanned. `plugin-settings.json` holds the extra folders and the disabled plugins.
+
+### Event `plugins-changed`
+
+A Tauri event (listen with `listen` from `@tauri-apps/api/event`), sent as scan results arrive and when a plugin is enabled or disabled. The payload is the scan progress; call `list_plugins` for the list.
+
+```ts
+interface ScanProgress {
+  done: number;   // bundles scanned so far in the current or last scan
+  total: number;  // bundles that scan is checking; scanning while done < total
+}
+```
+
+### `list_plugins`
+
+No arguments. Returns every plugin found, sorted by name, and the scan progress. Plugins already scanned are listed while a scan is still running.
+
+```ts
+interface PluginList {
+  plugins: PluginEntry[];
+  progress: ScanProgress;
+}
+
+interface PluginEntry {
+  path: string;              // the .vst3 bundle
+  classId: string | null;    // 32 hex digits; null for a bundle that failed, is incompatible or has no effects
+  name: string;              // the effect, or the bundle's file name when classId is null
+  vendor: string;
+  version: string;
+  subCategories: string;     // e.g. "Fx|EQ"
+  hasEditor: boolean;        // the plugin has its own editor for this platform
+  layouts: Layout[];         // channel layouts it accepts; empty unless ready or disabled
+  status: "ready" | "failed" | "incompatible" | "disabled" | "noEffects";
+  reason: string | null;     // why it failed or is incompatible, e.g. "Crashed while being scanned",
+                             // "Timed out while being scanned", "No version for this Mac's processor",
+                             // or "No usable effects" (status "noEffects", e.g. an instrument)
+}
+
+interface Layout {
+  channels: number;
+  arrangement: number;       // VST3 speaker arrangement bits
+}
+```
+
+A file can use an effect when one of its layouts has the file's arrangement: mono for one channel, the WAV channel mask when it has one bit per channel (5.x with side surrounds counts as back surrounds), stereo for two channels, otherwise the lowest `channels` bits. Only `ready` effects are offered in Add Effect. A bundle with several effects has one entry per effect.
+
+### `plugin_folders`
+
+No arguments. Returns `{ standard: string[]; extra: string[] }`: the standard folders for this OS, which can't be removed (folders that don't exist are listed but skipped), and the user's extra folders.
+
+### `set_plugin_folders`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `extra` | `string[]` | The new list of extra folders; duplicates and standard folders are dropped |
+
+Saves the folders, starts a rescan and returns the new `{ standard, extra }`. Plugins in a removed folder disappear from the list once the rescan finishes; effects already in a chain keep working. Rejects if the settings can't be saved.
+
+### `rescan_plugins`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `all` | boolean | `true` scans every plugin again (Rescan All); `false` only new and changed ones |
+
+Starts a rescan in the background and returns at once. A rescan requested while one runs starts when it finishes.
+
+### `set_plugin_enabled`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `classId` | string | The effect |
+| `enabled` | boolean | |
+
+Enables or disables an effect, remembered across restarts. Disabling doesn't remove the effect from chains it is already in. Sends `plugins-changed`. Rejects if the settings can't be saved.
+
+### `take_startup_notices`
+
+No arguments. Returns the plugins disabled at startup because the app closed unexpectedly while loading one of them into a chain or opening its editor. Each notice is returned once.
+
+```ts
+interface StartupNotice {
+  classId: string;
+  name: string;
+  message: string;  // e.g. "X was disabled because HitherDither closed unexpectedly while loading it. You can enable it again in Manage Plugins."
+}
+```
+
+## Effect chains
+
+Each open file has a chain of up to 8 effects, processed in order. The chain is non-destructive: it doesn't change the edited audio, its revision, peaks or statistics. Adding, removing and moving effects are undo steps, in the same history as edits (see *Editing*); undoing a removal brings back the same effect with its settings. Bypassing is not an undo step. Effects kept only for undo are released when a new step discards them, and all of a file's effects are released when it closes.
+
+The chain commands below return an `EditOutcome` with `audioChanged: false` and an unchanged `edit_state.revision`, and reject with `The file is being exported` during an export, or `That effect isn't in the chain` for a `slotId` that isn't in the chain.
+
+```ts
+interface ChainInfo {
+  effects: EffectInfo[];   // in processing order
+  bypassAll: boolean;
+  latency: number;         // total processing delay in frames of the effects that process
+}
+
+interface EffectInfo {
+  slotId: number;          // identifies this effect in the chain commands
+  classId: string;
+  name: string;
+  vendor: string;
+  hasEditor: boolean;
+  bypassed: boolean;       // its own bypass switch (Bypass All is separate)
+}
+```
+
+### `get_chain`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+
+Returns `ChainInfo | null` (`null` if `fileId` isn't open).
+
+### `add_effect`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `classId` | string | A `ready` effect from `list_plugins` |
+
+Loads the effect with its default settings and adds it to the end of the chain. Rejects, leaving the chain unchanged:
+- with `The effect chain is full` when the chain has 8 effects;
+- with `That effect isn't available. …` for a class that isn't in the plugin list or failed its scan, or `X is disabled. …` for a disabled one;
+- with `X doesn't support 5.1 audio` (or `mono`, `stereo`, `quad`, `5.0`, `7.1`, `n-channel`) when none of its layouts matches the file's channels;
+- with `“X” could not be loaded: …` when the plugin fails to load or set up.
+
+Loading writes the crash marker the first time a plugin is loaded in a session (see `take_startup_notices`).
+
+### `remove_effect`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `slotId` | number | |
+
+Removes the effect from the chain. It is kept for undo.
+
+### `move_effect`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `slotId` | number | |
+| `index` | number | Its new position; past the end means last |
+
+Moves the effect within the chain. Moving it to where it already is adds no undo step.
+
+### `set_effect_bypass`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `slotId` | number | |
+| `on` | boolean | |
+
+Bypasses one effect, keeping its settings. A plugin with a bypass parameter bypasses itself, keeping its latency; otherwise the effect is skipped. Not an undo step.
+
+### `set_bypass_all`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `on` | boolean | |
+
+Bypasses the whole chain, keeping each effect's own bypass switch. Not an undo step.
+
+## Effect editors
+
+An effect's controls are shown either in the plugin's own editor, in a separate window the backend creates, or in generic controls the frontend draws. Each effect has at most one editor window, titled "<effect> — <file name>", sized to the plugin's editor and resizable only if the plugin allows. It stays above the main window without blocking it:
+- Windows: a window owned by the main window, which follows the display's scale;
+- macOS: a child window of the main window;
+- Linux: an X11 window (also under XWayland), kept above the main window when the app itself runs on X11.
+
+Editor windows close when their effect leaves the chain (`remove_effect`, or an undo or redo that takes it out), when their file closes, and when the app quits. Exporting leaves them open. Opening an editor writes the crash marker the first time that plugin opens an editor in a session (see `take_startup_notices`).
+
+### Event `fx-editor-closed`
+
+A Tauri event sent whenever an editor window closes, whether the user closed it or it closed for one of the reasons above.
+
+```ts
+interface EditorClosed {
+  fileId: number;
+  slotId: number;
+}
+```
+
+### `open_editor`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `slotId` | number | An effect in the file's chain |
+| `generic` | boolean | `true` asks for the generic controls only |
+
+Opens the effect's editor window, or brings it to the front if it is already open. Returns:
+
+```ts
+interface EditorOpened {
+  native: boolean;   // the plugin's own editor is showing
+  reason?: string;   // why it isn't, to show with the generic controls
+}
+```
+
+With `generic: true`, returns `{ native: false }` without a reason and leaves any open editor window as it is. Otherwise `native: false` comes with a `reason` when the plugin has no editor for this platform, its editor fails to open, or (Linux) no X11 display is available. Rejects with `No file is loaded` or `That effect isn't in the chain`.
+
+### `close_editor`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `slotId` | number | |
+
+Closes the effect's editor window if it is open (sending `fx-editor-closed`).
+
+### `set_active_file`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number \| null | The active tab's file; `null` when no tab is active |
+
+Shows the active file's editor windows and hides the others. A hidden window comes back where it was when its tab is active again. Call it on every tab switch.
+
+## Generic controls
+
+Effect parameters drawn by the frontend, for plugins without an editor or on request. Values are normalised: 0 to 1, whatever the parameter's range.
+
+### `get_fx_params`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `slotId` | number | An effect in the file's chain |
+
+Returns the parameters a user can set: those the plugin marks automatable, except hidden, read-only and bypass parameters, in the plugin's order.
+
+```ts
+interface FxParam {
+  id: number;
+  title: string;
+  units: string;         // e.g. "dB"; may be empty
+  stepCount: number;     // 0: continuous; otherwise the number of steps (1 for an on/off switch)
+  defaultValue: number;
+  value: number;
+  display: string;       // the value as the plugin shows it, without the units, e.g. "-18.0"
+}
+```
+
+Rejects with `No file is loaded` or `That effect isn't in the chain`.
+
+### `set_fx_param`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `slotId` | number | |
+| `paramId` | number | |
+| `value` | number | Normalised; clamped to 0–1 |
+
+Sets the parameter on the plugin's controller, so its own editor follows, and for its processor, which hears it from the next block it processes (during playback, within 0.25 s). Returns the new display string. Not an undo step, and doesn't change the edit state. Rejects as `get_fx_params`.
+
+### Event `fx-param-changed`
+
+A Tauri event sent when parameters change in a plugin's own editor, at most 30 times a second per effect, with the latest value of each parameter that changed since the last one. Changes made with `set_fx_param` aren't echoed.
+
+```ts
+interface FxParamChanged {
+  fileId: number;
+  slotId: number;
+  changes: { id: number; value: number; display: string }[];
+}
+```
+
+### Event `fx-params-reset`
+
+A Tauri event sent when a plugin says its parameters' values or titles all changed (for example after loading one of its own presets). Fetch them again with `get_fx_params`.
+
+```ts
+interface FxParamsReset {
+  fileId: number;
+  slotId: number;
+}
+```
+
+## Session files
+
+A session file (`*.hdsession.json`) holds one tab's state: which WAV it refers to, its unsaved edits, Bypass All, and its effects in order with their bypass switches and complete plugin settings. Saving a session never writes the WAV. The file is versioned JSON; readers ignore fields they don't know. Opening a session takes three calls: `read_session` to find its WAV, `open_file` for that WAV as usual, then `restore_session` before the tab can be edited.
+
+### `save_session`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `path` | string | Where to write the session, ending in `.hdsession.json` |
+| `replace` | boolean | Whether an existing file at `path` may be replaced |
+
+Captures the file's current edits and chain and writes them to `path`: each plugin's saved state (`getState`), plus parameter changes it hasn't processed yet (made while stopped). The WAV is described by its absolute path, its path relative to the session's folder, its format and length, and its size and modification time. The session is written to a temporary file next to the target and then renamed over it, so a failure leaves any existing file intact. Playback continues. Once written, the tab counts as saved: its `edit_state.dirty` is measured against the state that was captured, so a change made while saving still counts as unsaved. The undo history is kept.
+
+```ts
+interface SessionSaved {
+  written: boolean;      // false, writing nothing, if a file exists at `path` and `replace` is false
+                         // (the frontend then asks before trying again with `replace`)
+  editState: EditState;  // the tab's edit state afterwards
+}
+```
+
+Rejects:
+- with `The file is being exported` while the file is being exported;
+- with `“Effect” could not save its settings` if a plugin fails to report its state, writing nothing;
+- with `Could not save “mix.hdsession.json”: …` for I/O errors such as a missing or read-only folder.
+
+### `read_session`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `path` | string | A session file |
+
+Checks the session and finds its WAV, opening nothing. The WAV is the recorded absolute path if that file exists, otherwise the recorded relative path from the session's current folder.
+
+```ts
+interface SessionInfo {
+  audioPath: string | null;  // open this with open_file, then call restore_session; null when
+                             // neither path exists: offer to choose another WAV (relink)
+  audioName: string;         // the recorded WAV's file name, for messages
+}
+```
+
+Rejects:
+- with `“x.hdsession.json” is not a valid session file.` for anything that isn't a session this app wrote, including edits that don't fit the recorded length;
+- with `“x.hdsession.json” was made by a newer version of HitherDither.` for a higher format version;
+- with `Could not read “x.hdsession.json”: …` for I/O errors.
+
+### `restore_session`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | The file just opened from `audioPath`, or from a WAV the user chose |
+| `path` | string | The session file |
+| `relink` | boolean | True for a WAV the user chose instead of the session's own |
+
+Reads the session again and applies it to the file: the edits, Bypass All, and each effect, loaded with its saved state restored before processing is set up, then its unprocessed parameter changes and its bypass switch. The file's history is replaced by a single state, the restored one, so there is nothing to undo. When the restored edits change the audio, the revision increases and the background analysis starts as after an edit (use `wait_analysis`). Effect editors start closed. Afterwards, fetch the clip, chain, stats and clip runs as after `open_file`.
+
+With `relink`, the edits are restored only if the chosen WAV has the recorded sample rate, channels and layout, sample format and length (it was moved or renamed). Otherwise only Bypass All and the effects are restored, and `editsDropped` says whether the session had edits. Either way the tab is unsaved afterwards, because the session now belongs to another WAV.
+
+```ts
+interface RestoreOutcome {
+  applied: boolean;                // false (without relink) when the WAV no longer matches: nothing
+                                   // changed; close the file and offer to choose another WAV
+  editState: EditState;            // dirty follows the usual rule
+  wavChanged: boolean;             // the WAV's size or modification time differ: warn
+  editsDropped: boolean;           // relink onto a different recording left the edits out: say so
+  warnings: { effect: string; reason: string }[];   // show as one notice
+}
+```
+
+An effect is left out, with a warning, when its plugin isn't available, is disabled, doesn't support the file's channels, or fails to load. A plugin that rejects its saved state stays in the chain at its defaults, with the warning `Its settings could not be restored, so it has its defaults.`
+
+Rejects, leaving the file as opened:
+- with the `read_session` messages if the session became unreadable meanwhile;
+- with `The edit was cancelled` if the file was edited or reopened while the effects loaded.
+
+### `replace_audio`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `path` | string | The WAV to use instead of the file's own |
+| `onProgress` | `Channel<LoadProgress>` | Progress of loading the new WAV, as for `open_file` |
+
+Replaces the file's audio with the WAV at `path`, keeping its effect chain: every effect in order, with its settings (including parameter changes not yet heard) and bypass switch, and Bypass All. The effects are new instances set up for the new audio, so their editors close. The edits are dropped and the history starts again at the new audio, which counts as unsaved; a session the tab belongs to refers to the new WAV once it is saved. Playback stops first. Afterwards, fetch the clip, chain, stats and clip runs as after `open_file`.
+
+```ts
+interface ReplaceOutcome {
+  metadata: Metadata;      // the new WAV's
+  editState: EditState;    // dirty, with nothing to undo
+  warnings: { effect: string; reason: string }[];   // effects left out (e.g. the new layout isn't
+                                                     // supported) or at their defaults; one notice
+}
+```
+
+Rejects, leaving the file, its edits, history and effects as they were:
+- with `“take.wav” is already this tab's audio` when `path` is the file's own WAV;
+- with the `open_file` errors when the new WAV can't be opened;
+- with `The file is being exported` during an export.
+
+The frontend also refuses WAVs open in another tab.
