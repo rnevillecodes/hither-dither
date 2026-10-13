@@ -211,7 +211,7 @@ Chain changes to the file that is playing (adding, removing, moving or bypassing
 
 ## Editing
 
-Edits are non-destructive: the file on disk is untouched until it's saved. Each file keeps an undo history from when it was opened (or last saved). `get_metadata`, `get_peaks`, `compute_stats`, `get_clip_runs` and `play` always serve the current edited audio, with frame positions in the edited timeline.
+Edits are non-destructive: the app never writes the file on disk; `export_file` writes the edited audio to a new file. Each file keeps an undo history from when it was opened (or its session restored). `get_metadata`, `get_peaks`, `compute_stats`, `get_clip_runs` and `play` always serve the current edited audio, with frame positions in the edited timeline.
 
 Edits, undo and redo return at once: nothing is analysed or written before they return, and the next edit can follow straight away. If the file is playing, playback follows the change (see *Playback follows edits*). The edited audio is analysed in the background (exact peaks, whole-file stats and clip runs), starting 300 ms after the last change; a further change cancels and restarts it. Until it finishes, `compute_stats(null)` returns `null`, `get_clip_runs` is `pending`, and `get_peaks` draws through the edits. Edits made while the file is being saved reject with `The file is being saved`.
 
@@ -225,20 +225,18 @@ interface EditOutcome {
   chain: ChainInfo;        // the file's effect chain (see get_chain)
   audioChanged: boolean;   // false for chain changes: the revision, peaks and analysis are unchanged,
                            // so don't invalidate peaks or call wait_analysis
-  clampedSamples: number;  // from save_file: processed samples clamped to fit an integer format
-                           // (0 otherwise); show a notice when above 0
 }
 
 interface EditState {
   can_undo: boolean;
   can_redo: boolean;
-  dirty: boolean;          // unsaved: the audio is edited, or an effect that isn't bypassed is in the
-                           // chain while Bypass All is off
+  dirty: boolean;          // unsaved: something changed since the session was last saved or the tab
+                           // was opened (edits, effects, bypass, plugin settings)
   revision: number;        // increases whenever the audio changes; invalidate cached peaks
 }
 ```
 
-The undo history holds edits and chain changes (adding, removing and moving effects) as one list of steps.
+The undo history holds edits and chain changes (adding, removing and moving effects) as one list of steps. It lasts from when the file was opened (or its session restored); saving a session or exporting doesn't clear it.
 
 ### `wait_analysis`
 
@@ -247,7 +245,7 @@ The undo history holds edits and chain changes (adding, removing and moving effe
 | `fileId` | number | |
 | `revision` | number | An `edit_state.revision` |
 
-Resolves `true` once that revision's background analysis has finished (at once if it already has, as for a file just opened or saved). Resolves `false` if a newer revision replaces it first or the file is closed. After `true`, fetch the whole-file stats, clip runs and peaks again.
+Resolves `true` once that revision's background analysis has finished (at once if it already has, as for a file just opened). Resolves `false` if a newer revision replaces it first or the file is closed. After `true`, fetch the whole-file stats, clip runs and peaks again.
 
 ### `apply_edit`
 
@@ -269,36 +267,43 @@ Applies the edit to `[start, end)` across all channels and discards the redo his
 
 Step back or forward one edit. Rejects with `Nothing to undo` / `Nothing to redo` at either end of the history.
 
-### `save_file`
+### `export_file`
 
 | Arg | Type | Notes |
 | --- | --- | --- |
 | `fileId` | number | |
-| `path` | `string | null` | Where to write; `null` overwrites the file's own path |
-| `onProgress` | `Channel<LoadProgress>` | Progress of the save, as for `open_file` |
+| `path` | string | Where to write the WAV; never the file's own path |
+| `onProgress` | `Channel<LoadProgress>` | Progress of the export, as for `open_file`; `totalFrames` is the length |
 
-This is the only command that renders the edited audio. Without effects, if the current edit state hasn't been analysed yet, it is analysed first, so the saved tab has exact peaks and stats; progress then covers both passes (`totalFrames` is twice the length). Only one save can run per file at a time. Writes the current audio as a WAV file: the source's `fmt ` chunk followed by a `data` chunk, and no other chunks. Unedited samples are copied byte for byte. Scaled samples are converted in the file's own format (integers rounded to nearest and clamped). The file is written to a temporary file next to the target and then renamed over it, so a failure never leaves a partial file. If the file is playing, playback stops first.
+This is the only command that renders the edited audio. It writes the current audio as a WAV file: the source's `fmt ` chunk followed by a `data` chunk, and no other chunks. Unedited samples are copied byte for byte. Scaled samples are converted in the file's own format (integers rounded to nearest and clamped). The file is written to a temporary file next to the target and then renamed over it, so a failure never leaves a partial file. Only one export can run per file at a time, and the file can't be changed meanwhile. If the file is playing, playback stops first.
 
-With an active effect chain (an effect that isn't bypassed, and Bypass All off), the audio is rendered through the effects instead:
+With an active effect chain (an effect that isn't bypassed, and Bypass All off), the audio is rendered through the effects:
 - the effects are switched to offline rendering, and parameter changes not yet heard reach them first;
 - the chain's latency is removed, so every frame lines up with the input and the length is unchanged;
 - every sample is the effects' output, converted to the file's format: integers are rounded and clamped, and `clampedSamples` counts the clamped samples, while floats are written as they are, above full scale included;
-- the written samples are analysed in the same pass, so there is no separate analysis and progress covers one pass (`totalFrames` is the length).
+- afterwards the effects go back to real-time processing, whether the export succeeded or not.
 
-With a bypassed chain, the save is the same as with no effects, so unedited samples stay bit-exact.
+With a bypassed chain, the export is the same as with no effects, so unedited samples stay bit-exact.
 
-Returns an `EditOutcome`. Afterwards the file is served from the saved copy (its `metadata.path` and `name` are the target's), and the history and the effect chain are empty: the effects are released, and their editors closed. Without effects, the peaks and stats are unchanged. With effects, `audioChanged` is true as always for a save, and the new revision's peaks, stats and clip runs, which describe the processed audio, are already exact.
+The file is left exactly as it was: the same source, edits, clip settings, chain and plugin settings, history, edit state, peaks and statistics. Nothing describes the exported audio; open it to inspect it.
 
-Rejects, leaving any existing file at the target, the edits, and the chain with its settings as they were (effects go back to real-time processing):
-- with `“x.wav” changed on disk since it was opened…` when overwriting a file that changed since it was loaded;
-- with `Could not save “x.wav”: the result is too large for a WAV file (over 4 GiB)`;
-- with `Could not save “x.wav”: …` for I/O errors such as a read-only folder.
+```ts
+interface ExportOutcome {
+  clampedSamples: number;  // processed samples clamped to fit an integer format; show a notice when above 0
+}
+```
 
-The frontend asks for confirmation before the first overwrite and rejects targets that are open in another tab.
+Rejects, leaving any existing file at the target as it was:
+- with `“x.wav” is the audio being edited, so it can't be overwritten. Export to another name.` when `path` is the file's own path;
+- with `Could not export “x.wav”: the result is too large for a WAV file (over 4 GiB)`;
+- with `Could not export “x.wav”: …` for I/O errors such as a read-only folder;
+- with `The file is still being exported` if an export of the file is already running.
+
+The frontend also refuses targets that are open in another tab.
 
 ## Clip handles
 
-The whole file behaves like a clip: a trim window over the edited audio, a fade at each end, and a crossfade at every join that `delete` made. These are settings rather than one-off edits: each call replaces the previous setting and adds one undo step. Calls that leave everything as it was add nothing. Saving bakes them into the file, after which the clip state is empty again.
+The whole file behaves like a clip: a trim window over the edited audio, a fade at each end, and a crossfade at every join that `delete` made. These are settings rather than one-off edits: each call replaces the previous setting and adds one undo step. Calls that leave everything as it was add nothing. Exporting writes them into the exported file and leaves them in place.
 
 A fade curve's `bend` runs from -1 to 1: 0 is linear, positive values bow the fade line upward (louder through the fade), negative downward. The gain at position t (0..1) of a fade-in is t^(4^-bend); a fade-out is its mirror image.
 
@@ -457,7 +462,7 @@ interface StartupNotice {
 
 Each open file has a chain of up to 8 effects, processed in order. The chain is non-destructive: it doesn't change the edited audio, its revision, peaks or statistics. Adding, removing and moving effects are undo steps, in the same history as edits (see *Editing*); undoing a removal brings back the same effect with its settings. Bypassing is not an undo step. Effects kept only for undo are released when a new step discards them, and all of a file's effects are released when it closes.
 
-The chain commands below return an `EditOutcome` with `audioChanged: false` and an unchanged `edit_state.revision`, and reject with `The file is being saved` during a save, or `That effect isn't in the chain` for a `slotId` that isn't in the chain.
+The chain commands below return an `EditOutcome` with `audioChanged: false` and an unchanged `edit_state.revision`, and reject with `The file is being exported` during an export, or `That effect isn't in the chain` for a `slotId` that isn't in the chain.
 
 ```ts
 interface ChainInfo {
@@ -544,7 +549,7 @@ An effect's controls are shown either in the plugin's own editor, in a separate 
 - macOS: a child window of the main window;
 - Linux: an X11 window (also under XWayland), kept above the main window when the app itself runs on X11.
 
-Editor windows close when their effect leaves the chain (`remove_effect`, or an undo or redo that takes it out), when their file closes, after a successful save (which empties the chain), and when the app quits. Opening an editor writes the crash marker the first time that plugin opens an editor in a session (see `take_startup_notices`).
+Editor windows close when their effect leaves the chain (`remove_effect`, or an undo or redo that takes it out), when their file closes, and when the app quits. Exporting leaves them open. Opening an editor writes the crash marker the first time that plugin opens an editor in a session (see `take_startup_notices`).
 
 ### Event `fx-editor-closed`
 
@@ -666,10 +671,18 @@ A session file (`*.hdsession.json`) holds one tab's state: which WAV it refers t
 | `path` | string | Where to write the session, ending in `.hdsession.json` |
 | `replace` | boolean | Whether an existing file at `path` may be replaced |
 
-Captures the file's current edits and chain and writes them to `path`: each plugin's saved state (`getState`), plus parameter changes it hasn't processed yet (made while stopped). The WAV is described by its absolute path, its path relative to the session's folder, its format and length, and its size and modification time. The session is written to a temporary file next to the target and then renamed over it, so a failure leaves any existing file intact. Playback continues. Resolves `true` once written, or `false`, writing nothing, if a file exists at `path` and `replace` is false (the frontend then asks before trying again with `replace`).
+Captures the file's current edits and chain and writes them to `path`: each plugin's saved state (`getState`), plus parameter changes it hasn't processed yet (made while stopped). The WAV is described by its absolute path, its path relative to the session's folder, its format and length, and its size and modification time. The session is written to a temporary file next to the target and then renamed over it, so a failure leaves any existing file intact. Playback continues. Once written, the tab counts as saved: its `edit_state.dirty` is measured against the state that was captured, so a change made while saving still counts as unsaved. The undo history is kept.
+
+```ts
+interface SessionSaved {
+  written: boolean;      // false, writing nothing, if a file exists at `path` and `replace` is false
+                         // (the frontend then asks before trying again with `replace`)
+  editState: EditState;  // the tab's edit state afterwards
+}
+```
 
 Rejects:
-- with `The file is being saved` while the WAV is being saved;
+- with `The file is being exported` while the file is being exported;
 - with `“Effect” could not save its settings` if a plugin fails to report its state, writing nothing;
 - with `Could not save “mix.hdsession.json”: …` for I/O errors such as a missing or read-only folder.
 

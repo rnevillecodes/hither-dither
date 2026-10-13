@@ -2,6 +2,7 @@
 // the Add Effect browser and Manage Plugins.
 import * as api from "./api";
 import { notify } from "./notices.svelte";
+import { findTab } from "./tabs.svelte";
 
 /** An effect whose generic controls are showing. */
 export interface GenericTarget {
@@ -57,7 +58,21 @@ export function closeGeneric() {
   effectsUi.generic = null;
 }
 
-/** Follow editor windows closing in the backend (by the user, or as their effect went). */
+/**
+ * A plugin setting of file `fileId` changed: the tab has unsaved changes. The backend counts
+ * it too, and the next session save brings the two back in step.
+ */
+export function settingChanged(fileId: number) {
+  const tab = findTab(fileId);
+  if (tab) tab.dirty = true;
+}
+
+/**
+ * Follow editor windows closing in the backend (by the user, or as their effect went), and
+ * plugin settings changed in their own editors.
+ */
 export function initEffects() {
   void api.onEditorClosed(({ fileId, slotId }) => forgetEditor(fileId, slotId));
+  void api.onFxParamChanged(({ fileId }) => settingChanged(fileId));
+  void api.onFxParamsReset(({ fileId }) => settingChanged(fileId));
 }

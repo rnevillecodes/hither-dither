@@ -51,6 +51,11 @@ export function defaultSessionPath(tab: { path: string; sessionPath: string | nu
   return tab.path.replace(/\.wave?$/i, "") + SESSION_EXTENSION;
 }
 
+/** Where Export proposes writing: next to the WAV, with `-export` (`take.wav` → `take-export.wav`). */
+export function defaultExportPath(wavPath: string): string {
+  return wavPath.replace(/\.wave?$/i, "") + "-export.wav";
+}
+
 /**
  * `path` with the full session extension. Native dialogs handle a two-part extension
  * differently, so a name typed as `mix` or `mix.json` becomes `mix.hdsession.json`.

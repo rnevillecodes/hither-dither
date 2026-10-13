@@ -27,12 +27,12 @@
     canRedo,
     canSave,
     canSaveAs,
-    canSaveSession,
+    canExport,
     canUndo,
     redo,
     save,
     saveAs,
-    saveSession,
+    exportAudio,
     undo,
   } from "./lib/editActions";
   import { takeStartupNotices } from "./lib/api";
@@ -41,7 +41,7 @@
   import { notify } from "./lib/notices.svelte";
   import { initPlugins } from "./lib/plugins.svelte";
   import { runScrollBenchmark } from "./lib/perf";
-  import { readSession, writeSession } from "./lib/session";
+  import { readSession, rememberedPath, rememberedTabs, writeSession } from "./lib/session";
   import { samePath } from "./lib/tabOrder";
   import { activeTab, tabs } from "./lib/tabs.svelte";
   import { goToStart, initTransport, seek, togglePlay, transport } from "./lib/transport.svelte";
@@ -56,22 +56,23 @@
     .then((list) => list.forEach((n) => notify("warning", `${n.name} was disabled`, n.message)))
     .catch(() => {});
 
-  // Reopen the last session. This pushes its tabs synchronously, so the save effect
-  // below never sees an empty list first and overwrites the remembered session.
+  // Reopen the last session: WAVs and session files, as the tabs were remembered. Session
+  // files are read before their tabs appear, so nothing is remembered until this finishes,
+  // or an empty or partial list would overwrite the remembered one.
   const saved = readSession();
+  let restoring = $state(saved.paths.length > 0);
   if (saved.paths.length > 0) {
     void openPaths(saved.paths).then(() => {
+      restoring = false;
       const { active } = saved;
-      const tab = active === null ? undefined : tabs.list.find((t) => samePath(t.path, active));
+      const tab = active === null ? undefined : tabs.list.find((t) => samePath(rememberedPath(t), active));
       if (tab?.status === "ready") activateTab(tab.id);
     });
   }
 
   $effect(() => {
-    writeSession(
-      tabs.list.map((t) => t.path),
-      activeTab()?.path ?? null,
-    );
+    const remembered = rememberedTabs(tabs.list, activeTab());
+    if (!restoring) writeSession(remembered.paths, remembered.active);
   });
 
   const active = $derived(activeTab());
@@ -82,8 +83,7 @@
       "close-tab": tabs.list.length > 0,
       save: canSave(),
       "save-as": canSaveAs(),
-      "save-session": canSaveSession(),
-      "save-session-as": canSaveSession(),
+      export: canExport(),
       undo: canUndo(),
       redo: canRedo(),
       crop: canEdit("crop"),
@@ -136,12 +136,12 @@
       void redo();
       return;
     }
-    if (mod && e.altKey && !e.shiftKey && (e.key.toLowerCase() === "s" || e.code === "KeyS")) {
+    if (mod && !e.shiftKey && e.key.toLowerCase() === "e") {
       e.preventDefault();
-      void saveSession();
+      void exportAudio();
       return;
     }
-    if (mod && !e.altKey && e.key.toLowerCase() === "s") {
+    if (mod && e.key.toLowerCase() === "s") {
       e.preventDefault();
       void (e.shiftKey ? saveAs() : save());
       return;
@@ -222,7 +222,7 @@
           />
         {/key}
         {#if active.editing && active.progress.visible}
-          <ProgressOverlay name={active.name} fraction={active.progress.fraction} verb="Saving" />
+          <ProgressOverlay name={active.name} fraction={active.progress.fraction} verb="Exporting" />
         {/if}
       {:else if active}
         <!-- Still loading. The progress box appears once the load has lasted a moment. -->

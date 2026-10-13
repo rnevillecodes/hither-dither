@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { defaultSessionPath, isSessionPath, planOpens, withSessionExtension } from "./sessionFiles";
+import { defaultExportPath, defaultSessionPath, isSessionPath, planOpens, withSessionExtension } from "./sessionFiles";
+
+describe("defaultExportPath", () => {
+  it("sits next to the WAV with -export", () => {
+    expect(defaultExportPath("C:\\Takes\\take.wav")).toBe("C:\\Takes\\take-export.wav");
+    expect(defaultExportPath("/t/Take.WAVE")).toBe("/t/Take-export.wav");
+  });
+
+  it("adds the extension to a name without one", () => {
+    expect(defaultExportPath("/t/take")).toBe("/t/take-export.wav");
+  });
+});
 
 describe("planOpens", () => {
   const none = () => false;

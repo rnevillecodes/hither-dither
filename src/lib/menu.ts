@@ -8,8 +8,7 @@ import {
   redo,
   save,
   saveAs,
-  saveSession,
-  saveSessionAs,
+  exportAudio,
   toggleBypassAll,
   undo,
 } from "./editActions";
@@ -21,8 +20,7 @@ export type ToggleId =
   | "close-tab"
   | "save"
   | "save-as"
-  | "save-session"
-  | "save-session-as"
+  | "export"
   | "undo"
   | "redo"
   | "crop"
@@ -87,8 +85,8 @@ export async function installMenu(): Promise<void> {
       await MenuItem.new({ id: "open", text: "Open…", accelerator: "CmdOrCtrl+O", action: () => void openDialog() }),
       await toggle("save", "Save", () => void save(), "CmdOrCtrl+S"),
       await toggle("save-as", "Save As…", () => void saveAs(), "CmdOrCtrl+Shift+S"),
-      await toggle("save-session", "Save Session", () => void saveSession(), "CmdOrCtrl+Alt+S"),
-      await toggle("save-session-as", "Save Session As…", () => void saveSessionAs()),
+      await PredefinedMenuItem.new({ item: "Separator" }),
+      await toggle("export", "Export…", () => void exportAudio(), "CmdOrCtrl+E"),
       await PredefinedMenuItem.new({ item: "Separator" }),
       await toggle("close-tab", "Close Tab", closeActiveTab, "CmdOrCtrl+W"),
       await PredefinedMenuItem.new({ item: "Separator" }),

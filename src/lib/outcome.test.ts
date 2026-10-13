@@ -19,7 +19,6 @@ function outcome(chain: ChainInfo, dirty: boolean): EditOutcome {
     },
     chain,
     audioChanged: false,
-    clampedSamples: 0,
   };
 }
 

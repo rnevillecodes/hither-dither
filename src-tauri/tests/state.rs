@@ -499,38 +499,6 @@ fn closing_during_analysis_resolves_waiters() {
     assert!(state.get(1).is_none() && state.edit_state(1).is_none());
 }
 
-#[test]
-fn save_before_the_analysis_finishes_is_exact() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = AppState::default();
-    open_float_sine(&state, &dir, 1, 60_000);
-    state
-        .apply_edit(1, EditOp::FadeOut, 0, 60_000, -0.5)
-        .unwrap();
-    open_rendered(&state, &dir, 1, 2);
-    let copy = dir.path().join("saved.wav");
-    let mut last = (0, 0);
-    state
-        .save(1, Some(&copy), |done, total| last = (done, total))
-        .unwrap();
-    // Analysing and writing each take one pass.
-    assert_eq!(last, (120_000, 120_000));
-    assert_eq!(whole_stats(&state, 1), whole_stats(&state, 2));
-    assert!(!state.clip_runs(1).unwrap().pending);
-    assert_eq!(
-        encode_peaks(&state.get(1).unwrap(), 0, 60_000, 300),
-        encode_peaks(&state.get(2).unwrap(), 0, 60_000, 300)
-    );
-    // Saving an analysed state only writes.
-    state.apply_edit(1, EditOp::Silence, 0, 10, 0.0).unwrap();
-    let rev = state.edit_state(1).unwrap().revision;
-    assert!(state.wait_analysis(1, rev));
-    state
-        .save(1, Some(&copy), |done, total| last = (done, total))
-        .unwrap();
-    assert_eq!(last, (60_000, 60_000));
-}
-
 fn frames_on_disk(path: &std::path::Path) -> u64 {
     hither_dither_lib::wav::parse_header(&std::fs::read(path).unwrap())
         .unwrap()
@@ -538,7 +506,7 @@ fn frames_on_disk(path: &std::path::Path) -> u64 {
 }
 
 #[test]
-fn save_as_leaves_the_source_alone() {
+fn export_writes_the_edits_and_leaves_the_tab_alone() {
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::default();
     open_sine(&state, &dir, 1, 8_000);
@@ -548,45 +516,43 @@ fn save_as_leaves_the_source_alone() {
         .apply_edit(1, EditOp::Delete, 1_000, 3_000, 0.0)
         .unwrap();
     let edited_stats = analysed_stats(&state, 1);
+    let before = state.edit_state(1).unwrap();
 
     let copy = dir.path().join("trimmed.wav");
-    let out = state.save(1, Some(&copy), |_, _| {}).unwrap();
+    let mut last = (0, 0);
+    let out = state
+        .export(1, &copy, |done, total| last = (done, total))
+        .unwrap();
+    assert_eq!(out.clamped_samples, 0);
+    // One writing pass, with no analysis first.
+    assert_eq!(last, (6_000, 6_000));
     assert_eq!(std::fs::read(&source).unwrap(), original);
     assert_eq!(frames_on_disk(&copy), 6_000);
-    assert_eq!(out.metadata.name, "trimmed.wav");
-    assert_eq!(out.metadata.frames, 6_000);
-    assert!(!out.edit_state.dirty && !out.edit_state.can_undo && !out.edit_state.can_redo);
-    assert_eq!(state.get(1).unwrap().metadata.path, copy);
-    // Same audio, so the same stats, now served from the saved file.
+    // The tab still edits the source, with its history and stats.
+    let file = state.get(1).unwrap();
+    assert_eq!(
+        (file.metadata.path.clone(), file.metadata.frames),
+        (source, 6_000)
+    );
+    drop(file);
+    assert_eq!(state.edit_state(1).unwrap(), before);
+    assert!(before.dirty && before.can_undo);
     assert_eq!(whole_stats(&state, 1), edited_stats);
-    assert!(state.compute_stats(1, Some((0, 100))).unwrap().is_some());
 }
 
 #[test]
-fn save_replaces_the_original() {
+fn export_refuses_the_audio_being_edited() {
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::default();
     open_sine(&state, &dir, 1, 8_000);
     let path = dir.path().join("sine1.wav");
+    let original = std::fs::read(&path).unwrap();
     state
         .apply_edit(1, EditOp::Crop, 2_000, 7_500, 0.0)
         .unwrap();
-    state
-        .apply_edit(1, EditOp::FadeOut, 5_000, 5_500, 0.0)
-        .unwrap();
-    let out = state.save(1, None, |_, _| {}).unwrap();
-    assert_eq!(out.metadata.frames, 5_500);
-    assert_eq!(frames_on_disk(&path), 5_500);
-    assert!(!out.edit_state.dirty);
-    // The tab keeps working from the replaced file, and further edits can be saved too.
-    let file = state.get(1).unwrap();
-    assert!(!file.changed_on_disk());
-    let tile = encode_peaks(&file, 0, 5_500, 100);
-    assert_eq!(header(&tile).2, 100);
-    drop(file);
-    state.apply_edit(1, EditOp::Delete, 0, 500, 0.0).unwrap();
-    state.save(1, None, |_, _| {}).unwrap();
-    assert_eq!(frames_on_disk(&path), 5_000);
+    let err = state.export(1, &path, |_, _| {}).unwrap_err();
+    assert!(err.contains("can't be overwritten"), "{err}");
+    assert_eq!(std::fs::read(&path).unwrap(), original);
     // No temporary files are left behind.
     let names: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
@@ -596,41 +562,35 @@ fn save_replaces_the_original() {
 }
 
 #[test]
-fn save_refuses_when_the_original_changed() {
+fn exporting_again_replaces_an_earlier_export() {
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::default();
     open_sine(&state, &dir, 1, 8_000);
-    state.apply_edit(1, EditOp::Silence, 0, 100, 0.0).unwrap();
-    use std::io::Write;
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(dir.path().join("sine1.wav"))
+    let copy = dir.path().join("sine1-export.wav");
+    state.apply_edit(1, EditOp::Crop, 0, 6_000, 0.0).unwrap();
+    state.export(1, &copy, |_, _| {}).unwrap();
+    assert_eq!(frames_on_disk(&copy), 6_000);
+    state.apply_edit(1, EditOp::Delete, 0, 1_000, 0.0).unwrap();
+    state.export(1, &copy, |_, _| {}).unwrap();
+    assert_eq!(frames_on_disk(&copy), 5_000);
+    let mut names: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
-        .write_all(&[0; 10])
-        .unwrap();
-    let err = state.save(1, None, |_, _| {}).unwrap_err();
-    assert!(
-        err.contains("changed on disk") && err.contains("Save As"),
-        "{err}"
-    );
-    assert!(state.edit_state(1).unwrap().dirty);
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["sine1-export.wav", "sine1.wav"]);
 }
 
 #[test]
-fn failed_save_keeps_the_edits() {
+fn a_failed_export_keeps_everything() {
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::default();
     open_sine(&state, &dir, 1, 8_000);
     let original = std::fs::read(dir.path().join("sine1.wav")).unwrap();
     state.apply_edit(1, EditOp::Crop, 0, 1_000, 0.0).unwrap();
-    let err = state
-        .save(
-            1,
-            Some(&dir.path().join("missing-dir").join("x.wav")),
-            |_, _| {},
-        )
-        .unwrap_err();
-    assert!(err.starts_with("Could not save “x.wav”"), "{err}");
+    let target = dir.path().join("missing-dir").join("x.wav");
+    let err = state.export(1, &target, |_, _| {}).unwrap_err();
+    assert!(err.starts_with("Could not export “x.wav”"), "{err}");
     let st = state.edit_state(1).unwrap();
     assert!(st.dirty && st.can_undo);
     assert_eq!(state.get(1).unwrap().metadata.frames, 1_000);
@@ -727,7 +687,7 @@ fn delete_creates_a_join_whose_crossfade_is_clamped() {
 }
 
 #[test]
-fn saving_bakes_the_clip_settings() {
+fn exporting_writes_the_clip_settings_and_keeps_them() {
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::default();
     open_sine(&state, &dir, 1, 8_000);
@@ -735,15 +695,22 @@ fn saving_bakes_the_clip_settings() {
         .set_clip(1, clip((500, 7_500), (300, 0.0), (300, -0.5)))
         .unwrap();
     let shown = analysed_stats(&state, 1);
+    let before = state.clip(1).unwrap();
     let copy = dir.path().join("shaped.wav");
-    let out = state.save(1, Some(&copy), |_, _| {}).unwrap();
+    state.export(1, &copy, |_, _| {}).unwrap();
     assert_eq!(frames_on_disk(&copy), 7_000);
-    assert_eq!(out.clip.untrimmed_frames, 7_000);
-    assert_eq!((out.clip.trim_start, out.clip.trim_end), (0, 7_000));
-    assert_eq!(out.clip.fade_in.len + out.clip.fade_out.len, 0);
-    assert!(out.clip.joins.is_empty());
-    assert_eq!(whole_stats(&state, 1), shown);
-    assert_eq!(state.clip(1).unwrap(), out.clip);
+    // The handles stay where they were.
+    assert_eq!(state.clip(1).unwrap(), before);
+    assert_eq!((before.trim_start, before.trim_end), (500, 7_500));
+    // The exported audio is what was shown, to within 16-bit rounding.
+    state.open(2, &copy, |_, _| {}).unwrap();
+    let exported = whole_stats(&state, 2);
+    assert_eq!(exported.end, shown.end);
+    for (e, s) in exported.channels.iter().zip(&shown.channels) {
+        assert!((e.levels.peak_linear - s.levels.peak_linear).abs() < 1e-4);
+        let (e, s) = (e.levels.rms_dbfs.unwrap(), s.levels.rms_dbfs.unwrap());
+        assert!((e - s).abs() < 0.01, "{e} vs {s}");
+    }
 }
 
 #[test]
@@ -921,7 +888,7 @@ fn an_effect_alone_marks_the_file_unsaved() {
 }
 
 #[test]
-fn everything_bypassed_is_not_unsaved() {
+fn bypassing_is_outside_the_history_but_unsaved() {
     let fx = effects();
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::default();
@@ -929,25 +896,24 @@ fn everything_bypassed_is_not_unsaved() {
     let slot = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[0];
 
     let out = state.set_effect_bypass(1, slot, true).unwrap();
-    assert!(out.chain.effects[0].bypassed && !out.edit_state.dirty);
+    assert!(out.chain.effects[0].bypassed && out.edit_state.dirty);
     // Skipped by the host, so its latency no longer counts.
     assert_eq!(out.chain.latency, 0);
     assert!(state.get(1).unwrap().chain.processed().next().is_none());
     let out = state.set_effect_bypass(1, slot, false).unwrap();
-    assert!(out.edit_state.dirty && out.chain.latency == 64);
+    assert_eq!(out.chain.latency, 64);
 
     let out = state.set_bypass_all(1, true).unwrap();
-    assert!(out.chain.bypass_all && !out.edit_state.dirty);
+    assert!(out.chain.bypass_all);
     assert!(!state.get(1).unwrap().chain.is_active());
     // Bypassing isn't an undo step: undo removes the effect, and Bypass All stays on.
+    // Back at the state as opened, the tab is still unsaved: a switch changed meanwhile.
     let out = state.undo(1).unwrap();
     assert!(out.chain.effects.is_empty() && out.chain.bypass_all);
-    assert!(!out.edit_state.dirty && !out.edit_state.can_undo);
+    assert!(out.edit_state.dirty && !out.edit_state.can_undo);
     assert!(state.set_effect_bypass(1, slot, true).is_err());
     let out = state.redo(1).unwrap();
     assert_eq!(slot_ids(&out.chain), [slot]);
-    assert!(!out.edit_state.dirty);
-    assert!(state.set_bypass_all(1, false).unwrap().edit_state.dirty);
 }
 
 #[test]
@@ -1130,7 +1096,7 @@ fn effects_are_applied_with_latency_removed() {
     let copy = dir.path().join("doubled.wav");
     let mut last = (0, 0);
     let out = state
-        .save(1, Some(&copy), |done, total| last = (done, total))
+        .export(1, &copy, |done, total| last = (done, total))
         .unwrap();
     // Rendering, writing and analysing are one pass.
     assert_eq!(last, (80_000, 80_000));
@@ -1144,7 +1110,7 @@ fn effects_are_applied_with_latency_removed() {
 }
 
 #[test]
-fn a_bypassed_chain_saves_bit_exact() {
+fn a_bypassed_chain_exports_bit_exact() {
     let fx = effects();
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::default();
@@ -1159,14 +1125,15 @@ fn a_bypassed_chain_saves_bit_exact() {
     state.set_bypass_all(1, true).unwrap();
 
     let copy = dir.path().join("bypassed.wav");
-    let out = state.save(1, Some(&copy), |_, _| {}).unwrap();
+    let out = state.export(1, &copy, |_, _| {}).unwrap();
     let frames = |p: &std::path::Path| {
         let src = SampleSource::open(p).unwrap();
         src.frame_bytes(0, src.frames() as usize).to_vec()
     };
     assert_eq!(frames(&copy), frames(&source));
-    // Saving empties the chain all the same.
-    assert!(out.chain.effects.is_empty());
+    // The chain stays as it was.
+    assert_eq!(out.clamped_samples, 0);
+    assert_eq!(state.get_chain(1).unwrap().effects.len(), 1);
 }
 
 #[test]
@@ -1185,7 +1152,7 @@ fn too_much_gain_counts_the_clamped_samples() {
     );
     add_double(&state, &fx, 1);
     let copy = dir.path().join("clipped.wav");
-    let out = state.save(1, Some(&copy), |_, _| {}).unwrap();
+    let out = state.export(1, &copy, |_, _| {}).unwrap();
     assert!(out.clamped_samples > 0);
     let saved = native_samples(&copy);
     let at_limit = saved
@@ -1210,7 +1177,7 @@ fn a_float_file_keeps_its_overs() {
     );
     add_double(&state, &fx, 1);
     let copy = dir.path().join("overs.wav");
-    let out = state.save(1, Some(&copy), |_, _| {}).unwrap();
+    let out = state.export(1, &copy, |_, _| {}).unwrap();
     assert_eq!(out.clamped_samples, 0);
     let max = native_samples(&copy)
         .iter()
@@ -1219,7 +1186,8 @@ fn a_float_file_keeps_its_overs() {
 }
 
 #[test]
-fn effects_are_baked_in() {
+fn exporting_keeps_the_effects_and_their_settings() {
+    use hither_dither_lib::fx::chain::LIVE_BLOCK;
     let fx = effects();
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::default();
@@ -1231,32 +1199,26 @@ fn effects_are_baked_in() {
         0.4,
     );
     let slot = add_double(&state, &fx, 1);
-    let weak = Arc::downgrade(&state.slot(1, slot).unwrap());
     let dry = whole_stats(&state, 1);
+    let (chain, st) = (state.get_chain(1).unwrap(), state.edit_state(1).unwrap());
 
-    let copy = dir.path().join("baked.wav");
-    let out = state.save(1, Some(&copy), |_, _| {}).unwrap();
-    assert!(out.chain.effects.is_empty() && out.audio_changed);
-    assert!(!out.edit_state.dirty && !out.edit_state.can_undo);
-    assert_eq!(state.get_chain(1).unwrap().effects.len(), 0);
-    // The effect has been released.
-    assert!(weak.upgrade().is_none());
-
-    // The statistics and clip markers describe the saved, processed audio, and are exact.
-    let baked = whole_stats(&state, 1);
-    assert!(!state.clip_runs(1).unwrap().pending);
+    let copy = dir.path().join("processed.wav");
+    state.export(1, &copy, |_, _| {}).unwrap();
+    // The same effect, with its setting, back to playing in real time.
+    assert_eq!(state.get_chain(1).unwrap(), chain);
+    assert_eq!(gain_of(&state, 1, slot), plus_6db());
+    let config = state.slot(1, slot).unwrap().instance().config().unwrap();
+    assert!(!config.offline && config.max_block == LIVE_BLOCK);
+    assert_eq!(state.edit_state(1).unwrap(), st);
+    // The tab's statistics still describe the audio before effects; the export has them.
+    assert_eq!(whole_stats(&state, 1), dry);
     state.open(2, &copy, |_, _| {}).unwrap();
-    assert_eq!(baked, whole_stats(&state, 2));
     let peak = |s: &hither_dither_lib::stats::Stats| s.channels[0].levels.peak_dbfs.unwrap();
-    assert!((peak(&baked) - peak(&dry) - 6.02).abs() < 0.01);
-    assert_eq!(
-        encode_peaks(&state.get(1).unwrap(), 0, 80_000, 300),
-        encode_peaks(&state.get(2).unwrap(), 0, 80_000, 300)
-    );
+    assert!((peak(&whole_stats(&state, 2)) - peak(&dry) - 6.02).abs() < 0.01);
 }
 
 #[test]
-fn a_failed_save_with_effects_keeps_the_chain() {
+fn a_failed_export_with_effects_keeps_the_chain() {
     use hither_dither_lib::fx::chain::LIVE_BLOCK;
     let fx = effects();
     let dir = tempfile::tempdir().unwrap();
@@ -1274,8 +1236,8 @@ fn a_failed_save_with_effects_keeps_the_chain() {
 
     // The folder can't be written to.
     let target = dir.path().join("missing-dir").join("x.wav");
-    let err = state.save(1, Some(&target), |_, _| {}).unwrap_err();
-    assert!(err.starts_with("Could not save “x.wav”"), "{err}");
+    let err = state.export(1, &target, |_, _| {}).unwrap_err();
+    assert!(err.starts_with("Could not export “x.wav”"), "{err}");
     // The chain, the effect's settings and the edits are kept.
     assert_eq!(state.get_chain(1).unwrap(), before);
     assert_eq!(gain_of(&state, 1, slot), plus_6db());
@@ -1284,9 +1246,9 @@ fn a_failed_save_with_effects_keeps_the_chain() {
     // The effect is back to processing for playback.
     let config = state.slot(1, slot).unwrap().instance().config().unwrap();
     assert!(!config.offline && config.max_block == LIVE_BLOCK);
-    // And a later save still applies it.
+    // And a later export still applies it.
     let copy = dir.path().join("retry.wav");
-    state.save(1, Some(&copy), |_, _| {}).unwrap();
+    state.export(1, &copy, |_, _| {}).unwrap();
     assert!(native_samples(&copy).iter().any(|v| v.abs() > 16_384.0));
 }
 
@@ -1501,9 +1463,9 @@ fn saving_a_session_replaces_the_file_only_when_complete() {
     let path = dir.path().join("mix.hdsession.json");
     std::fs::write(&path, "old").unwrap();
     // Without permission to replace it, an existing file is left alone.
-    assert!(!state.save_session(1, &path, false).unwrap());
+    assert!(!state.save_session(1, &path, false).unwrap().written);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
-    assert!(state.save_session(1, &path, true).unwrap());
+    assert!(state.save_session(1, &path, true).unwrap().written);
     assert!(SessionFile::read(&path).is_ok());
 
     let missing = dir.path().join("missing").join("mix.hdsession.json");
@@ -1557,14 +1519,14 @@ fn a_restored_session_sounds_and_saves_the_same() {
     state.save_session(1, &session, true).unwrap();
     let (clip, chain) = (state.clip(1).unwrap(), state.get_chain(1).unwrap());
     let first = dir.path().join("first.wav");
-    state.save(1, Some(&first), |_, _| {}).unwrap();
+    state.export(1, &first, |_, _| {}).unwrap();
 
     // Reopened from the session in another tab.
     state.open(2, &source, |_, _| {}).unwrap();
     let out = state.restore_session(2, &session, &fx.plugins).unwrap();
     assert!(out.warnings.is_empty() && !out.wav_changed);
-    // A fresh history at the restored state, which differs from the file on disk.
-    assert!(out.edit_state.dirty && !out.edit_state.can_undo && !out.edit_state.can_redo);
+    // A fresh history at the restored state, which matches its session file.
+    assert!(!out.edit_state.dirty && !out.edit_state.can_undo && !out.edit_state.can_redo);
     assert_eq!(state.clip(2).unwrap(), clip);
     let restored = state.get_chain(2).unwrap();
     assert_eq!(effect_names(&restored), effect_names(&chain));
@@ -1573,13 +1535,14 @@ fn a_restored_session_sounds_and_saves_the_same() {
     // The next change can be undone back to the restored state, not past it.
     let silenced = state.apply_edit(2, EditOp::Silence, 0, 100, 0.0).unwrap();
     assert!(silenced.edit_state.can_undo);
+    assert!(silenced.edit_state.dirty);
     let undone = state.undo(2).unwrap();
-    assert!(!undone.edit_state.can_undo && undone.edit_state.dirty);
+    assert!(!undone.edit_state.can_undo && !undone.edit_state.dirty);
     assert_eq!(state.clip(2).unwrap(), clip);
 
     // Saved through the restored chain, the audio is identical.
     let second = dir.path().join("second.wav");
-    state.save(2, Some(&second), |_, _| {}).unwrap();
+    state.export(2, &second, |_, _| {}).unwrap();
     assert_eq!(native_samples(&second), native_samples(&first));
 }
 
@@ -1654,7 +1617,7 @@ fn a_touched_wav_is_restored_with_a_warning() {
     state.open(2, &wav, |_, _| {}).unwrap();
     let out = state.restore_session(2, &session, &fx.plugins).unwrap();
     assert!(out.wav_changed);
-    assert!(out.edit_state.dirty);
+    assert!(!out.edit_state.dirty);
 }
 
 #[test]
@@ -1767,4 +1730,123 @@ fn restored_edits_are_analysed() {
     let out = state.restore_session(2, &session, &fx.plugins).unwrap();
     assert!(out.edit_state.revision > 0);
     assert_eq!(analysed_stats(&state, 2), expected);
+}
+
+// --- Unsaved changes, measured against the saved session ---------------------------------
+
+#[test]
+fn an_edit_marks_the_tab_and_undoing_it_clears_the_mark() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    assert!(!state.edit_state(1).unwrap().dirty, "fresh from the WAV");
+    let out = state.apply_edit(1, EditOp::Silence, 0, 100, 0.0).unwrap();
+    assert!(out.edit_state.dirty);
+    assert!(!state.undo(1).unwrap().edit_state.dirty);
+    assert!(state.redo(1).unwrap().edit_state.dirty);
+}
+
+#[test]
+fn a_plugin_setting_marks_the_tab_until_saved() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let slot = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[0];
+    state.undo(1).unwrap();
+    state.redo(1).unwrap();
+    // Back where it was after adding: the effect alone is the unsaved change.
+    assert!(state.edit_state(1).unwrap().dirty);
+
+    // From the generic controls.
+    state.set_fx_param(1, slot, GAIN_PARAM, plus_6db()).unwrap();
+    let st = state.edit_state(1).unwrap();
+    assert!(st.dirty && st.can_undo);
+    // Undoing to the state as opened doesn't take back the setting, so it stays unsaved.
+    assert!(state.undo(1).unwrap().edit_state.dirty);
+}
+
+#[test]
+fn a_change_in_a_plugin_editor_marks_the_tab() {
+    use vst3::Steinberg::Vst::IComponentHandlerTrait;
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let slot = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[0];
+    state.set_effect_bypass(1, slot, true).unwrap();
+    let session = dir.path().join("mix.hdsession.json");
+    state.save_session(1, &session, true).unwrap();
+    // Reopened from the session: clean until a knob turns in the editor.
+    state
+        .open(2, &dir.path().join("sine1.wav"), |_, _| {})
+        .unwrap();
+    state.restore_session(2, &session, &fx.plugins).unwrap();
+    assert!(!state.edit_state(2).unwrap().dirty);
+    let restored = slot_ids(&state.get_chain(2).unwrap())[0];
+    let instance = state.slot(2, restored).unwrap();
+    unsafe { instance.instance().handler().performEdit(GAIN_PARAM, 0.25) };
+    assert!(state.edit_state(2).unwrap().dirty);
+}
+
+#[test]
+fn a_change_after_restoring_marks_the_tab() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    state.add_effect(1, &fx.plugins, fx.gain).unwrap();
+    let session = dir.path().join("mix.hdsession.json");
+    state.save_session(1, &session, true).unwrap();
+    state.close(1);
+
+    state
+        .open(2, &dir.path().join("sine1.wav"), |_, _| {})
+        .unwrap();
+    let out = state.restore_session(2, &session, &fx.plugins).unwrap();
+    assert!(!out.edit_state.dirty && !out.edit_state.can_undo);
+    let slot = slot_ids(&state.get_chain(2).unwrap())[0];
+    assert!(
+        state
+            .set_effect_bypass(2, slot, true)
+            .unwrap()
+            .edit_state
+            .dirty
+    );
+}
+
+#[test]
+fn saving_the_session_clears_the_unsaved_mark() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let wav = dir.path().join("sine1.wav");
+    let before = std::fs::read(&wav).unwrap();
+    state.apply_edit(1, EditOp::Silence, 0, 100, 0.0).unwrap();
+    let path = dir.path().join("mix.hdsession.json");
+    let saved = state.save_session(1, &path, true).unwrap();
+    assert!(saved.written && !saved.edit_state.dirty);
+    // The history stays, and the WAV is as it was.
+    assert!(saved.edit_state.can_undo);
+    assert_eq!(std::fs::read(&wav).unwrap(), before);
+
+    // Undo leaves the saved state; redo comes back to it.
+    assert!(state.undo(1).unwrap().edit_state.dirty);
+    assert!(!state.redo(1).unwrap().edit_state.dirty);
+}
+
+#[test]
+fn a_session_not_written_leaves_the_tab_unsaved() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    state.apply_edit(1, EditOp::Silence, 0, 100, 0.0).unwrap();
+    let path = dir.path().join("mix.hdsession.json");
+    std::fs::write(&path, "old").unwrap();
+    let saved = state.save_session(1, &path, false).unwrap();
+    assert!(!saved.written && saved.edit_state.dirty);
+    // A failed write doesn't count as saved either.
+    let missing = dir.path().join("missing").join("mix.hdsession.json");
+    assert!(state.save_session(1, &missing, true).is_err());
+    assert!(state.edit_state(1).unwrap().dirty);
 }

@@ -19,8 +19,8 @@ use crate::plugins::instance::Param;
 use crate::plugins::scan::Scanner;
 use crate::session::SessionFile;
 use crate::state::{
-    AppState, ClipInfo, ClipRuns, ClipSettings, EditOp, EditOutcome, FadeSetting, FileId,
-    LoadedFile, Metadata, Preview, RestoreOutcome,
+    AppState, ClipInfo, ClipRuns, ClipSettings, EditOp, EditOutcome, ExportOutcome, FadeSetting,
+    FileId, LoadedFile, Metadata, Preview, RestoreOutcome, SessionSaved,
 };
 use crate::stats::Stats;
 
@@ -225,40 +225,36 @@ pub async fn redo_edit(
     chain_change(state, player, editors, file_id, move |s| s.redo(file_id)).await
 }
 
-/// Write `file_id`'s audio to `path`, or over its own file when `path` is null.
+/// Render `file_id`'s edited audio, through its active effects, to a new WAV at `path`.
+/// The tab is left as it is.
 #[tauri::command]
-pub async fn save_file(
+pub async fn export_file(
     state: State<'_, SharedState>,
     player: State<'_, SharedPlayer>,
-    editors: State<'_, SharedEditors>,
     file_id: FileId,
-    path: Option<PathBuf>,
+    path: PathBuf,
     on_progress: Channel<LoadProgress>,
-) -> Result<EditOutcome, String> {
+) -> Result<ExportOutcome, String> {
     let state = state.inner().clone();
     let player = player.inner().clone();
-    let editors = editors.inner().clone();
     blocking(move || {
-        // Playback holds the file's mapping, which must be released to replace it.
+        // Offline rendering takes the effects away from playback.
         stop_playing(&state, &player, file_id);
-        let saved = state.save(file_id, path.as_deref(), throttled(on_progress));
-        // A successful save empties the chain.
-        close_removed_editors(&state, &editors, file_id);
-        saved
+        state.export(file_id, &path, throttled(on_progress))
     })
     .await?
 }
 
 /// Save `file_id`'s edits and effects, with every plugin's settings, as a session file at
-/// `path`. The WAV is not written. Resolves false, writing nothing, if `path` exists and
-/// `replace` is false.
+/// `path`, after which the tab counts as saved. The WAV is not written. Nothing is written
+/// (`written: false`) if `path` exists and `replace` is false.
 #[tauri::command]
 pub async fn save_session(
     state: State<'_, SharedState>,
     file_id: FileId,
     path: PathBuf,
     replace: bool,
-) -> Result<bool, String> {
+) -> Result<SessionSaved, String> {
     let state = state.inner().clone();
     blocking(move || state.save_session(file_id, &path, replace)).await?
 }

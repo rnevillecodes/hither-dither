@@ -34,3 +34,16 @@ export function writeSession(paths: readonly string[], active: string | null): v
     // Storage unavailable: the next launch starts empty.
   }
 }
+
+/** What a tab is remembered by: its session file if it has one, else its WAV. */
+export function rememberedPath(tab: { path: string; sessionPath: string | null }): string {
+  return tab.sessionPath ?? tab.path;
+}
+
+/** The open tabs as the next launch reopens them, and the active one. */
+export function rememberedTabs(
+  tabs: readonly { path: string; sessionPath: string | null }[],
+  active: { path: string; sessionPath: string | null } | null,
+): Session {
+  return { paths: tabs.map(rememberedPath), active: active ? rememberedPath(active) : null };
+}

@@ -228,7 +228,6 @@ export interface EditOutcome {
   /** False for chain changes: the revision, peaks and analysis are unchanged. */
   audioChanged: boolean;
   /** From a save: processed samples clamped to fit an integer format (0 otherwise). */
-  clampedSamples: number;
 }
 
 function progressChannel(onProgress: (p: LoadProgress) => void): Channel<LoadProgress> {
@@ -283,8 +282,14 @@ export function previewEdits(fileId: number, preview: Preview | null): Promise<v
  * Write the file's audio to `path`, or over its own file when `path` is null. This renders
  * the edits (analysing them first if that hasn't finished); `onProgress` covers both.
  */
-export function saveFile(fileId: number, path: string | null, onProgress: (p: LoadProgress) => void): Promise<EditOutcome> {
-  return invoke("save_file", { fileId, path, onProgress: progressChannel(onProgress) });
+export interface ExportOutcome {
+  /** Processed samples clamped to fit the file's integer format. */
+  clampedSamples: number;
+}
+
+/** Render the edited audio, through its active effects, to a new WAV. The tab is left as it is. */
+export function exportFile(fileId: number, path: string, onProgress: (p: LoadProgress) => void): Promise<ExportOutcome> {
+  return invoke("export_file", { fileId, path, onProgress: progressChannel(onProgress) });
 }
 
 // --- Session files ---------------------------------------------------------------------
@@ -308,11 +313,17 @@ export interface RestoreOutcome {
   warnings: EffectWarning[];
 }
 
+export interface SessionSaved {
+  /** False, writing nothing, when the file exists and `replace` was false. */
+  written: boolean;
+  editState: EditState;
+}
+
 /**
- * Write the file's edits and effects to a session file. The WAV is not written. Resolves
- * false, writing nothing, when `path` exists and `replace` is false.
+ * Write the file's edits and effects to a session file, after which the tab counts as saved.
+ * The WAV is not written.
  */
-export function saveSession(fileId: number, path: string, replace: boolean): Promise<boolean> {
+export function saveSession(fileId: number, path: string, replace: boolean): Promise<SessionSaved> {
   return invoke("save_session", { fileId, path, replace });
 }
 

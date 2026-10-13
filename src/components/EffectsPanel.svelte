@@ -118,7 +118,7 @@
   </header>
 
   {#if effects.length === 0}
-    <p class="dim">Add effects to hear them as you play. They're applied to the file when you save.</p>
+    <p class="dim">Add effects to hear them as you play. They're written into the audio when you export.</p>
   {:else}
     <div class="chain-wrap">
       <ol class="chain" class:dragging={dragSlot !== null} bind:this={list} aria-label="Effects in processing order">

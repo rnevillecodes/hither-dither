@@ -6,7 +6,7 @@ import { askFadeCurve, curveDialog } from "./curveDialog.svelte";
 import { type EditKind, afterEdit, canApply, remapFrame } from "./editRules";
 import { notify } from "./notices.svelte";
 import { setEditState, showChainOutcome } from "./outcome";
-import { defaultSessionPath, withSessionExtension } from "./sessionFiles";
+import { defaultExportPath, defaultSessionPath, withSessionExtension } from "./sessionFiles";
 import { samePath } from "./tabOrder";
 import { type Tab, activeTab, findTab, tabs } from "./tabs.svelte";
 import { prefetchPeaks } from "./waveform/prefetch";
@@ -320,11 +320,18 @@ async function showAnalysis(tab: Tab, whole: api.Stats, clipRuns: api.ClipRuns) 
   else if (tab.statsPending && tabs.activeId === tab.id) void setSelection(tab.selection);
 }
 
+/** File › Save is available: loaded, not exporting, and unsaved or without a session file yet. */
 export function canSave(): boolean {
-  return !!editableTab()?.dirty;
+  const tab = editableTab();
+  return !!tab && (tab.dirty || !tab.sessionPath);
 }
 
+/** File › Save As and Export are available: the active tab is loaded and not exporting. */
 export function canSaveAs(): boolean {
+  return !!editableTab();
+}
+
+export function canExport(): boolean {
   return !!editableTab();
 }
 
@@ -337,67 +344,28 @@ function duplicatePress(): boolean {
   return dup;
 }
 
-/** File › Save: overwrite the active tab's file, confirming the first time. */
+/** File › Save: write the active tab's session file, or ask where the first time. */
 export async function save(): Promise<boolean> {
   const tab = editableTab();
-  if (!tab?.dirty || duplicatePress()) return false;
-  if (!tab.overwriteConfirmed) {
-    const choice = await message(
-      `Overwrite “${tab.name}”?
-
-Its original audio will be replaced and can't be recovered.`,
-      { title: "Save", kind: "warning", buttons: { ok: "Overwrite", cancel: "Cancel" } },
-    );
-    if (choice !== "Overwrite") return false;
-    tab.overwriteConfirmed = true;
-  }
-  return saveTab(tab, null);
+  if (!tab || duplicatePress()) return false;
+  return saveTabSession(tab);
 }
 
-/** File › Save As: write the active tab's audio to a new file and switch the tab to it. */
+/** File › Save As: save the active tab's session to a new session file. */
 export async function saveAs(): Promise<boolean> {
-  const tab = editableTab();
-  if (!tab || duplicatePress()) return false;
-  const path = await saveDialog({
-    title: "Save As",
-    defaultPath: tab.path,
-    filters: [{ name: "WAV audio", extensions: ["wav"] }],
-  });
-  if (!path || !findTab(tab.id)) return false;
-  const itself = samePath(path, tab.path);
-  const other = tabs.list.find((t) => t.id !== tab.id && samePath(t.path, path));
-  if (other) {
-    notify("error", "Could not save", `“${other.name}” is open in another tab. Close it first, or choose another name.`);
-    return false;
-  }
-  // The save dialog has already asked about replacing an existing file.
-  const ok = await saveTab(tab, itself ? null : path);
-  if (ok) tab.overwriteConfirmed = true;
-  return ok;
-}
-
-/** Whether File › Save Session (As) is available: the active tab is loaded and not saving. */
-export function canSaveSession(): boolean {
-  return !!editableTab();
-}
-
-/** File › Save Session: overwrite the tab's session file, or ask where the first time. */
-export async function saveSession(): Promise<boolean> {
-  const tab = editableTab();
-  if (!tab || duplicatePress()) return false;
-  return tab.sessionPath ? writeSession(tab, tab.sessionPath, true) : askSessionPath(tab);
-}
-
-/** File › Save Session As: save the active tab's session to a new file. */
-export async function saveSessionAs(): Promise<boolean> {
   const tab = editableTab();
   if (!tab || duplicatePress()) return false;
   return askSessionPath(tab);
 }
 
+/** Save `tab`'s session to its own session file, asking where if it has none. */
+function saveTabSession(tab: Tab): Promise<boolean> {
+  return tab.sessionPath ? writeSession(tab, tab.sessionPath, true) : askSessionPath(tab);
+}
+
 async function askSessionPath(tab: Tab): Promise<boolean> {
   const chosen = await saveDialog({
-    title: "Save Session As",
+    title: "Save As",
     defaultPath: defaultSessionPath(tab),
     filters: [{ name: "HitherDither sessions", extensions: ["hdsession.json"] }],
   });
@@ -416,26 +384,29 @@ async function writeSession(tab: Tab, path: string, replace: boolean): Promise<b
   await queues.get(tab.id);
   if (!findTab(tab.id) || tab.editing) return false;
   try {
-    if (!(await api.saveSession(tab.id, path, replace))) {
+    const saved = await api.saveSession(tab.id, path, replace);
+    if (!saved.written) {
       const name = path.split(/[\\/]/).pop();
       const choice = await message(`“${name}” already exists. Replace it?`, {
-        title: "Save Session As",
+        title: "Save As",
         kind: "warning",
         buttons: { ok: "Replace", cancel: "Cancel" },
       });
       return choice === "Replace" && findTab(tab.id) !== null && writeSession(tab, path, true);
     }
     tab.sessionPath = path;
+    setEditState(tab, saved.editState);
     return true;
   } catch (e) {
-    if (findTab(tab.id)) notify("error", "Could not save session", String(e));
+    if (findTab(tab.id)) notify("error", "Could not save", String(e));
     return false;
   }
 }
 
 /**
- * Ask whether to save `tab`'s unsaved changes before it closes. Resolves true if it may
- * close (saved, or the user chose not to save), false to keep it open.
+ * Ask whether to save `tab`'s unsaved changes before it closes. Saving writes its session
+ * (asking where if it has none), never the WAV. Resolves true if it may close (saved, or
+ * the user chose not to save), false to keep it open.
  */
 export async function confirmClose(tab: Tab): Promise<boolean> {
   if (!tab.dirty) return true;
@@ -444,16 +415,42 @@ export async function confirmClose(tab: Tab): Promise<boolean> {
     kind: "warning",
     buttons: { yes: "Save", no: "Don't Save", cancel: "Cancel" },
   });
-  if (choice === "Save") return saveTab(tab, null);
+  if (choice === "Save") return saveTabSession(tab);
   return choice === "Don't Save";
 }
 
+/** File › Export: render the active tab's audio to a new WAV. The tab is left as it is. */
+export async function exportAudio(): Promise<boolean> {
+  const tab = editableTab();
+  if (!tab || duplicatePress()) return false;
+  const path = await saveDialog({
+    title: "Export",
+    defaultPath: defaultExportPath(tab.path),
+    filters: [{ name: "WAV audio", extensions: ["wav"] }],
+  });
+  if (!path || !findTab(tab.id)) return false;
+  if (samePath(path, tab.path)) {
+    notify(
+      "error",
+      "Could not export",
+      `“${tab.name}” is the audio being edited, so it can't be overwritten. Export to another name.`,
+    );
+    return false;
+  }
+  const other = tabs.list.find((t) => t.id !== tab.id && samePath(t.path, path));
+  if (other) {
+    notify("error", "Could not export", `“${other.name}” is open in another tab. Close it first, or choose another name.`);
+    return false;
+  }
+  // The dialog has already asked about replacing an existing file.
+  return exportTab(tab, path);
+}
+
 /**
- * Write `tab` to `path` (its own file when null), rendering its edits. Shows progress once
- * it has lasted a moment, and keeps the tab from being edited meanwhile. Resolves whether
- * it was saved.
+ * Render `tab`'s audio to `path`. Shows progress once it has lasted a moment, and keeps the
+ * tab from being edited meanwhile. Resolves whether it was exported.
  */
-async function saveTab(tab: Tab, path: string | null): Promise<boolean> {
+async function exportTab(tab: Tab, path: string): Promise<boolean> {
   if (tab.editing) return false;
   tab.editing = true;
   // Let changes already on their way land first.
@@ -462,32 +459,21 @@ async function saveTab(tab: Tab, path: string | null): Promise<boolean> {
   tab.progress = { fraction: 0, visible: false };
   const timer = setTimeout(() => (tab.progress.visible = true), PROGRESS_DELAY_MS);
   try {
-    const outcome = await api.saveFile(tab.id, path, (p) => {
+    const outcome = await api.exportFile(tab.id, path, (p) => {
       tab.progress.fraction = p.totalFrames ? p.doneFrames / p.totalFrames : 1;
     });
-    if (!findTab(tab.id)) return true;
-    // The saved audio, analysed exactly (processed, if effects were applied): refresh
-    // anything drawn from estimates or from the audio before effects.
-    tab.meta = outcome.metadata;
-    tab.path = outcome.metadata.path;
-    tab.name = outcome.metadata.name;
-    tab.clip = outcome.clip;
-    tab.chain = outcome.chain;
-    tab.revision = outcome.edit_state.revision;
-    setEditState(tab, outcome.edit_state);
-    if (outcome.clampedSamples > 0) {
+    if (findTab(tab.id) && outcome.clampedSamples > 0) {
       const n = outcome.clampedSamples;
+      const name = path.split(/[\\/]/).pop();
       notify(
         "warning",
-        `Some samples in “${tab.name}” were clipped`,
+        `Some samples in “${name}” were clipped`,
         `The effects pushed ${n.toLocaleString()} ${n === 1 ? "sample" : "samples"} past full scale, so ${n === 1 ? "it was" : "they were"} clipped to fit the file's format.`,
       );
     }
-    const [whole, clipRuns] = await Promise.all([api.computeStats(tab.id, null), api.getClipRuns(tab.id)]);
-    if (findTab(tab.id) && whole) await showAnalysis(tab, whole, clipRuns);
     return true;
   } catch (e) {
-    if (findTab(tab.id)) notify("error", "Could not save", String(e));
+    if (findTab(tab.id)) notify("error", "Could not export", String(e));
     return false;
   } finally {
     clearTimeout(timer);

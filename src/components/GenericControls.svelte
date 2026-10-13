@@ -1,6 +1,6 @@
 <script lang="ts">
   import * as api from "../lib/api";
-  import { closeGeneric, effectsUi } from "../lib/effects.svelte";
+  import { closeGeneric, effectsUi, settingChanged } from "../lib/effects.svelte";
   import { notify } from "../lib/notices.svelte";
   import { activeTab } from "../lib/tabs.svelte";
 
@@ -16,7 +16,7 @@
   let pos = $state<{ x: number; y: number } | null>(null);
   let panel = $state<HTMLDivElement>();
 
-  // The effect left its tab's chain (removed, undone, or baked in by a save): close.
+  // The effect left its tab's chain (removed or undone): close.
   $effect(() => {
     const t = effectsUi.generic;
     if (!t) return;
@@ -75,6 +75,7 @@
         const [id, v] = queued.entries().next().value!;
         queued.delete(id);
         const display = await api.setFxParam(t.fileId, t.slotId, id, v);
+        settingChanged(t.fileId);
         const shown = params.find((x) => x.id === id);
         if (shown && !queued.has(id)) shown.display = display;
       }

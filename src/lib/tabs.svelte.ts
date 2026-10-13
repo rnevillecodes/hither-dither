@@ -24,7 +24,7 @@ export interface Tab {
   playhead: number;
   playStart: number;
   // Editing.
-  /** Unsaved changes: the audio differs from the file on disk. */
+  /** Unsaved changes: something changed since the session was last saved or opened. */
   dirty: boolean;
   canUndo: boolean;
   canRedo: boolean;
@@ -34,13 +34,11 @@ export interface Tab {
   peaksVersion: number;
   /** The whole-file stats and clip markers are being brought up to date. */
   analysing: boolean;
-  /** A save is in progress: the tab can't be edited until it finishes. */
+  /** An export is in progress: the tab can't be edited until it finishes. */
   editing: boolean;
-  /** The user has agreed to Save overwriting this file. */
-  overwriteConfirmed: boolean;
   /** Trim window, end fades and joins, as the clip handles show them. */
   clip: ClipInfo | null;
-  /** The effects the audio is heard and saved through. */
+  /** The effects the audio is heard and exported through. */
   chain: ChainInfo | null;
   /** The session file this tab was opened from or last saved to; Save Session writes it. */
   sessionPath: string | null;
@@ -80,7 +78,6 @@ export function newTab(path: string, sessionPath: string | null = null): Tab {
     peaksVersion: 0,
     analysing: false,
     editing: false,
-    overwriteConfirmed: false,
     clip: null,
     chain: null,
     sessionPath,

@@ -79,7 +79,7 @@ pub fn run() {
             commands::apply_edit,
             commands::undo_edit,
             commands::redo_edit,
-            commands::save_file,
+            commands::export_file,
             commands::save_session,
             commands::read_session,
             commands::restore_session,

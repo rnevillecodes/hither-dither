@@ -1,6 +1,6 @@
 # Acceptance checklist
 
-Manual acceptance pass over every scenario in the four v1 specs (`openspec/changes/add-wav-analyser-app/specs/`), plus the multi-file tabs and app icon change (`openspec/changes/add-multi-file-tabs/specs/`; sections file-tabs, audio-stats: details panel, app-branding, and rows I2b–I13) the dark theme change (section app-theme), and the session restore, tab reordering and window change (`openspec/changes/tab-session-and-window-fit/specs/`; sections app-window, tab-reorder and session-restore), and the audio editing change (`openspec/changes/add-audio-editing/specs/`; sections transport-controls, audio-editing and wav-export), and the clip fades change (`openspec/changes/add-clip-fades-and-crossfades/specs/`; section clip-fades, plus rows E4b, E8b, E8c and X8b), and the live editing change (`openspec/changes/add-live-editing/specs/`; section live-editing, plus rows E9, E10b, F14, F14b, F19, X13b and X13c, and E11 removed), and the VST3 effect chain change (`openspec/changes/add-vst3-effect-chain/specs/`; sections plugin-editors, effect-chain and vst3-plugins), and the session files change (`openspec/changes/add-session-files/specs/`; section session-files).
+Manual acceptance pass over every scenario in the four v1 specs (`openspec/changes/add-wav-analyser-app/specs/`), plus the multi-file tabs and app icon change (`openspec/changes/add-multi-file-tabs/specs/`; sections file-tabs, audio-stats: details panel, app-branding, and rows I2b–I13) the dark theme change (section app-theme), and the session restore, tab reordering and window change (`openspec/changes/tab-session-and-window-fit/specs/`; sections app-window, tab-reorder and session-restore), and the audio editing change (`openspec/changes/add-audio-editing/specs/`; sections transport-controls, audio-editing and wav-export), and the clip fades change (`openspec/changes/add-clip-fades-and-crossfades/specs/`; section clip-fades, plus rows E4b, E8b, E8c and X8b), and the live editing change (`openspec/changes/add-live-editing/specs/`; section live-editing, plus rows E9, E10b, F14, F14b, F19, X13b and X13c, and E11 removed), and the VST3 effect chain change (`openspec/changes/add-vst3-effect-chain/specs/`; sections plugin-editors, effect-chain and vst3-plugins), and the session files change (`openspec/changes/add-session-files/specs/`; section session-files), and the save/export change (`openspec/changes/save-sessions-export-audio/specs/`; sections wav-export and session-files, rows X2b–X17 and SF22–SF26).
 
 **Setup:** generate fixtures with `cd src-tauri && cargo run --release --example gen_fixtures -- ../fixtures --large`, then run `npm run tauri dev`. Fixture names below refer to files in `fixtures/`.
 
@@ -217,28 +217,32 @@ Below, "A" is `cd-16bit-stereo-10s.wav`. Shortcuts: Delete, Ctrl/Cmd+T (Crop), C
 
 ## wav-export
 
+Since the save/export change (`openspec/changes/save-sessions-export-audio/`), Save writes the session and Export writes audio; the WAV a tab edits is never written.
+
 | # | Scenario | Steps | Expected | Evidence | Result |
 |---|---|---|---|---|---|
-| X1 | Edit marks the tab | Silence a selection in A | A dot replaces the tab's × (× on hover); tooltip says "Unsaved changes" | | ⏳ |
-| X2 | Undo back to the original | One edit, then Undo | The dot disappears | Auto: `tests/state.rs::edit_then_undo_restores_frames_and_stats` | ⏳ |
-| X3 | First save asks | Crop a copy of A, Ctrl/Cmd+S; try Cancel, then Overwrite | Cancel leaves file and edits; Overwrite saves | | ⏳ |
-| X4 | Later saves don't ask | After X3, edit again and Ctrl/Cmd+S | Saved without a dialog | | ⏳ |
-| X5 | Save a trimmed copy | Crop `take1.wav`, Save As `take1-trim.wav` | New file has the cropped audio; original unchanged; tab now "take1-trim.wav" with no dot; relaunch restores the new path | Auto: `tests/state.rs::save_as_leaves_the_source_alone` | ⏳ |
-| X6 | Cancel the dialog | Save As, then Cancel | Nothing written; edits and dot kept | | ⏳ |
-| X7 | Name of another open file | With B open in another tab, Save As over B's path | Nothing written; notice says it's open in another tab | | ⏳ |
-| X8 | Untouched audio is bit-exact | Delete 1.0–2.0 s from `pcm24-stereo-48k.wav`, Save As | Samples outside the join's crossfade identical to the source | Auto: `wav::writer::tests::untouched_samples_are_bit_exact_outside_the_crossfade` | ⏳ |
-| X8b | Hard join is bit-exact | As X8 but drag the join's crossfade to zero before saving | Every sample identical to the source | Auto: `wav::writer::tests::hard_join_is_bit_exact` | ⏳ |
-| X9 | Metadata is not carried over | Edit `with-list-bext-chunks.wav`, Save As, reopen | Only `fmt ` and `data` chunks; same format details | Auto: `wav::writer::tests::metadata_chunks_are_not_written`, `edited_file_keeps_the_format` | ⏳ |
-| X10 | Result too large for WAV | (Not practical by hand) | Save fails with "too large" and writes nothing | Auto: `wav::writer::tests::refuses_results_over_4_gib` | ⏳ |
-| X11 | Read-only target | Save As into a read-only folder | Error notice; original intact; edits kept | Auto: `tests/state.rs::failed_save_keeps_the_edits` | ⏳ |
-| X12 | File changed by another program | Open a copy of A, edit it in another program and save there, then edit and Save in HitherDither | Nothing written; notice says it changed on disk and suggests Save As | Auto: `tests/state.rs::save_refuses_when_the_original_changed` | ⏳ |
-| X13 | Keep working after save | Zoom in, select 1.0–2.0 s, Fade In, Save | Zoom and selection unchanged; Undo greyed out | Auto: `tests/state.rs::save_replaces_the_original` | ⏳ |
-| X13b | Save before the analysis finishes | Open `large-1gb.wav`, apply Fade Out to most of it, Save As straight away while the stats say "Updating…" | Progress box after a moment; afterwards the stats are current and not marked as updating | Auto: `tests/state.rs::save_before_the_analysis_finishes_is_exact` | ⏳ |
-| X13c | Progress while rendering | Edit `large-1gb.wav`, Save As | The delayed progress box shows how far the save has got; other tabs stay usable | Auto: `tests/state.rs::save_before_the_analysis_finishes_is_exact` (progress reaches the total) | ⏳ |
+| X1 | Edit marks the tab | Silence a selection in A | A dot replaces the tab's × (× on hover); tooltip says "Unsaved changes" | Auto: `tests/state.rs::an_edit_marks_the_tab_and_undoing_it_clears_the_mark` | ⏳ |
+| X2 | Undo back to the original | One edit, then Undo | The dot disappears | Auto: `tests/state.rs::an_edit_marks_the_tab_and_undoing_it_clears_the_mark` | ⏳ |
+| X2b | Plugin setting changed | Save A's session, turn a knob in an effect's editor, then Undo | The dot appears and stays after Undo | Auto: `tests/state.rs::a_change_in_a_plugin_editor_marks_the_tab`, `a_plugin_setting_marks_the_tab_until_saved` | ⏳ |
+| X2c | Saving the session clears it | Edit A, Ctrl/Cmd+S and save the session | The dot goes; A is unchanged on disk; Undo is still available | Auto: `tests/state.rs::saving_the_session_clears_the_unsaved_mark` | ⏳ |
+| X5 | Export a trimmed copy | Crop `take1.wav`, File › Export… as `take1-trim.wav` | New file has the cropped audio; original unchanged; the tab is still "take1.wav", still cropped, with its dot | Auto: `tests/state.rs::export_writes_the_edits_and_leaves_the_tab_alone` | ⏳ |
+| X5b | Default name | File › Export… on `take1.wav` | The dialog proposes `take1-export.wav` next to it | Auto: `sessionFiles.test.ts` | ⏳ |
+| X6 | Cancel the dialog | Export, then Cancel | Nothing written; the tab is unchanged | | ⏳ |
+| X6b | Export over the source | Export `take1.wav` choosing `take1.wav` itself | Nothing written; notice says the audio being edited can't be overwritten | Auto: `tests/state.rs::export_refuses_the_audio_being_edited` | ⏳ |
+| X7 | Name of another open file | With B open in another tab, Export over B's path | Nothing written; notice says it's open in another tab | | ⏳ |
+| X8 | Untouched audio is bit-exact | Delete 1.0–2.0 s from `pcm24-stereo-48k.wav`, Export | Samples outside the join's crossfade identical to the source | Auto: `wav::writer::tests::untouched_samples_are_bit_exact_outside_the_crossfade` | ⏳ |
+| X8b | Hard join is bit-exact | As X8 but drag the join's crossfade to zero before exporting | Every sample identical to the source | Auto: `wav::writer::tests::hard_join_is_bit_exact` | ⏳ |
+| X9 | Metadata is not carried over | Edit `with-list-bext-chunks.wav`, Export, reopen the export | Only `fmt ` and `data` chunks; same format details | Auto: `wav::writer::tests::metadata_chunks_are_not_written`, `edited_file_keeps_the_format` | ⏳ |
+| X10 | Result too large for WAV | (Not practical by hand) | Export fails with "too large" and writes nothing | Auto: `wav::writer::tests::refuses_results_over_4_gib` | ⏳ |
+| X11 | Read-only target | Export into a read-only folder | Error notice; the tab keeps its edits, effects and dot | Auto: `tests/state.rs::a_failed_export_keeps_everything` | ⏳ |
+| X11b | Replacing an earlier export | Export twice to the same name, confirming the replace | The file holds the second export; no temporary files are left | Auto: `tests/state.rs::exporting_again_replaces_an_earlier_export` | ⏳ |
+| X13 | Keep working after export | Add an effect, zoom in, select 1.0–2.0 s, Fade In, Export | The effect, its settings, zoom and selection are unchanged; Undo removes the fade | Auto: `tests/state.rs::exporting_keeps_the_effects_and_their_settings` | ⏳ |
+| X13c | Progress while rendering | Edit `large-1gb.wav`, Export | The delayed progress box ("Exporting") shows how far it has got; other tabs stay usable | | ⏳ |
 | X14 | Cancel closing | Edit A, Ctrl/Cmd+W, Cancel (also try ×, middle-click, File › Close Tab) | Tab stays open with its edits | | ⏳ |
-| X15 | Save on close | Edit A, close its tab, choose Save | A written with the edits (no overwrite prompt); tab closes | | ⏳ |
+| X15 | Save on close | Open A's session, edit, close its tab, choose Save | The session file is written; A is unchanged; the tab closes | | ⏳ |
+| X15b | Save on close without a session | Edit A (no session), close, choose Save; once Cancel the dialog | A dialog proposes `a.hdsession.json`; saving closes the tab; cancelling keeps it open | | ⏳ |
 | X16 | Two edited files | Edit A and B, close the window (also File › Quit) | Asked about A, then B; quits after both answered | | ⏳ |
-| X17 | Cancel quitting | Quit with edits, Cancel at the first prompt | App keeps running with every tab and edit; quitting with no edits doesn't prompt | | ⏳ |
+| X17 | Cancel quitting | Quit with edits, Cancel at the first prompt (and once by cancelling a Save dialog) | App keeps running with every tab and edit; quitting with no changes doesn't prompt | | ⏳ |
 
 ## clip-fades
 
@@ -404,15 +408,15 @@ From the session files change (`openspec/changes/add-session-files/specs/session
 
 | # | Scenario | Steps | Expected | Evidence | Result |
 |---|---|---|---|---|---|
-| SF1 | First save asks | Open A, choose File › Save Session | A save dialog proposes `a.hdsession.json` in `takes/` | | ⏳ |
-| SF2 | Edits and effects captured | Delete a selection, fade out the end, add Supermassive (change Mix and Decay in its editor) and Pro-Q 4, bypass Pro-Q 4, Save Session, then open the file in a text editor | The JSON lists the edits and both effects in order, Pro-Q 4 marked bypassed; `a.wav` is unchanged (same size and date) | Auto: `tests/state.rs::a_session_captures_the_edits_and_effects` | ⏳ |
-| SF3 | Round trip | Quit the app (Don't Save), start it, close `a.wav`'s restored tab, open `a.hdsession.json` | A tab for `a.wav` with the same waveform, clip handles and chain; Pro-Q 4 bypassed; Supermassive's editor shows the same Mix and Decay; Undo is greyed out and the tab shows the unsaved dot; playback sounds the same | Auto: `tests/state.rs::a_restored_session_sounds_and_saves_the_same` | ⏳ |
-| SF4 | Saved output matches | Before SF3's quit, Save As `first.wav`; after SF3, Save As `second.wav`; compare the two files | Identical | Auto: `tests/state.rs::a_restored_session_sounds_and_saves_the_same` | ⏳ |
-| SF5 | Later saves overwrite | In SF3's tab, change Decay, press Ctrl/Cmd+Alt+S | No dialog; reopening the session shows the new Decay | | ⏳ |
-| SF6 | Name typed without the extension | Save Session As…, type `mix`, then again with `mix.json` | Saved as `mix.hdsession.json` both times; the second asks before replacing it | Auto: `sessionFiles.test.ts` | ⏳ |
-| SF7 | Cancel the dialog | Save Session As…, Cancel | Nothing is written; Save Session still writes the tab's previous session file | | ⏳ |
-| SF8 | Not available while loading | Open a large fixture and open the File menu while it loads; again while saving the WAV | Save Session and Save Session As… are greyed out | | ⏳ |
-| SF9 | Change made while stopped | Stopped, set HD Test Gain to +6 dB in its generic controls, Save Session, close the tab, reopen the session | Gain shows +6.0 dB and is heard on play | Auto: `tests/state.rs::a_session_includes_changes_made_while_stopped` | ⏳ |
+| SF1 | First save asks | Open A, press Ctrl/Cmd+S | A save dialog proposes `a.hdsession.json` in `takes/` | | ⏳ |
+| SF2 | Edits and effects captured | Delete a selection, fade out the end, add Supermassive (change Mix and Decay in its editor) and Pro-Q 4, bypass Pro-Q 4, Save, then open the file in a text editor | The JSON lists the edits and both effects in order, Pro-Q 4 marked bypassed; `a.wav` is unchanged (same size and date) | Auto: `tests/state.rs::a_session_captures_the_edits_and_effects` | ⏳ |
+| SF3 | Round trip | Quit the app (Don't Save), start it, close `a.wav`'s restored tab, open `a.hdsession.json` | A tab for `a.wav` with the same waveform, clip handles and chain; Pro-Q 4 bypassed; Supermassive's editor shows the same Mix and Decay; Undo is greyed out and the tab has no unsaved dot; playback sounds the same | Auto: `tests/state.rs::a_restored_session_sounds_and_saves_the_same` | ⏳ |
+| SF4 | Exported output matches | Before SF3's quit, Export `first.wav`; after SF3, Export `second.wav`; compare the two files | Identical | Auto: `tests/state.rs::a_restored_session_sounds_and_saves_the_same` | ⏳ |
+| SF5 | Later saves overwrite | In SF3's tab, change Decay, press Ctrl/Cmd+S | No dialog; reopening the session shows the new Decay | | ⏳ |
+| SF6 | Name typed without the extension | File › Save As…, type `mix`, then again with `mix.json` | Saved as `mix.hdsession.json` both times; the second asks before replacing it | Auto: `sessionFiles.test.ts` | ⏳ |
+| SF7 | Cancel the dialog | File › Save As…, Cancel | Nothing is written; Save still writes the tab's previous session file | | ⏳ |
+| SF8 | Not available while loading | Open a large fixture and open the File menu while it loads; again while exporting | Save and Save As… are greyed out | | ⏳ |
+| SF9 | Change made while stopped | Stopped, set HD Test Gain to +6 dB in its generic controls, Save, close the tab, reopen the session | Gain shows +6.0 dB and is heard on play | Auto: `tests/state.rs::a_session_includes_changes_made_while_stopped` | ⏳ |
 | SF10 | Effects all bypassed | Session of an unedited file whose only effect is bypassed; reopen it | No unsaved dot | Auto: `tests/state.rs::a_restored_session_with_only_bypassed_effects_is_not_unsaved` | ⏳ |
 | SF11 | Mixed selection | Open… and pick `cd-16bit-stereo-10s.wav` and `a.hdsession.json` together | Each opens in its own tab, in that order, the session restored | Auto: `sessionFiles.test.ts` (`planOpens`) | ⏳ |
 | SF12 | Folder moved | Close the tabs, move `takes/` elsewhere, open the session from its new place | `a.wav` opens from the new folder with the session restored | Auto: `session::tests::resolves_absolute_then_relative` | ⏳ |
@@ -425,3 +429,8 @@ From the session files change (`openspec/changes/add-session-files/specs/session
 | SF19 | Not a session | Write "hello" into `x.hdsession.json`, open it | No tab; the notice says it is not a valid session file | Auto: `session::tests::rejects_other_files_and_newer_versions` | ⏳ |
 | SF20 | Newer format | Set `"version": 99` in a session, open it | No tab; the notice says it was made by a newer version of HitherDither | Auto: `session::tests::rejects_other_files_and_newer_versions` | ⏳ |
 | SF21 | Other JSON file dropped | Drop `notes.json` on the window | "Could not open file", not a session | Auto: `sessionFiles.test.ts` | ⏳ |
+| SF22 | Restored session is clean | Open a saved session | No unsaved dot; bypassing one of its effects shows it | Auto: `tests/state.rs::a_change_after_restoring_marks_the_tab` | ⏳ |
+| SF23 | Save As switches session | From `mix.hdsession.json`, Save As `mix-alt.hdsession.json`, change something, Ctrl/Cmd+S | `mix.hdsession.json` is unchanged; `mix-alt.hdsession.json` has the change | | ⏳ |
+| SF24 | Nothing new to save | Open a session and change nothing | File › Save is greyed out; Save As… and Export… aren't | | ⏳ |
+| SF25 | Session tab after a restart | Open `mix.hdsession.json` and `b.wav`, quit (Don't Save after editing the session tab), start the app | The session reopens as last saved, then `b.wav` as a plain file, in that order | Auto: `session.test.ts` (`rememberedTabs`) | ⏳ |
+| SF26 | Shaped take in a session | Trim both ends, add fades, save the session, close, reopen it | The handles show the same trims and fades | Auto: `tests/state.rs::a_restored_session_sounds_and_saves_the_same` | ⏳ |
