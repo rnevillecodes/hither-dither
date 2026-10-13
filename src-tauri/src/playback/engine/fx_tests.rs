@@ -287,13 +287,21 @@ fn a_chain_too_slow_for_real_time_reports_one_overload() {
     }) as Arc<dyn Stage>]);
     let audio = ramp(480_000, 8_000);
     let mut engine = play(&audio, (0, 480_000, 0), false, Some(Arc::new(slow)));
-    // Render in real time, 32 ms per buffer, for 2.5 s.
+    // Render in real time (a 256-frame buffer every 32 ms) for 2.5 s. Paced by the clock,
+    // like a device, so a sleep that overruns on a busy machine is caught up rather than
+    // slowing playback below the rate the chain can keep up with.
     let mut overloads = 0;
     let mut buf = vec![0.0; 256];
-    for _ in 0..80 {
-        std::thread::sleep(Duration::from_millis(32));
-        engine.render(&mut buf, Duration::ZERO);
-        overloads += engine.shared().take_overload() as usize;
+    let began = Instant::now();
+    let mut rendered = 0;
+    while rendered < 80 {
+        std::thread::sleep(Duration::from_millis(8));
+        let due = (began.elapsed().as_millis() / 32).min(80) as usize;
+        while rendered < due {
+            engine.render(&mut buf, Duration::ZERO);
+            overloads += engine.shared().take_overload() as usize;
+            rendered += 1;
+        }
     }
     assert_eq!(overloads, 1);
     engine.shared().stop.store(true, Ordering::Relaxed);
