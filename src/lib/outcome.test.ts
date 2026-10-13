@@ -8,7 +8,7 @@ const meta = { frames: 1_000, name: "a.wav" } as Metadata;
 function outcome(chain: ChainInfo, dirty: boolean): EditOutcome {
   return {
     metadata: meta,
-    edit_state: { can_undo: true, can_redo: false, dirty, revision: 3 },
+    edit_state: { can_undo: true, can_redo: false, dirty, edited: false, revision: 3 },
     clip: {
       untrimmed_frames: 1_000,
       trim_start: 0,

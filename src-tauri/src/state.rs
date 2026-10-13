@@ -261,7 +261,9 @@ pub struct EditState {
     pub can_undo: bool,
     pub can_redo: bool,
     pub dirty: bool,
-    /// Increases whenever the audio changes (edit, undo, redo, save).
+    /// The audio is edited: it differs from the WAV as it is on disk.
+    pub edited: bool,
+    /// Increases whenever the audio changes (edit, undo, redo, restore).
     pub revision: u64,
 }
 
@@ -287,6 +289,17 @@ pub struct ExportOutcome {
     pub clamped_samples: u64,
 }
 
+/// Result of replacing a file's audio.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceOutcome {
+    /// The new WAV's.
+    pub metadata: Metadata,
+    pub edit_state: EditState,
+    /// Effects left out, or kept at their defaults, in chain order.
+    pub warnings: Vec<EffectWarning>,
+}
+
 /// Result of saving a session.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -300,11 +313,27 @@ pub struct SessionSaved {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreOutcome {
+    /// False when the WAV no longer matches the session (`Exact` mode): nothing changed.
+    pub applied: bool,
     pub edit_state: EditState,
     /// The WAV's size or modification time differ from when the session was saved.
     pub wav_changed: bool,
+    /// The session had edits that were left out, because the WAV is a different recording.
+    pub edits_dropped: bool,
     /// Effects left out or kept at their defaults, in chain order.
     pub warnings: Vec<EffectWarning>,
+}
+
+/// How much of a session is applied to the WAV it is restored onto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreMode {
+    /// The session's own WAV: everything, but nothing if its format or length changed.
+    Exact,
+    /// A WAV the user chose for the session: its edits too only if it has the recorded
+    /// format and length (it was moved or renamed). Afterwards the tab is unsaved.
+    Relink,
+    /// Effects only, for a replaced WAV. Afterwards the tab is unsaved.
+    EffectsOnly,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -400,6 +429,7 @@ impl History {
             can_undo: self.pos > 0,
             can_redo: self.pos + 1 < self.states.len(),
             dirty: self.mark() != self.saved,
+            edited: !self.current().edits.is_identity(),
             revision: self.revision,
         }
     }
@@ -1056,27 +1086,57 @@ impl AppState {
     }
 
     /// Apply the session at `session_path` to file `id`, freshly opened from the session's
-    /// WAV: its edits, Bypass All and effects with their settings, as a new history.
-    /// Fails, changing nothing, if the session is invalid or the WAV no longer matches it.
-    /// Effects that can't be restored are left out, or kept at their defaults, with warnings.
+    /// WAV, or from a WAV the user chose instead (`relink`). See [`RestoreMode`]. Fails,
+    /// changing nothing, if the session is invalid.
     pub fn restore_session(
         &self,
         id: FileId,
         session_path: &Path,
+        relink: bool,
         plugins: &Arc<PluginCache>,
     ) -> Result<RestoreOutcome, String> {
         let session = SessionFile::read(session_path).map_err(|e| e.to_string())?;
+        let mode = if relink {
+            RestoreMode::Relink
+        } else {
+            RestoreMode::Exact
+        };
+        self.restore(id, &session, session_path, mode, plugins)
+    }
+
+    /// Apply `session` to file `id`, freshly opened: its edits (as `mode` allows), Bypass
+    /// All and effects with their settings, as a new history. Effects that can't be
+    /// restored are left out, or kept at their defaults, with warnings.
+    fn restore(
+        &self,
+        id: FileId,
+        session: &SessionFile,
+        session_path: &Path,
+        mode: RestoreMode,
+        plugins: &Arc<PluginCache>,
+    ) -> Result<RestoreOutcome, String> {
         self.check_not_saving(id)?;
         let file = self.require(id)?;
         let loaded = file.audio_ref(session_path);
-        if !session.audio.format_matches(&loaded) {
-            return Err(format!(
-                "The audio file “{}” no longer matches the session.",
-                loaded.name()
-            ));
+        let matches = session.audio.format_matches(&loaded);
+        if mode == RestoreMode::Exact && !matches {
+            return Ok(RestoreOutcome {
+                applied: false,
+                edit_state: self.edit_state(id).ok_or(NO_FILE)?,
+                wav_changed: false,
+                edits_dropped: false,
+                warnings: Vec::new(),
+            });
         }
-        let mut edits = Arc::new(session.edit_list());
-        if *edits == **file.audio.edits() {
+        let keep_edits = match mode {
+            RestoreMode::Exact => true,
+            RestoreMode::Relink => matches,
+            RestoreMode::EffectsOnly => false,
+        };
+        let session_edits = session.edit_list();
+        let edits_dropped = !keep_edits && !session_edits.is_identity();
+        let mut edits = Arc::new(session_edits);
+        if !keep_edits || *edits == **file.audio.edits() {
             // Unedited: keep the source's own list, and with it its analysis.
             edits = file.audio.edits().clone();
         }
@@ -1130,13 +1190,50 @@ impl AppState {
         }
         let settings = h.settings.clone();
         *h = History::restored(edits, slots, session.chain.bypass_all, h.revision, settings);
+        if mode != RestoreMode::Exact {
+            // Not the session as saved: it now belongs to another WAV.
+            h.touch();
+        }
         let outcome = self.install(id, &file, h);
         drop(history);
         self.sync_bypass(id);
         Ok(RestoreOutcome {
+            applied: true,
             edit_state: outcome.edit_state,
-            wav_changed: !session.audio.stamp_matches(&loaded),
+            wav_changed: mode == RestoreMode::Exact && !session.audio.stamp_matches(&loaded),
+            edits_dropped,
             warnings,
+        })
+    }
+
+    /// Replace file `id`'s audio with the WAV at `path`, keeping its effect chain with every
+    /// effect's settings and bypass switch, and Bypass All. The edits are dropped and the
+    /// history starts again at the new audio, which counts as unsaved. Effects that can't
+    /// process the new audio are left out, with warnings. If the new WAV can't be opened,
+    /// nothing changes. `progress(done, total)` is the load's progress.
+    pub fn replace_audio(
+        &self,
+        id: FileId,
+        path: &Path,
+        plugins: &Arc<PluginCache>,
+        progress: impl FnMut(u64, u64),
+    ) -> Result<ReplaceOutcome, String> {
+        let file = self.require(id)?;
+        if same_file(path, &file.metadata.path) {
+            return Err(format!(
+                "“{}” is already this tab's audio",
+                file.metadata.name
+            ));
+        }
+        drop(file);
+        // The chain as a session would hold it; its WAV and edits don't matter here.
+        let (chain, _) = self.capture(id, path)?;
+        self.open(id, path, progress).map_err(|e| e.to_string())?;
+        let restored = self.restore(id, &chain, path, RestoreMode::EffectsOnly, plugins)?;
+        Ok(ReplaceOutcome {
+            metadata: self.require(id)?.metadata.clone(),
+            edit_state: restored.edit_state,
+            warnings: restored.warnings,
         })
     }
 

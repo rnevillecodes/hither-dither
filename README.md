@@ -60,6 +60,9 @@ HitherDither never changes the WAV you open. Your work is saved as a session, an
 
 Open a session with **File › Open…** or by dropping it on the window. Its WAV opens in a new tab with the edits and effects as they were. Effect editors start closed, and there is nothing to undo until the next change. When the app starts, tabs that had a session file are reopened from their session.
 
+- **File › Replace Audio…** swaps a tab's WAV for another one, such as a different take or a new render of the mix, and keeps its effects with their settings and its session file. The edits and undo history are dropped (it asks first when there are any), because they belong to the old recording. Effects that can't process the new audio's channels are left out, with a notice.
+- **If a session's WAV is missing or has changed**, opening the session offers **Choose Another WAV…**. A WAV with the recorded format and length (one that was moved or renamed) gets the session's edits as well as its effects; any other WAV gets only the effects. Save the session afterwards so it points to the new WAV.
+
 Things to know:
 
 - **Keep the session with its WAV.** A session finds its WAV at the path it was saved with, or at the same place relative to the session, so moving or copying a folder holding both works. Renaming or moving only the WAV doesn't.

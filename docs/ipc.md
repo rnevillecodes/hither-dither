@@ -232,6 +232,7 @@ interface EditState {
   can_redo: boolean;
   dirty: boolean;          // unsaved: something changed since the session was last saved or the tab
                            // was opened (edits, effects, bypass, plugin settings)
+  edited: boolean;         // the audio is edited (it differs from the WAV on disk), even with nothing to undo
   revision: number;        // increases whenever the audio changes; invalidate cached peaks
 }
 ```
@@ -696,29 +697,36 @@ Checks the session and finds its WAV, opening nothing. The WAV is the recorded a
 
 ```ts
 interface SessionInfo {
-  audioPath: string;   // open this with open_file, then call restore_session
+  audioPath: string | null;  // open this with open_file, then call restore_session; null when
+                             // neither path exists: offer to choose another WAV (relink)
+  audioName: string;         // the recorded WAV's file name, for messages
 }
 ```
 
 Rejects:
 - with `“x.hdsession.json” is not a valid session file.` for anything that isn't a session this app wrote, including edits that don't fit the recorded length;
 - with `“x.hdsession.json” was made by a newer version of HitherDither.` for a higher format version;
-- with `The session's audio file “take.wav” could not be found.` when neither path exists;
 - with `Could not read “x.hdsession.json”: …` for I/O errors.
 
 ### `restore_session`
 
 | Arg | Type | Notes |
 | --- | --- | --- |
-| `fileId` | number | The file just opened from `audioPath` |
+| `fileId` | number | The file just opened from `audioPath`, or from a WAV the user chose |
 | `path` | string | The session file |
+| `relink` | boolean | True for a WAV the user chose instead of the session's own |
 
 Reads the session again and applies it to the file: the edits, Bypass All, and each effect, loaded with its saved state restored before processing is set up, then its unprocessed parameter changes and its bypass switch. The file's history is replaced by a single state, the restored one, so there is nothing to undo. When the restored edits change the audio, the revision increases and the background analysis starts as after an edit (use `wait_analysis`). Effect editors start closed. Afterwards, fetch the clip, chain, stats and clip runs as after `open_file`.
 
+With `relink`, the edits are restored only if the chosen WAV has the recorded sample rate, channels and layout, sample format and length (it was moved or renamed). Otherwise only Bypass All and the effects are restored, and `editsDropped` says whether the session had edits. Either way the tab is unsaved afterwards, because the session now belongs to another WAV.
+
 ```ts
 interface RestoreOutcome {
+  applied: boolean;                // false (without relink) when the WAV no longer matches: nothing
+                                   // changed; close the file and offer to choose another WAV
   editState: EditState;            // dirty follows the usual rule
   wavChanged: boolean;             // the WAV's size or modification time differ: warn
+  editsDropped: boolean;           // relink onto a different recording left the edits out: say so
   warnings: { effect: string; reason: string }[];   // show as one notice
 }
 ```
@@ -727,5 +735,30 @@ An effect is left out, with a warning, when its plugin isn't available, is disab
 
 Rejects, leaving the file as opened:
 - with the `read_session` messages if the session became unreadable meanwhile;
-- with `The audio file “take.wav” no longer matches the session.` when the WAV's sample rate, channels or layout, sample format or length differ from the recorded ones;
 - with `The edit was cancelled` if the file was edited or reopened while the effects loaded.
+
+### `replace_audio`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `path` | string | The WAV to use instead of the file's own |
+| `onProgress` | `Channel<LoadProgress>` | Progress of loading the new WAV, as for `open_file` |
+
+Replaces the file's audio with the WAV at `path`, keeping its effect chain: every effect in order, with its settings (including parameter changes not yet heard) and bypass switch, and Bypass All. The effects are new instances set up for the new audio, so their editors close. The edits are dropped and the history starts again at the new audio, which counts as unsaved; a session the tab belongs to refers to the new WAV once it is saved. Playback stops first. Afterwards, fetch the clip, chain, stats and clip runs as after `open_file`.
+
+```ts
+interface ReplaceOutcome {
+  metadata: Metadata;      // the new WAV's
+  editState: EditState;    // dirty, with nothing to undo
+  warnings: { effect: string; reason: string }[];   // effects left out (e.g. the new layout isn't
+                                                     // supported) or at their defaults; one notice
+}
+```
+
+Rejects, leaving the file, its edits, history and effects as they were:
+- with `“take.wav” is already this tab's audio` when `path` is the file's own WAV;
+- with the `open_file` errors when the new WAV can't be opened;
+- with `The file is being exported` during an export.
+
+The frontend also refuses WAVs open in another tab.

@@ -17,10 +17,10 @@ use crate::plugins::cache::{Folders, PluginCache, PluginList, StartupNotice, sta
 use crate::plugins::editor::{EditorOpened, Editors};
 use crate::plugins::instance::Param;
 use crate::plugins::scan::Scanner;
-use crate::session::SessionFile;
+use crate::session::{self, SessionInfo};
 use crate::state::{
     AppState, ClipInfo, ClipRuns, ClipSettings, EditOp, EditOutcome, ExportOutcome, FadeSetting,
-    FileId, LoadedFile, Metadata, Preview, RestoreOutcome, SessionSaved,
+    FileId, LoadedFile, Metadata, Preview, ReplaceOutcome, RestoreOutcome, SessionSaved,
 };
 use crate::stats::Stats;
 
@@ -259,34 +259,48 @@ pub async fn save_session(
     blocking(move || state.save_session(file_id, &path, replace)).await?
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionInfo {
-    /// The WAV to open for the session: where it was, or next to the session if moved.
-    pub audio_path: PathBuf,
-}
-
 /// Check the session file at `path` and find its WAV. Nothing is opened.
 #[tauri::command]
 pub async fn read_session(path: PathBuf) -> Result<SessionInfo, String> {
-    blocking(move || {
-        let session = SessionFile::read(&path).map_err(|e| e.to_string())?;
-        let audio_path = session.resolve_audio(&path).map_err(|e| e.to_string())?;
-        Ok(SessionInfo { audio_path })
-    })
-    .await?
+    blocking(move || session::read_info(&path).map_err(|e| e.to_string())).await?
 }
 
-/// Apply the session at `path` to `file_id`, just opened from the session's WAV.
+/// Apply the session at `path` to `file_id`, just opened from the session's WAV, or from a
+/// WAV the user chose instead (`relink`).
 #[tauri::command]
 pub async fn restore_session(
     state: State<'_, SharedState>,
     plugins: State<'_, SharedPlugins>,
     file_id: FileId,
     path: PathBuf,
+    relink: bool,
 ) -> Result<RestoreOutcome, String> {
     let (state, plugins) = (state.inner().clone(), plugins.inner().clone());
-    blocking(move || state.restore_session(file_id, &path, &plugins)).await?
+    blocking(move || state.restore_session(file_id, &path, relink, &plugins)).await?
+}
+
+/// Replace `file_id`'s audio with the WAV at `path`, keeping its effects and their settings
+/// but not its edits. Playback stops, and the old effects' editors close.
+#[tauri::command]
+pub async fn replace_audio(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
+    plugins: State<'_, SharedPlugins>,
+    file_id: FileId,
+    path: PathBuf,
+    on_progress: Channel<LoadProgress>,
+) -> Result<ReplaceOutcome, String> {
+    let (state, player) = (state.inner().clone(), player.inner().clone());
+    let (editors, plugins) = (editors.inner().clone(), plugins.inner().clone());
+    blocking(move || {
+        stop_playing(&state, &player, file_id);
+        let replaced = state.replace_audio(file_id, &path, &plugins, throttled(on_progress));
+        // The effects are new instances now (or, on failure, the old ones are untouched).
+        close_removed_editors(&state, &editors, file_id);
+        replaced
+    })
+    .await?
 }
 
 /// Cancel an `open_file` still running for `file_id`; that call then rejects as cancelled.

@@ -1,5 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { defaultExportPath, defaultSessionPath, isSessionPath, planOpens, withSessionExtension } from "./sessionFiles";
+import {
+  closePrompt,
+  defaultExportPath,
+  defaultSessionPath,
+  isSessionPath,
+  planOpens,
+  withSessionExtension,
+} from "./sessionFiles";
+
+describe("closePrompt", () => {
+  it("names the session file the tab saves to", () => {
+    expect(closePrompt({ name: "take.wav", sessionPath: "C:\\Takes\\mix.hdsession.json" })).toBe(
+      "Save changes to the session “mix.hdsession.json” before closing?",
+    );
+  });
+
+  it("says a session is saved, not the WAV, when the tab has none", () => {
+    expect(closePrompt({ name: "take.wav", sessionPath: null })).toBe(
+      "Save a session for “take.wav” before closing? The WAV itself isn't changed.",
+    );
+  });
+});
 
 describe("defaultExportPath", () => {
   it("sits next to the WAV with -export", () => {
@@ -19,21 +40,39 @@ describe("planOpens", () => {
     const plan = planOpens(
       [
         { kind: "wav", path: "/t/a.wav" },
-        { kind: "session", sessionPath: "/t/mix.hdsession.json", audioPath: "/t/take.wav" },
+        { kind: "session", sessionPath: "/t/mix.hdsession.json", audioPath: "/t/take.wav", relink: false },
         { kind: "wav", path: "/t/b.wav" },
       ],
       none,
     );
     expect(plan).toEqual([
-      { kind: "open", path: "/t/a.wav", sessionPath: null },
-      { kind: "open", path: "/t/take.wav", sessionPath: "/t/mix.hdsession.json" },
-      { kind: "open", path: "/t/b.wav", sessionPath: null },
+      { kind: "open", path: "/t/a.wav", sessionPath: null, relink: false },
+      { kind: "open", path: "/t/take.wav", sessionPath: "/t/mix.hdsession.json", relink: false },
+      { kind: "open", path: "/t/b.wav", sessionPath: null, relink: false },
     ]);
+  });
+
+  it("passes a chosen WAV through for relinking", () => {
+    const plan = planOpens(
+      [{ kind: "session", sessionPath: "/t/mix.hdsession.json", audioPath: "/t/take-final.wav", relink: true }],
+      none,
+    );
+    expect(plan).toEqual([
+      { kind: "open", path: "/t/take-final.wav", sessionPath: "/t/mix.hdsession.json", relink: true },
+    ]);
+  });
+
+  it("activates a chosen WAV that is already open, without relinking it", () => {
+    const plan = planOpens(
+      [{ kind: "session", sessionPath: "/t/mix.hdsession.json", audioPath: "/t/b.wav", relink: true }],
+      (p) => p === "/t/b.wav",
+    );
+    expect(plan).toEqual([{ kind: "activate", path: "/t/b.wav", sessionPath: "/t/mix.hdsession.json" }]);
   });
 
   it("activates a WAV that is already open instead of applying the session", () => {
     const plan = planOpens(
-      [{ kind: "session", sessionPath: "/t/mix.hdsession.json", audioPath: "/t/take.wav" }],
+      [{ kind: "session", sessionPath: "/t/mix.hdsession.json", audioPath: "/t/take.wav", relink: false }],
       (p) => p === "/t/take.wav",
     );
     expect(plan).toEqual([{ kind: "activate", path: "/t/take.wav", sessionPath: "/t/mix.hdsession.json" }]);
@@ -43,7 +82,7 @@ describe("planOpens", () => {
     const plan = planOpens(
       [
         { kind: "wav", path: "C:\\t\\take.wav" },
-        { kind: "session", sessionPath: "C:\\t\\mix.hdsession.json", audioPath: "C:\\t\\take.wav" },
+        { kind: "session", sessionPath: "C:\\t\\mix.hdsession.json", audioPath: "C:\\t\\take.wav", relink: false },
       ],
       none,
     );

@@ -1,6 +1,9 @@
 // The active document (facade over the active tab), loading a file into a tab, and
 // selection statistics.
 import {
+  type EditState,
+  type EffectWarning,
+  type Metadata,
   type RestoreOutcome,
   closeFile,
   computeStats,
@@ -69,45 +72,69 @@ export async function loadIntoTab(tab: Tab): Promise<void> {
     // Before anything is fetched or the tab can be edited, so all of it is the session's.
     const restored = tab.sessionPath ? await restoreInto(tab, tab.sessionPath) : null;
     if (restored) meta = (await getMetadata(tab.id)) ?? meta;
-    const [whole, clipRuns, clip, chain] = await Promise.all([
-      computeStats(tab.id, null),
-      getClipRuns(tab.id),
-      getClip(tab.id),
-      getChain(tab.id),
-    ]);
-    tab.meta = meta;
-    tab.clip = clip;
-    tab.chain = chain;
-    tab.wholeStats = whole;
-    tab.stats = whole;
-    tab.clipRuns = clipRuns;
-    if (restored) {
-      setEditState(tab, restored.editState);
-      tab.revision = restored.editState.revision;
-      // Restored edits are analysed in the background, as after an edit (see `loadTab`).
-      tab.analysing = whole === null;
-    }
-    tab.status = "ready";
-    if (meta.truncated) {
-      notify(
-        "warning",
-        `“${meta.name}” appears truncated`,
-        "The data chunk is shorter than its header declares. The audio that is present was loaded.",
-      );
-    }
+    await showLoaded(tab, meta, restored?.editState ?? null);
     if (restored) showRestoreNotices(meta.name, restored);
   } finally {
     clearTimeout(timer);
   }
 }
 
+/**
+ * Show `tab`'s file as just loaded (opened, restored or replaced): its metadata, whole-file
+ * stats, clip runs, clip and chain, with `editState` when it isn't a fresh file's.
+ */
+export async function showLoaded(tab: Tab, meta: Metadata, editState: EditState | null): Promise<void> {
+  const [whole, clipRuns, clip, chain] = await Promise.all([
+    computeStats(tab.id, null),
+    getClipRuns(tab.id),
+    getClip(tab.id),
+    getChain(tab.id),
+  ]);
+  tab.meta = meta;
+  tab.clip = clip;
+  tab.chain = chain;
+  tab.wholeStats = whole;
+  tab.stats = whole;
+  tab.clipRuns = clipRuns;
+  if (editState) {
+    setEditState(tab, editState);
+    tab.revision = editState.revision;
+    // Edits not analysed yet are analysed in the background, as after an edit (see `loadTab`).
+    tab.analysing = whole === null;
+  }
+  tab.status = "ready";
+  if (meta.truncated) {
+    notify(
+      "warning",
+      `“${meta.name}” appears truncated`,
+      "The data chunk is shorter than its header declares. The audio that is present was loaded.",
+    );
+  }
+}
+
 /** Apply session `sessionPath` to `tab`'s file, just opened. On failure the file is released. */
 async function restoreInto(tab: Tab, sessionPath: string): Promise<RestoreOutcome> {
+  let restored: RestoreOutcome;
   try {
-    return await restoreSession(tab.id, sessionPath);
+    restored = await restoreSession(tab.id, sessionPath, tab.relink);
   } catch (e) {
     void closeFile(tab.id);
     throw e;
+  }
+  if (!restored.applied) {
+    void closeFile(tab.id);
+    throw new SessionMismatch(sessionPath, tab.name);
+  }
+  return restored;
+}
+
+/** A session's WAV no longer matches it: the tab is closed, and another WAV can be chosen. */
+export class SessionMismatch extends Error {
+  constructor(
+    readonly sessionPath: string,
+    readonly audioName: string,
+  ) {
+    super(`The audio file “${audioName}” no longer matches the session.`);
   }
 }
 
@@ -119,11 +146,23 @@ function showRestoreNotices(name: string, restored: RestoreOutcome) {
       "Its format and length are the same, so the session was restored. Check that it is the recording you expect.",
     );
   }
-  if (restored.warnings.length > 0) {
+  if (restored.editsDropped) {
     notify(
       "warning",
-      restored.warnings.length === 1 ? "An effect wasn't fully restored" : "Some effects weren't fully restored",
-      restored.warnings.map((w) => `${w.effect}: ${w.reason}`).join("\n"),
+      "The session's edits were left out",
+      `“${name}” is a different recording from the one the session was saved with, so only its effects were restored.`,
+    );
+  }
+  showEffectWarnings(restored.warnings);
+}
+
+/** Effects that couldn't be brought across to a tab's audio, as one notice. */
+export function showEffectWarnings(warnings: EffectWarning[]) {
+  if (warnings.length > 0) {
+    notify(
+      "warning",
+      warnings.length === 1 ? "An effect wasn't fully restored" : "Some effects weren't fully restored",
+      warnings.map((w) => `${w.effect}: ${w.reason}`).join("\n"),
     );
   }
 }

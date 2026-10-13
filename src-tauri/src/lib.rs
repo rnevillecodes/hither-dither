@@ -83,6 +83,7 @@ pub fn run() {
             commands::save_session,
             commands::read_session,
             commands::restore_session,
+            commands::replace_audio,
             commands::set_clip,
             commands::set_crossfade,
             commands::get_clip,

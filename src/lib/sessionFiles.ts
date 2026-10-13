@@ -7,12 +7,13 @@ export const SESSION_EXTENSION = ".hdsession.json";
 /** A path to open, with its session read (or failed to read) when it is one. */
 export type OpenRequest =
   | { kind: "wav"; path: string }
-  | { kind: "session"; sessionPath: string; audioPath: string }
+  /** `relink`: `audioPath` is a WAV the user chose instead of the session's own. */
+  | { kind: "session"; sessionPath: string; audioPath: string; relink: boolean }
   | { kind: "invalid"; sessionPath: string; message: string };
 
 export type OpenAction =
   /** Open `path` in a new tab, restoring `sessionPath` once it has loaded. */
-  | { kind: "open"; path: string; sessionPath: string | null }
+  | { kind: "open"; path: string; sessionPath: string | null; relink: boolean }
   /** `path` is already open (or opening): activate its tab. A session isn't applied to it. */
   | { kind: "activate"; path: string; sessionPath: string | null }
   | { kind: "error"; sessionPath: string; message: string };
@@ -25,10 +26,10 @@ export function planOpens(requests: readonly OpenRequest[], isOpen: (path: strin
   const opening: string[] = [];
   return requests.map((r): OpenAction => {
     if (r.kind === "invalid") return { kind: "error", sessionPath: r.sessionPath, message: r.message };
-    const [path, sessionPath] = r.kind === "wav" ? [r.path, null] : [r.audioPath, r.sessionPath];
+    const [path, sessionPath, relink] = r.kind === "wav" ? [r.path, null, false] : [r.audioPath, r.sessionPath, r.relink];
     if (isOpen(path) || opening.some((p) => samePath(p, path))) return { kind: "activate", path, sessionPath };
     opening.push(path);
-    return { kind: "open", path, sessionPath };
+    return { kind: "open", path, sessionPath, relink };
   });
 }
 
@@ -49,6 +50,15 @@ export function isSessionPath(path: string): boolean {
 export function defaultSessionPath(tab: { path: string; sessionPath: string | null }): string {
   if (tab.sessionPath) return tab.sessionPath;
   return tab.path.replace(/\.wave?$/i, "") + SESSION_EXTENSION;
+}
+
+/**
+ * The close prompt's question. Saving writes the session, never the WAV, so it names the
+ * session file, or says a session will be saved when the tab has none yet.
+ */
+export function closePrompt(tab: { name: string; sessionPath: string | null }): string {
+  if (tab.sessionPath) return `Save changes to the session “${baseName(tab.sessionPath)}” before closing?`;
+  return `Save a session for “${tab.name}” before closing? The WAV itself isn't changed.`;
 }
 
 /** Where Export proposes writing: next to the WAV, with `-export` (`take.wav` → `take-export.wav`). */

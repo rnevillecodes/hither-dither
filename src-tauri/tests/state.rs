@@ -1523,7 +1523,9 @@ fn a_restored_session_sounds_and_saves_the_same() {
 
     // Reopened from the session in another tab.
     state.open(2, &source, |_, _| {}).unwrap();
-    let out = state.restore_session(2, &session, &fx.plugins).unwrap();
+    let out = state
+        .restore_session(2, &session, false, &fx.plugins)
+        .unwrap();
     assert!(out.warnings.is_empty() && !out.wav_changed);
     // A fresh history at the restored state, which matches its session file.
     assert!(!out.edit_state.dirty && !out.edit_state.can_undo && !out.edit_state.can_redo);
@@ -1561,7 +1563,9 @@ fn a_restored_session_with_only_bypassed_effects_is_not_unsaved() {
     state
         .open(2, &dir.path().join("sine1.wav"), |_, _| {})
         .unwrap();
-    let out = state.restore_session(2, &session, &fx.plugins).unwrap();
+    let out = state
+        .restore_session(2, &session, false, &fx.plugins)
+        .unwrap();
     assert!(!out.edit_state.dirty && !out.edit_state.can_undo);
     let chain = state.get_chain(2).unwrap();
     assert!(chain.effects[0].bypassed && !chain.bypass_all);
@@ -1589,13 +1593,13 @@ fn a_session_is_not_applied_to_a_different_recording() {
         &interleave(&[s.clone(), s]),
     );
     state.open(2, &wav, |_, _| {}).unwrap();
-    let err = state.restore_session(2, &session, &fx.plugins).unwrap_err();
-    assert_eq!(
-        err,
-        "The audio file “sine1.wav” no longer matches the session."
-    );
+    let out = state
+        .restore_session(2, &session, false, &fx.plugins)
+        .unwrap();
+    // Not applied, so the frontend can offer to choose another WAV.
+    assert!(!out.applied);
     let st = state.edit_state(2).unwrap();
-    assert!(!st.dirty && !st.can_undo);
+    assert!(!st.dirty && !st.can_undo && !st.edited);
     assert_eq!(state.get(2).unwrap().metadata.frames, 7_000);
 }
 
@@ -1615,7 +1619,9 @@ fn a_touched_wav_is_restored_with_a_warning() {
     std::thread::sleep(std::time::Duration::from_millis(50));
     std::fs::write(&wav, std::fs::read(&wav).unwrap()).unwrap();
     state.open(2, &wav, |_, _| {}).unwrap();
-    let out = state.restore_session(2, &session, &fx.plugins).unwrap();
+    let out = state
+        .restore_session(2, &session, false, &fx.plugins)
+        .unwrap();
     assert!(out.wav_changed);
     assert!(!out.edit_state.dirty);
 }
@@ -1646,7 +1652,9 @@ fn effects_that_cant_be_found_are_left_out() {
     });
 
     state.open(2, &wav, |_, _| {}).unwrap();
-    let out = state.restore_session(2, &session, &fx.plugins).unwrap();
+    let out = state
+        .restore_session(2, &session, false, &fx.plugins)
+        .unwrap();
     let chain = state.get_chain(2).unwrap();
     assert_eq!(effect_names(&chain), ["HD Test Gain", "HD Test Stereo"]);
     assert_eq!(gain_of(&state, 2, slot_ids(&chain)[0]), plus_6db());
@@ -1674,7 +1682,9 @@ fn an_effect_that_rejects_its_settings_keeps_its_defaults() {
     state
         .open(2, &dir.path().join("sine1.wav"), |_, _| {})
         .unwrap();
-    let out = state.restore_session(2, &session, &fx.plugins).unwrap();
+    let out = state
+        .restore_session(2, &session, false, &fx.plugins)
+        .unwrap();
     let chain = state.get_chain(2).unwrap();
     assert_eq!(effect_names(&chain), ["HD Test Gain"]);
     assert_eq!(gain_of(&state, 2, slot_ids(&chain)[0]), 0.5);
@@ -1704,7 +1714,9 @@ fn a_stereo_only_effect_is_left_out_of_a_5_1_session() {
     });
 
     state.open(2, &path, |_, _| {}).unwrap();
-    let out = state.restore_session(2, &session, &fx.plugins).unwrap();
+    let out = state
+        .restore_session(2, &session, false, &fx.plugins)
+        .unwrap();
     assert!(state.get_chain(2).unwrap().effects.is_empty());
     assert_eq!(out.warnings[0].effect, "HD Test Stereo");
     assert_eq!(
@@ -1727,7 +1739,9 @@ fn restored_edits_are_analysed() {
     state
         .open(2, &dir.path().join("sine1.wav"), |_, _| {})
         .unwrap();
-    let out = state.restore_session(2, &session, &fx.plugins).unwrap();
+    let out = state
+        .restore_session(2, &session, false, &fx.plugins)
+        .unwrap();
     assert!(out.edit_state.revision > 0);
     assert_eq!(analysed_stats(&state, 2), expected);
 }
@@ -1781,7 +1795,9 @@ fn a_change_in_a_plugin_editor_marks_the_tab() {
     state
         .open(2, &dir.path().join("sine1.wav"), |_, _| {})
         .unwrap();
-    state.restore_session(2, &session, &fx.plugins).unwrap();
+    state
+        .restore_session(2, &session, false, &fx.plugins)
+        .unwrap();
     assert!(!state.edit_state(2).unwrap().dirty);
     let restored = slot_ids(&state.get_chain(2).unwrap())[0];
     let instance = state.slot(2, restored).unwrap();
@@ -1803,7 +1819,9 @@ fn a_change_after_restoring_marks_the_tab() {
     state
         .open(2, &dir.path().join("sine1.wav"), |_, _| {})
         .unwrap();
-    let out = state.restore_session(2, &session, &fx.plugins).unwrap();
+    let out = state
+        .restore_session(2, &session, false, &fx.plugins)
+        .unwrap();
     assert!(!out.edit_state.dirty && !out.edit_state.can_undo);
     let slot = slot_ids(&state.get_chain(2).unwrap())[0];
     assert!(
@@ -1849,4 +1867,250 @@ fn a_session_not_written_leaves_the_tab_unsaved() {
     let missing = dir.path().join("missing").join("mix.hdsession.json");
     assert!(state.save_session(1, &missing, true).is_err());
     assert!(state.edit_state(1).unwrap().dirty);
+}
+
+// --- Choosing another WAV for a session ----------------------------------------------------
+
+/// A session of `sine1.wav` with a silence edit and HD Test Gain at +6 dB, with the tab closed.
+fn edited_session(state: &AppState, fx: &Effects, dir: &tempfile::TempDir) -> std::path::PathBuf {
+    open_sine(state, dir, 1, 8_000);
+    state.apply_edit(1, EditOp::Silence, 0, 100, 0.0).unwrap();
+    add_double(state, fx, 1);
+    let session = dir.path().join("mix.hdsession.json");
+    state.save_session(1, &session, true).unwrap();
+    state.close(1);
+    session
+}
+
+#[test]
+fn a_renamed_wav_keeps_the_session_edits() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    let session = edited_session(&state, &fx, &dir);
+    let renamed = dir.path().join("sine1-final.wav");
+    std::fs::rename(dir.path().join("sine1.wav"), &renamed).unwrap();
+
+    state.open(2, &renamed, |_, _| {}).unwrap();
+    let out = state
+        .restore_session(2, &session, true, &fx.plugins)
+        .unwrap();
+    assert!(out.applied && !out.edits_dropped && out.warnings.is_empty());
+    // The edits, the effect with its setting, and unsaved: the session points elsewhere now.
+    assert!(out.edit_state.edited && out.edit_state.dirty && !out.edit_state.can_undo);
+    let chain = state.get_chain(2).unwrap();
+    assert_eq!(gain_of(&state, 2, slot_ids(&chain)[0]), plus_6db());
+}
+
+#[test]
+fn a_different_recording_keeps_only_the_effects() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    let session = edited_session(&state, &fx, &dir);
+    let s = sine(440.0, 0.5, 8_000, 5_000);
+    let other = write(
+        &dir,
+        "other.wav",
+        WavBuilder::new(Encoding::Pcm, 16, 2, 8_000),
+        &interleave(&[s.clone(), s]),
+    );
+
+    state.open(2, &other, |_, _| {}).unwrap();
+    let out = state
+        .restore_session(2, &session, true, &fx.plugins)
+        .unwrap();
+    assert!(out.applied && out.edits_dropped);
+    assert!(!out.edit_state.edited && out.edit_state.dirty);
+    assert_eq!(state.get(2).unwrap().metadata.frames, 5_000);
+    let chain = state.get_chain(2).unwrap();
+    assert_eq!(effect_names(&chain), ["HD Test Gain"]);
+    assert_eq!(gain_of(&state, 2, slot_ids(&chain)[0]), plus_6db());
+}
+
+#[test]
+fn edited_follows_the_current_edits() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    let session = edited_session(&state, &fx, &dir);
+    state
+        .open(2, &dir.path().join("sine1.wav"), |_, _| {})
+        .unwrap();
+    let out = state
+        .restore_session(2, &session, false, &fx.plugins)
+        .unwrap();
+    // Restored edits with nothing to undo.
+    assert!(out.edit_state.edited && !out.edit_state.can_undo);
+
+    open_sine(&state, &dir, 3, 8_000);
+    assert!(!state.edit_state(3).unwrap().edited);
+    assert!(
+        state
+            .apply_edit(3, EditOp::Silence, 0, 10, 0.0)
+            .unwrap()
+            .edit_state
+            .edited
+    );
+    assert!(!state.undo(3).unwrap().edit_state.edited);
+}
+
+#[test]
+fn a_missing_wav_is_reported_by_name() {
+    use hither_dither_lib::session::read_info;
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    let session = edited_session(&state, &fx, &dir);
+    let found = read_info(&session).unwrap();
+    assert_eq!(found.audio_path, Some(dir.path().join("sine1.wav")));
+    std::fs::remove_file(dir.path().join("sine1.wav")).unwrap();
+    let missing = read_info(&session).unwrap();
+    assert_eq!(missing.audio_path, None);
+    assert_eq!(missing.audio_name, "sine1.wav");
+}
+
+// --- Replacing a tab's audio ---------------------------------------------------------------
+
+/// A WAV of a 16-bit sine at `peak`, `frames` long, with `channels` channels.
+fn tone_file(
+    dir: &tempfile::TempDir,
+    name: &str,
+    channels: u16,
+    frames: usize,
+    peak: f64,
+) -> std::path::PathBuf {
+    let s = sine(330.0, peak, 8_000, frames);
+    write(
+        dir,
+        name,
+        WavBuilder::new(Encoding::Pcm, 16, channels, 8_000),
+        &interleave(&vec![s; channels as usize]),
+    )
+}
+
+#[test]
+fn replacing_the_audio_keeps_the_effects() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_tone(
+        &state,
+        &dir,
+        1,
+        WavBuilder::new(Encoding::Pcm, 16, 2, 8_000),
+        0.4,
+    );
+    add_double(&state, &fx, 1);
+    let second = slot_ids(&state.add_effect(1, &fx.plugins, fx.stereo).unwrap().chain)[1];
+    state.set_effect_bypass(1, second, true).unwrap();
+    state.set_bypass_all(1, false).unwrap();
+    state.apply_edit(1, EditOp::FadeIn, 0, 1_000, 0.0).unwrap();
+    let before = state.get_chain(1).unwrap();
+
+    let take2 = tone_file(&dir, "take2.wav", 2, 20_000, 0.3);
+    let out = state
+        .replace_audio(1, &take2, &fx.plugins, |_, _| {})
+        .unwrap();
+    assert!(out.warnings.is_empty());
+    assert_eq!(
+        (out.metadata.name.as_str(), out.metadata.frames),
+        ("take2.wav", 20_000)
+    );
+    // The same effects in order, with their settings and bypass switches; new instances.
+    let chain = state.get_chain(1).unwrap();
+    assert_eq!(effect_names(&chain), effect_names(&before));
+    let bypassed: Vec<_> = chain.effects.iter().map(|e| e.bypassed).collect();
+    assert_eq!(bypassed, [false, true]);
+    assert_ne!(slot_ids(&chain), slot_ids(&before));
+    assert_eq!(gain_of(&state, 1, slot_ids(&chain)[0]), plus_6db());
+    // The edits are gone and the history starts again, unsaved.
+    let st = out.edit_state;
+    assert!(!st.edited && !st.can_undo && !st.can_redo && st.dirty);
+    assert_eq!(state.get(1).unwrap().metadata.path, take2);
+
+    // Exported through the kept gain.
+    let copy = dir.path().join("take2-export.wav");
+    state.export(1, &copy, |_, _| {}).unwrap();
+    let (src, done) = (native_samples(&take2), native_samples(&copy));
+    for (s, d) in src.iter().zip(&done) {
+        assert_eq!(*d, (s * 2.0).clamp(-32_768.0, 32_767.0));
+    }
+}
+
+#[test]
+fn effects_that_dont_fit_the_new_audio_are_left_out() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    add_double(&state, &fx, 1);
+    state.add_effect(1, &fx.plugins, fx.stereo).unwrap();
+    let mono = tone_file(&dir, "mono.wav", 1, 8_000, 0.3);
+    let out = state
+        .replace_audio(1, &mono, &fx.plugins, |_, _| {})
+        .unwrap();
+    assert_eq!(effect_names(&state.get_chain(1).unwrap()), ["HD Test Gain"]);
+    assert_eq!(out.warnings.len(), 1);
+    assert_eq!(out.warnings[0].effect, "HD Test Stereo");
+    assert_eq!(
+        out.warnings[0].reason,
+        "HD Test Stereo doesn't support mono audio"
+    );
+}
+
+#[test]
+fn replacing_marks_a_saved_tab_unsaved() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    state.add_effect(1, &fx.plugins, fx.gain).unwrap();
+    let session = dir.path().join("mix.hdsession.json");
+    assert!(
+        !state
+            .save_session(1, &session, true)
+            .unwrap()
+            .edit_state
+            .dirty
+    );
+    let take2 = tone_file(&dir, "take2.wav", 2, 8_000, 0.3);
+    let out = state
+        .replace_audio(1, &take2, &fx.plugins, |_, _| {})
+        .unwrap();
+    assert!(out.edit_state.dirty);
+    // Saving now points the session at the new WAV.
+    state.save_session(1, &session, true).unwrap();
+    assert_eq!(SessionFile::read(&session).unwrap().audio.path, take2);
+}
+
+#[test]
+fn a_failed_replacement_changes_nothing() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let slot = add_double(&state, &fx, 1);
+    state.apply_edit(1, EditOp::Silence, 0, 100, 0.0).unwrap();
+    let (chain, st) = (state.get_chain(1).unwrap(), state.edit_state(1).unwrap());
+
+    let junk = dir.path().join("notes.wav");
+    std::fs::write(&junk, b"not audio").unwrap();
+    let err = state
+        .replace_audio(1, &junk, &fx.plugins, |_, _| {})
+        .unwrap_err();
+    assert!(err.contains("notes.wav"), "{err}");
+    // Same WAV, edits, history and effect instance.
+    assert_eq!(state.get(1).unwrap().metadata.name, "sine1.wav");
+    assert_eq!(state.get_chain(1).unwrap(), chain);
+    assert_eq!(state.edit_state(1).unwrap(), st);
+    assert_eq!(gain_of(&state, 1, slot), plus_6db());
+
+    // The tab's own WAV is refused too.
+    let own = dir.path().join("sine1.wav");
+    let err = state
+        .replace_audio(1, &own, &fx.plugins, |_, _| {})
+        .unwrap_err();
+    assert!(err.contains("already this tab's audio"), "{err}");
+    assert_eq!(state.edit_state(1).unwrap(), st);
 }

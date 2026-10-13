@@ -9,6 +9,7 @@ import {
   save,
   saveAs,
   exportAudio,
+  replaceAudio,
   toggleBypassAll,
   undo,
 } from "./editActions";
@@ -21,6 +22,7 @@ export type ToggleId =
   | "save"
   | "save-as"
   | "export"
+  | "replace-audio"
   | "undo"
   | "redo"
   | "crop"
@@ -87,6 +89,7 @@ export async function installMenu(): Promise<void> {
       await toggle("save-as", "Save As…", () => void saveAs(), "CmdOrCtrl+Shift+S"),
       await PredefinedMenuItem.new({ item: "Separator" }),
       await toggle("export", "Export…", () => void exportAudio(), "CmdOrCtrl+E"),
+      await toggle("replace-audio", "Replace Audio…", () => void replaceAudio()),
       await PredefinedMenuItem.new({ item: "Separator" }),
       await toggle("close-tab", "Close Tab", closeActiveTab, "CmdOrCtrl+W"),
       await PredefinedMenuItem.new({ item: "Separator" }),

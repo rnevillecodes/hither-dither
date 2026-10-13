@@ -1,14 +1,15 @@
-// Editing actions shared by the Edit menu and keyboard shortcuts: edits, undo/redo and saving.
-import { message, save as saveDialog } from "@tauri-apps/plugin-dialog";
+// Editing actions shared by the Edit menu and keyboard shortcuts: edits, undo/redo, saving,
+// exporting and replacing the audio.
+import { message, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
-import { PROGRESS_DELAY_MS, setSelection } from "./app.svelte";
+import { PROGRESS_DELAY_MS, forgetStats, setSelection, showEffectWarnings, showLoaded } from "./app.svelte";
 import { askFadeCurve, curveDialog } from "./curveDialog.svelte";
-import { type EditKind, afterEdit, canApply, remapFrame } from "./editRules";
+import { type EditKind, afterEdit, canApply, remapFrame, replaceNeedsConfirmation } from "./editRules";
 import { notify } from "./notices.svelte";
 import { setEditState, showChainOutcome } from "./outcome";
-import { defaultExportPath, defaultSessionPath, withSessionExtension } from "./sessionFiles";
+import { closePrompt, defaultExportPath, defaultSessionPath, withSessionExtension } from "./sessionFiles";
 import { samePath } from "./tabOrder";
-import { type Tab, activeTab, findTab, tabs } from "./tabs.svelte";
+import { type Tab, activeTab, findTab, overviewCache, tabs } from "./tabs.svelte";
 import { prefetchPeaks } from "./waveform/prefetch";
 import { haltPlayback, playback, transport } from "./transport.svelte";
 import { view } from "./view.svelte";
@@ -410,7 +411,7 @@ async function writeSession(tab: Tab, path: string, replace: boolean): Promise<b
  */
 export async function confirmClose(tab: Tab): Promise<boolean> {
   if (!tab.dirty) return true;
-  const choice = await message(`Save changes to “${tab.name}” before closing?`, {
+  const choice = await message(closePrompt(tab), {
     title: "Unsaved changes",
     kind: "warning",
     buttons: { yes: "Save", no: "Don't Save", cancel: "Cancel" },
@@ -474,6 +475,96 @@ async function exportTab(tab: Tab, path: string): Promise<boolean> {
     return true;
   } catch (e) {
     if (findTab(tab.id)) notify("error", "Could not export", String(e));
+    return false;
+  } finally {
+    clearTimeout(timer);
+    tab.editing = false;
+    tab.progress.visible = false;
+  }
+}
+
+/** File › Replace Audio is available: the active tab is loaded and not exporting. */
+export function canReplaceAudio(): boolean {
+  return !!editableTab();
+}
+
+/**
+ * File › Replace Audio: swap the active tab's WAV for another, keeping its effects and their
+ * settings and its session file. The edits and undo history are dropped, so it asks first
+ * when there is anything to lose.
+ */
+export async function replaceAudio(): Promise<boolean> {
+  const tab = editableTab();
+  if (!tab || duplicatePress()) return false;
+  const chosen = await openDialog({
+    title: "Replace Audio",
+    multiple: false,
+    directory: false,
+    filters: [{ name: "WAV audio", extensions: ["wav", "wave", "WAV"] }],
+  });
+  if (typeof chosen !== "string" || !findTab(tab.id)) return false;
+  const title = "Could not replace the audio";
+  if (samePath(chosen, tab.path)) {
+    notify("error", title, `“${tab.name}” is already this tab's audio.`);
+    return false;
+  }
+  const other = tabs.list.find((t) => t.id !== tab.id && samePath(t.path, chosen));
+  if (other) {
+    notify("error", title, `“${other.name}” is open in another tab. Close it first, or choose another file.`);
+    return false;
+  }
+  if (replaceNeedsConfirmation(tab)) {
+    const choice = await message(
+      `Replace the audio of “${tab.name}”?\n\nIts edits and undo history will be discarded. Its effects and their settings are kept.`,
+      { title: "Replace Audio", kind: "warning", buttons: { ok: "Replace", cancel: "Cancel" } },
+    );
+    if (choice !== "Replace" || !findTab(tab.id)) return false;
+  }
+  return replaceTabAudio(tab, chosen);
+}
+
+async function replaceTabAudio(tab: Tab, path: string): Promise<boolean> {
+  if (tab.editing) return false;
+  tab.editing = true;
+  // Let changes already on their way land first.
+  await queues.get(tab.id);
+  if (tabs.activeId === tab.id) haltPlayback();
+  const old = tab.meta;
+  // Shown as loading (the waveform goes) and not editable until the new audio is in.
+  tab.meta = null;
+  tab.progress = { fraction: 0, visible: false };
+  const timer = setTimeout(() => (tab.progress.visible = true), PROGRESS_DELAY_MS);
+  try {
+    const outcome = await api.replaceAudio(tab.id, path, (p) => {
+      tab.progress.fraction = p.totalFrames ? p.doneFrames / p.totalFrames : 1;
+    });
+    if (!findTab(tab.id)) return true;
+    // A different recording: nothing of the old audio's view, selection or caches applies.
+    tab.path = outcome.metadata.path;
+    tab.name = outcome.metadata.name;
+    tab.selection = null;
+    tab.statsPending = false;
+    tab.vp = null;
+    tab.userScrolled = false;
+    tab.playhead = 0;
+    tab.playStart = 0;
+    tab.peaksVersion = nextPeaksVersion();
+    overviewCache.delete(tab.id);
+    forgetStats(tab.id);
+    if (tabs.activeId === tab.id) {
+      view.vp = null;
+      view.userScrolled = false;
+      transport.playhead = 0;
+      transport.playStart = 0;
+    }
+    await showLoaded(tab, outcome.metadata, outcome.editState);
+    showEffectWarnings(outcome.warnings);
+    return true;
+  } catch (e) {
+    if (findTab(tab.id)) {
+      tab.meta = old;
+      notify("error", "Could not replace the audio", String(e));
+    }
     return false;
   } finally {
     clearTimeout(timer);

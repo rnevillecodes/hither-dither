@@ -6,6 +6,7 @@ export function setEditState(tab: Tab, state: EditState) {
   tab.dirty = state.dirty;
   tab.canUndo = state.can_undo;
   tab.canRedo = state.can_redo;
+  tab.edited = state.edited;
 }
 
 /**

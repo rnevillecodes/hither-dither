@@ -334,6 +334,27 @@ impl SessionFile {
     }
 }
 
+/// A session's WAV, as `read_session` reports it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfo {
+    /// The WAV to open for the session: where it was, or next to the session if moved.
+    /// `None` when neither exists, so the user can choose another.
+    pub audio_path: Option<PathBuf>,
+    /// The recorded WAV's file name, for messages.
+    pub audio_name: String,
+}
+
+/// Checks the session at `path` and finds its WAV. Fails only if the session itself can't
+/// be read; a missing WAV is `audio_path: None`.
+pub fn read_info(path: &Path) -> Result<SessionInfo, SessionError> {
+    let session = SessionFile::read(path)?;
+    Ok(SessionInfo {
+        audio_path: session.resolve_audio(path).ok(),
+        audio_name: session.audio.name(),
+    })
+}
+
 /// Whether `path` names a session file.
 pub fn is_session_path(path: &Path) -> bool {
     let name = file_name(path).to_lowercase();

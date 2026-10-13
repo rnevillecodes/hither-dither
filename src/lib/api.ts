@@ -187,8 +187,10 @@ export type EditOp = "crop" | "delete" | "silence" | "fadeIn" | "fadeOut";
 export interface EditState {
   can_undo: boolean;
   can_redo: boolean;
-  /** The audio differs from the file on disk. */
+  /** Unsaved: something changed since the session was last saved or the tab was opened. */
   dirty: boolean;
+  /** The audio is edited (it differs from the WAV on disk), even with nothing to undo. */
+  edited: boolean;
   /** Increases whenever the audio changes; cached peaks are stale after a change. */
   revision: number;
 }
@@ -295,8 +297,10 @@ export function exportFile(fileId: number, path: string, onProgress: (p: LoadPro
 // --- Session files ---------------------------------------------------------------------
 
 export interface SessionInfo {
-  /** The WAV to open for the session (where it was, or next to the session if moved). */
-  audioPath: string;
+  /** The WAV to open for the session (where it was, or next to the session if moved), or null if neither exists. */
+  audioPath: string | null;
+  /** The recorded WAV's file name, for messages. */
+  audioName: string;
 }
 
 export interface EffectWarning {
@@ -306,10 +310,22 @@ export interface EffectWarning {
 }
 
 export interface RestoreOutcome {
+  /** False when the WAV no longer matches the session: nothing changed. */
+  applied: boolean;
   editState: EditState;
   /** The WAV's size or modification time differ from when the session was saved. */
   wavChanged: boolean;
+  /** Relinked to a different recording: the session's edits were left out. */
+  editsDropped: boolean;
   /** Effects left out or kept at their defaults, in chain order. */
+  warnings: EffectWarning[];
+}
+
+export interface ReplaceOutcome {
+  /** The new WAV's. */
+  metadata: Metadata;
+  editState: EditState;
+  /** Effects left out (the new audio's layout isn't supported) or at their defaults. */
   warnings: EffectWarning[];
 }
 
@@ -332,9 +348,14 @@ export function readSession(path: string): Promise<SessionInfo> {
   return invoke("read_session", { path });
 }
 
-/** Apply a session to a file just opened from its `audioPath`. */
-export function restoreSession(fileId: number, path: string): Promise<RestoreOutcome> {
-  return invoke("restore_session", { fileId, path });
+/** Apply a session to a file just opened from its `audioPath`, or from a WAV the user chose (`relink`). */
+export function restoreSession(fileId: number, path: string, relink: boolean): Promise<RestoreOutcome> {
+  return invoke("restore_session", { fileId, path, relink });
+}
+
+/** Replace the file's audio with another WAV, keeping its effects but not its edits. */
+export function replaceAudio(fileId: number, path: string, onProgress: (p: LoadProgress) => void): Promise<ReplaceOutcome> {
+  return invoke("replace_audio", { fileId, path, onProgress: progressChannel(onProgress) });
 }
 
 // --- Plugins ---------------------------------------------------------------------------
