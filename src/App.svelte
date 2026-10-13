@@ -1,7 +1,11 @@
 <script lang="ts">
   import CurveDialog from "./components/CurveDialog.svelte";
+  import EffectBrowser from "./components/EffectBrowser.svelte";
+  import EffectsPanel from "./components/EffectsPanel.svelte";
+  import GenericControls from "./components/GenericControls.svelte";
   import MetadataPanel from "./components/MetadataPanel.svelte";
   import Notices from "./components/Notices.svelte";
+  import PluginManager from "./components/PluginManager.svelte";
   import ProgressOverlay from "./components/ProgressOverlay.svelte";
   import StatsPanel from "./components/StatsPanel.svelte";
   import TabBar from "./components/TabBar.svelte";
@@ -16,6 +20,9 @@
   import { layout } from "./lib/layout.svelte";
   import {
     applyEdit,
+    bypassAllOn,
+    canAddEffect,
+    canBypassAll,
     canEdit,
     canRedo,
     canSave,
@@ -26,7 +33,11 @@
     saveAs,
     undo,
   } from "./lib/editActions";
-  import { onQuit, setMenuEnabled } from "./lib/menu";
+  import { takeStartupNotices } from "./lib/api";
+  import { initEffects } from "./lib/effects.svelte";
+  import { onQuit, setMenuChecked, setMenuEnabled } from "./lib/menu";
+  import { notify } from "./lib/notices.svelte";
+  import { initPlugins } from "./lib/plugins.svelte";
   import { runScrollBenchmark } from "./lib/perf";
   import { readSession, writeSession } from "./lib/session";
   import { samePath } from "./lib/tabOrder";
@@ -35,6 +46,13 @@
   import { zoomIn, zoomOut, zoomToFit } from "./lib/view.svelte";
 
   void initTransport();
+  initEffects();
+  initPlugins();
+
+  // Plugins disabled because the app closed unexpectedly while one was loading.
+  void takeStartupNotices()
+    .then((list) => list.forEach((n) => notify("warning", `${n.name} was disabled`, n.message)))
+    .catch(() => {});
 
   // Reopen the last session. This pushes its tabs synchronously, so the save effect
   // below never sees an empty list first and overwrites the remembered session.
@@ -69,7 +87,10 @@
       silence: canEdit("silence"),
       "fade-in": canEdit("fadeIn"),
       "fade-out": canEdit("fadeOut"),
+      "add-effect": canAddEffect(),
+      "bypass-all": canBypassAll(),
     });
+    void setMenuChecked({ "bypass-all": bypassAllOn() });
   });
 
   // Closing the window (or File › Quit) asks about unsaved changes first. Tauri closes
@@ -211,7 +232,8 @@
 
     {#if showDetails}
       <aside id="details-panel" aria-label="Details">
-        {#if app.meta}
+        {#if active && app.meta}
+          <EffectsPanel tab={active} />
           <MetadataPanel meta={app.meta} />
           <StatsPanel
             stats={app.stats}
@@ -232,6 +254,9 @@
   {/if}
   <Notices />
   <CurveDialog />
+  <EffectBrowser />
+  <PluginManager />
+  <GenericControls />
 </div>
 
 <style>

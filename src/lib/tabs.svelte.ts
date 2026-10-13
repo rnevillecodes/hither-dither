@@ -1,5 +1,5 @@
 // Open files, one tab each, and which one is active.
-import type { ClipInfo, ClipRuns, Metadata, PeakTile, Stats } from "./api";
+import type { ChainInfo, ClipInfo, ClipRuns, Metadata, PeakTile, Stats } from "./api";
 import type { Selection } from "./selection";
 import type { Viewport } from "./viewport";
 
@@ -40,6 +40,8 @@ export interface Tab {
   overwriteConfirmed: boolean;
   /** Trim window, end fades and joins, as the clip handles show them. */
   clip: ClipInfo | null;
+  /** The effects the audio is heard and saved through. */
+  chain: ChainInfo | null;
 }
 
 export const tabs = $state({
@@ -78,6 +80,7 @@ export function newTab(path: string): Tab {
     editing: false,
     overwriteConfirmed: false,
     clip: null,
+    chain: null,
   };
 }
 

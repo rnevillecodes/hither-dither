@@ -53,3 +53,7 @@ git tag --delete v0.2.0
 Fix the problem (through a PR to `main`), then tag the fixed commit again. If the version check failed, the tag and the files disagree. Bump the files or move the tag.
 
 To throw away a draft you don't want, delete it on the Releases page and delete its tag as above.
+
+## Code signing and VST3 plugins
+
+The installers aren't signed yet. When macOS signing with the hardened runtime is added, the app must also have the `com.apple.security.cs.disable-library-validation` entitlement. Without it, macOS refuses to load third-party VST3 plugins, which are signed by other developers or not at all. The plugin scanner runs the app's own executable as a subprocess (`--vst3-scan`), so the entitlement covers both. Add it through `bundle.macOS.entitlements` in `src-tauri/tauri.conf.json`.

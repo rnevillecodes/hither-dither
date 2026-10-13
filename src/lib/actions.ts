@@ -1,6 +1,6 @@
 // User-triggered actions shared by the menu, toolbar, tab strip, keyboard and drag-and-drop.
 import { open } from "@tauri-apps/plugin-dialog";
-import { cancelOpen, closeFile } from "./api";
+import { cancelOpen, closeFile, setActiveFile } from "./api";
 import { forgetStats, loadIntoTab, setSelection } from "./app.svelte";
 import { confirmClose } from "./editActions";
 import { notify } from "./notices.svelte";
@@ -109,6 +109,8 @@ export function activateTab(id: number | null) {
     out.playStart = transport.playStart;
   }
   tabs.activeId = id;
+  // Effect editor windows follow their tab.
+  void setActiveFile(id).catch(() => {});
   const tab = findTab(id);
   view.vp = tab?.vp ?? null;
   view.userScrolled = tab?.userScrolled ?? false;

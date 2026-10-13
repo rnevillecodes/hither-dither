@@ -27,6 +27,29 @@ The installers aren't code-signed yet, so the OS warns the first time you open t
 - **Windows:** if SmartScreen says "Windows protected your PC", click **More info**, then **Run anyway**.
 - **macOS:** if macOS says the app can't be opened, right-click (or Control-click) **HitherDither** in Applications and choose **Open**, then **Open** again. On newer macOS versions, open **System Settings › Privacy & Security** and click **Open Anyway** next to the HitherDither message.
 
+## VST3 effects
+
+Each tab can run its audio through a chain of up to 8 VST3 effect plugins: EQs, compressors, limiters, reverbs and so on. Add them from the **Effects** section of the details panel or **Effects › Add Effect…**. The chain is heard live as the file plays, and is applied to the file only when you save. Until then the waveform and statistics show the audio before effects. Instruments, VST2, AU, CLAP and LV2 plugins aren't supported.
+
+HitherDither looks for plugins in the standard VST3 folders, including their subfolders:
+
+| OS | Folders |
+| --- | --- |
+| Windows | `%COMMONPROGRAMFILES%\VST3` (usually `C:\Program Files\Common Files\VST3`) and `%LOCALAPPDATA%\Programs\Common\VST3` |
+| macOS | `/Library/Audio/Plug-Ins/VST3` and `~/Library/Audio/Plug-Ins/VST3` |
+| Linux | `~/.vst3`, `/usr/lib/vst3` and `/usr/local/lib/vst3` |
+
+You can add other folders, rescan, and enable or disable plugins in **Effects › Manage Plugins…**. Plugins are scanned in the background, each in a separate process, so one that crashes or hangs while being scanned is marked as failed and doesn't stop the app. If the app closes unexpectedly while a plugin is loading or opening its editor, that plugin is disabled the next time the app starts, and you can enable it again in Manage Plugins.
+
+Things to know:
+
+- **Plugin editors on Linux** need an X11 display: an X11 session, or a Wayland session with XWayland. Without one, effects show generic sliders instead of their own editor. Under XWayland, an editor window may not stay above the main window.
+- **On macOS**, a plugin must include a version for your Mac's processor. An Intel-only plugin is listed as incompatible on Apple Silicon.
+- **Saving renders the effects offline.** Some plugins switch to a higher-quality mode for offline rendering, or have random modulation, so the saved file can differ slightly from what you heard.
+- Plugins run inside the app while they process audio or show their editor, so a plugin that crashes then takes the app with it, and unsaved changes are lost.
+
+VST is a registered trademark of Steinberg Media Technologies GmbH.
+
 ## Development
 
 ### Prerequisites
@@ -55,7 +78,8 @@ See the [Tauri prerequisites guide](https://tauri.app/start/prerequisites/) for 
 
 ### Layout
 
-- `src-tauri/`: Rust crate (WAV parsing, peak pyramid, statistics, playback, Tauri commands)
+- `src-tauri/`: Rust crate (WAV parsing, peak pyramid, statistics, playback, VST3 hosting in `plugins/` and effect chains in `fx/`, Tauri commands)
+- `src-tauri/test-plugins/`: small VST3 plugins built for the Rust tests
 - `src/`: Svelte frontend (`lib/` holds pure logic and the canvas renderer, `components/` holds UI panels)
 - `docs/`: IPC reference, performance and acceptance notes
 - `scripts/gen-icons.mjs`: generates the icon source (`src-tauri/icons/app-icon.svg`) and the empty-screen imprint (`src/assets/logo-shadow.svg`). After changing it, run `node scripts/gen-icons.mjs` and then `npx tauri icon src-tauri/icons/app-icon.svg`, and delete the generated `android/`, `ios/` and `64x64.png`, which the app doesn't use.

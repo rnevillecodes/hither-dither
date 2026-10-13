@@ -104,7 +104,7 @@
 
 ## 7. Plugin editors
 
-- [ ] 7.1 Implement `plugins/editor/win.rs` (an owned Win32 window, `kPlatformTypeHWND`, `resizeView` and user resize, DPI scaling) and the shared editor manager:
+- [x] 7.1 Implement `plugins/editor/win.rs` (an owned Win32 window, `kPlatformTypeHWND`, `resizeView` and user resize, DPI scaling) and the shared editor manager:
   - one window per slot, titled "<effect> — <file>";
   - bring an open window to the front instead of opening another;
   - closing the window emits `fx-editor-closed`;
@@ -122,7 +122,7 @@
 
 ## 8. Generic controls backend
 
-- [ ] 8.1 Add `get_fx_params` (automatable, visible, writable parameters excluding bypass, with display strings) and `set_fx_param` (controller plus the processor's pending map, returning the new display string). Emit `fx-param-changed` (throttled to 30 Hz per slot) for changes from native editors, and `fx-params-reset` on parameter restarts. Apply output parameter changes to the controller on a UI-thread timer. Add tests with HD Test Gain:
+- [x] 8.1 Add `get_fx_params` (automatable, visible, writable parameters excluding bypass, with display strings) and `set_fx_param` (controller plus the processor's pending map, returning the new display string). Emit `fx-param-changed` (throttled to 30 Hz per slot) for changes from native editors, and `fx-params-reset` on parameter restarts. Apply output parameter changes to the controller on a UI-thread timer. Add tests with HD Test Gain:
   - the gain parameter is listed with units "dB" and its default;
   - setting it changes the processed output on the next block;
   - `set_fx_param` adds no undo step.
@@ -131,7 +131,7 @@
 
 ## 9. Frontend
 
-- [ ] 9.1 Add the plugin, chain, editor and parameter commands and events to `api.ts`. Add `chain` to `Tab` and handle `audioChanged: false` outcomes in `run()` without invalidating peaks or waiting for analysis. Call `setActiveFile` on tab switches. Show notices for startup crash-disables, `clampedSamples` after a save, and `overload` (once per playback). Verify `npm run check` and `npm test` pass, with vitest cases for the outcome handling that leaves `peaksVersion` and `statsPending` unchanged.
+- [x] 9.1 Add the plugin, chain, editor and parameter commands and events to `api.ts`. Add `chain` to `Tab` and handle `audioChanged: false` outcomes in `run()` without invalidating peaks or waiting for analysis. Call `setActiveFile` on tab switches. Show notices for startup crash-disables, `clampedSamples` after a save, and `overload` (once per playback). Verify `npm run check` and `npm test` pass, with vitest cases for the outcome handling that leaves `peaksVersion` and `statsPending` unchanged.
 - [ ] 9.2 Add `EffectsPanel.svelte` at the top of the details panel:
   - rows with name, bypass, controls and remove buttons;
   - drag reorder, plus Alt+Up and Alt+Down on a focused row;
@@ -141,7 +141,7 @@
   - Add Effect disabled with a tooltip when the chain is full.
 
   Put the pure reorder and index logic in `src/lib/` with vitest tests. Verify `npm run check` and `npm test` pass, and check the "Reorder", "Keyboard reorder" and "A/B compare" scenarios by hand.
-- [ ] 9.3 Add `EffectBrowser.svelte`: search by name and vendor, grouped by vendor, incompatible effects greyed out with the reason (layout matched against the file's channels), and "Scanning plugins… n of m" progress. Choosing an effect adds it and opens its controls. Put the filtering and compatibility logic in `src/lib/` with vitest tests (search matching, the 5.1 file greys out stereo-only effects, failed and disabled plugins hidden). Verify `npm run check` and `npm test` pass.
+- [x] 9.3 Add `EffectBrowser.svelte`: search by name and vendor, grouped by vendor, incompatible effects greyed out with the reason (layout matched against the file's channels), and "Scanning plugins… n of m" progress. Choosing an effect adds it and opens its controls. Put the filtering and compatibility logic in `src/lib/` with vitest tests (search matching, the 5.1 file greys out stereo-only effects, failed and disabled plugins hidden). Verify `npm run check` and `npm test` pass.
 - [ ] 9.4 Add `PluginManager.svelte`:
   - the plugin list with name, vendor, version, location, status and reason;
   - enable and disable;
@@ -161,7 +161,7 @@
 
 ## 10. Documentation and integration checks
 
-- [ ] 10.1 Update `README.md`: VST3 effects, the plugin folders per OS, the Linux X11/XWayland note for editors, the fact that offline rendering may differ from what is heard for some plugins, and Steinberg's trademark notice. Add the macOS signing note (`disable-library-validation`) to `docs/releasing.md`. Verify the documented folders match `plugins/cache.rs`.
+- [x] 10.1 Update `README.md`: VST3 effects, the plugin folders per OS, the Linux X11/XWayland note for editors, the fact that offline rendering may differ from what is heard for some plugins, and Steinberg's trademark notice. Add the macOS signing note (`disable-library-validation`) to `docs/releasing.md`. Verify the documented folders match `plugins/cache.rs`.
 - [ ] 10.2 Run the full `docs/acceptance.md` effects pass on Windows, macOS and Linux. Cover every scenario in the `effect-chain`, `plugin-editors` and `vst3-plugins` specs that the automated tests don't, and record the plugins used. Verify each scenario passes, or file its failure as a follow-up task here.
 - [ ] 10.3 Push the branch and verify that CI (check, vitest, clippy, Rust tests including the test-plugin builds, and installers) passes on all three platforms. Then run `openspec validate add-vst3-effect-chain --strict`.
 

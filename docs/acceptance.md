@@ -1,6 +1,6 @@
 # Acceptance checklist
 
-Manual acceptance pass over every scenario in the four v1 specs (`openspec/changes/add-wav-analyser-app/specs/`), plus the multi-file tabs and app icon change (`openspec/changes/add-multi-file-tabs/specs/`; sections file-tabs, audio-stats: details panel, app-branding, and rows I2b–I13) the dark theme change (section app-theme), and the session restore, tab reordering and window change (`openspec/changes/tab-session-and-window-fit/specs/`; sections app-window, tab-reorder and session-restore), and the audio editing change (`openspec/changes/add-audio-editing/specs/`; sections transport-controls, audio-editing and wav-export), and the clip fades change (`openspec/changes/add-clip-fades-and-crossfades/specs/`; section clip-fades, plus rows E4b, E8b, E8c and X8b), and the live editing change (`openspec/changes/add-live-editing/specs/`; section live-editing, plus rows E9, E10b, F14, F14b, F19, X13b and X13c, and E11 removed).
+Manual acceptance pass over every scenario in the four v1 specs (`openspec/changes/add-wav-analyser-app/specs/`), plus the multi-file tabs and app icon change (`openspec/changes/add-multi-file-tabs/specs/`; sections file-tabs, audio-stats: details panel, app-branding, and rows I2b–I13) the dark theme change (section app-theme), and the session restore, tab reordering and window change (`openspec/changes/tab-session-and-window-fit/specs/`; sections app-window, tab-reorder and session-restore), and the audio editing change (`openspec/changes/add-audio-editing/specs/`; sections transport-controls, audio-editing and wav-export), and the clip fades change (`openspec/changes/add-clip-fades-and-crossfades/specs/`; section clip-fades, plus rows E4b, E8b, E8c and X8b), and the live editing change (`openspec/changes/add-live-editing/specs/`; section live-editing, plus rows E9, E10b, F14, F14b, F19, X13b and X13c, and E11 removed), and the VST3 effect chain change (`openspec/changes/add-vst3-effect-chain/specs/`; sections plugin-editors, effect-chain and vst3-plugins).
 
 **Setup:** generate fixtures with `cd src-tauri && cargo run --release --example gen_fixtures -- ../fixtures --large`, then run `npm run tauri dev`. Fixture names below refer to files in `fixtures/`.
 
@@ -293,3 +293,107 @@ Below, "A" is `cd-16bit-stereo-10s.wav` and "L" is `large-1gb.wav`. "Playing" me
 | L18 | Audition a curve | Loop a selection of A, Edit › Fade Out…, drag the point | Waveform under the dialog and the playing audio follow the bend | | ⏳ |
 | L19 | Cancel the preview | Edit › Fade In…, drag the point, Cancel | Waveform and playback as before; Undo unchanged | Auto: `tests/state.rs::previews_change_nothing` | ⏳ |
 | L20 | Many edits, no files | Make many edits to a copy of A without saving; watch its folder | No new files; the file is unchanged on disk | Auto: `tests/state.rs::edits_apply_back_to_back_without_analysis` | ⏳ |
+
+## plugin-editors
+
+From the VST3 effect chain change (`openspec/changes/add-vst3-effect-chain/specs/plugin-editors/`). The steps open editors with an effect's controls button in the Effects panel. "A" is `cd-16bit-stereo-10s.wav` and "B" is `pcm24-stereo-48k.wav`.
+
+**Plugins:** Valhalla Supermassive (free, fixed-size editor) and a plugin with a resizable editor: Voxengo SPAN (free) or FabFilter Pro-Q 4. On Linux, use a native Linux VST3 build, such as Surge XT (free, resizable). On macOS, also have an Intel-only VST3 bundle at hand for P15.
+
+**Before the in-app pass (Windows, 2026-10-13):** the editor manager was driven directly against the installed plugins, without the Effects panel. With Supermassive and Pro-Q 4: the window was owned by the main window and titled "<effect> — a.wav"; Pro-Q 4's window was resizable and Supermassive's wasn't; enlarging Pro-Q 4's window resized its editor; a drag to 60×60 was fitted to Pro-Q 4's 776×374 minimum; hiding for another file and showing again kept the window's place; opening again kept one window; closing the window, removing the effect, and destroying the main window each closed the editor and sent `fx-editor-closed`.
+
+### Windows
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| P1 | Open an editor | Open A, add Supermassive, click its controls button | A window titled "ValhallaSupermassive — a.wav" shows the editor at its size; the main window stays usable | Direct check above | ⏳ |
+| P2 | Open twice | With P1's editor behind the main window, click the controls button again | The same window comes to the front; no second window | Direct check above | ⏳ |
+| P3 | Stays above | Click the main window, then minimise and restore it | The editor stays above the main window, and hides and comes back with it | Direct check above (owner) | ⏳ |
+| P4 | Plugin resizes its editor | Add Pro-Q 4, open its editor, resize the editor from the plugin's own size control | The window grows and shrinks to fit the editor | | ⏳ |
+| P5 | Resize the window | Drag Pro-Q 4's window corner larger, then very small | The editor follows; the window stops at the plugin's minimum size. Supermassive's window can't be resized | Direct check above | ⏳ |
+| P6 | Display scaling | With two displays at different scales (e.g. 100 % and 150 %), drag Pro-Q 4's editor from one to the other | The editor redraws sharp at the new scale and keeps its proportions | | ⏳ |
+| P7 | Switch tabs | With A's editor open, switch to B, move nothing, switch back to A | The editor hides on B and reappears in the same place on A | Direct check above | ⏳ |
+| P8 | Remove the effect | With its editor open, remove the effect | The editor closes; Undo brings the effect back with its editor closed | Direct check above | ⏳ |
+| P9 | Close tab, save, quit | Open an editor, then in turn close its tab; save a file with an open editor; quit with an editor open | The editor closes each time; quitting doesn't hang or crash | Direct check above (owner destroyed) | ⏳ |
+| P10 | Close the window | Close the editor window with its close button | It closes; the effect's controls button shows it closed | | ⏳ |
+| P11 | Turn a knob, then save | Play A, turn Supermassive's Mix knob in its editor, close the editor, save | The change is heard within 0.25 s; the saved file has it; Undo is greyed out | | ⏳ |
+
+### macOS
+
+Check on Apple Silicon.
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| P12 | Open, twice, follow tabs | Repeat P1, P2, P7 and P8 | As on Windows; the editor is a child window that moves with the main window when the main window is dragged | | ⏳ |
+| P13 | Resizing | Repeat P4 and P5 | As on Windows | | ⏳ |
+| P14 | Close, save, quit | Repeat P9 and P10, and quit with Cmd+Q while an editor is open | As on Windows | | ⏳ |
+| P15 | Intel-only plugin | Put an Intel-only `.vst3` in `~/Library/Audio/Plug-Ins/VST3`, rescan | Manage Plugins lists it as Incompatible, "No version for this Mac's processor"; it can't be added | Auto: `plugins::scan` architecture check | ⏳ |
+
+### Linux
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| P16 | X11 session | In an X11 session, repeat P1, P2, P4, P5, P7, P8, P9 and P10 with Surge XT | As on Windows; the editor stays above the main window; its animations and meters run (run-loop timers) and it responds to the mouse (run-loop file descriptors) | | ⏳ |
+| P17 | Wayland with XWayland | In a Wayland session with XWayland, open Surge XT's editor | The editor shows in its own window and works; it may not stay above the main window | | ⏳ |
+| P18 | Wayland without XWayland | Run with `DISPLAY` unset in a Wayland session (`env -u DISPLAY npm run tauri dev`), open the controls of any effect | Generic controls show with the note that plugin editors need X11 or XWayland | | ⏳ |
+
+### Generic controls
+
+Check on any platform. Use a plugin without an editor of its own, or Show generic controls on one that has one.
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| P19 | Plugin without an editor | Open the controls of an effect that has no editor of its own | The generic controls panel lists its parameters with name, value and units (e.g. "Threshold −18.0 dB") and a slider each; the main window stays usable | Auto: `tests/state.rs::generic_controls_list_the_gain_parameter` | ⏳ |
+| P20 | Change and reset a parameter | Play A, drag a slider, then double-click it | The change is heard within 0.25 s; double-clicking returns it to the plugin's default; Undo is unchanged | Auto: `tests/state.rs::a_generic_control_is_heard_from_the_next_block`, `generic_control_changes_are_not_undo_steps` | ⏳ |
+| P21 | Both views agree | Open Pro-Q 4's editor and Show generic controls on it; turn a band's gain in the editor, then move that slider | The slider follows the knob; the editor follows the slider | Auto: `tests/state.rs::changes_in_a_plugin_editor_reach_the_generic_controls` | ⏳ |
+| P22 | Follows its tab | With generic controls open, switch to another tab and back; then remove the effect | The panel hides on the other tab and comes back; it closes when the effect is removed | | ⏳ |
+
+## effect-chain
+
+From the VST3 effect chain change (`openspec/changes/add-vst3-effect-chain/specs/effect-chain/`). "A" is `cd-16bit-stereo-10s.wav`, "B" is `pcm24-stereo-48k.wav` and "S" is `float32-extensible-5.1.wav`. Plugins: Pro-Q 4 (EQ), Pro-C 3 (compressor), Pro-L 2 (limiter, with lookahead latency), Supermassive (reverb), and a stereo-only effect for FX5.
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| FX1 | Empty chain | Open A | The Effects section, at the top of the details panel, has no effects, a short hint and Add Effect | | ⏳ |
+| FX2 | Chains are per tab | Add Pro-C 3 to A, switch to B, play B | B's Effects section is empty and B plays unprocessed | | ⏳ |
+| FX3 | Add an EQ | Add Effect…, type "eq", choose Pro-Q 4 | Pro-Q 4 is last in the chain and its editor opens | | ⏳ |
+| FX4 | Full chain | Add 8 effects to A | Add Effect (panel and menu) is greyed out; hovering the button says the chain is full | Auto: `tests/state.rs::a_full_chain_refuses_another_effect` | ⏳ |
+| FX5 | Stereo-only plugin on a 5.1 file | Open S, Add Effect… | The stereo-only effect is greyed out with "Doesn't support 5.1 audio"; Pro-Q 4 isn't | Auto: `effectBrowser.test.ts`, `tests/state.rs::stereo_only_plugin_is_refused_for_a_5_1_file` | ⏳ |
+| FX6 | Scan progress in the browser | Rescan All in Manage Plugins, then open Add Effect at once | "Scanning plugins… n of m" with the effects found so far, updating | | ⏳ |
+| FX7 | Reorder | With Pro-Q 4 then Pro-C 3, drag Pro-C 3 above Pro-Q 4 | The chain is Pro-C 3 then Pro-Q 4; Undo puts it back | Auto: `chainOrder.test.ts`, `tests/state.rs::moving_an_effect_reorders_the_chain` | ⏳ |
+| FX8 | Keyboard reorder | Tab to the second effect, press Alt+Up | It becomes first and keeps the focus | Auto: `chainOrder.test.ts` | ⏳ |
+| FX9 | A/B compare | Loop a selection of A with Pro-Q 4 cutting the lows hard; toggle Bypass All (panel button and Effects menu) | Playback switches between processed and dry within 0.25 s each time, without stopping; the menu item's tick follows | Auto: `playback::engine::fx_tests::bypass_all_is_heard_dry_after_one_flush` | ⏳ |
+| FX10 | Save with a bypassed effect | Bypass Supermassive, keep Pro-Q 4 active, Save As | The saved file has the EQ and no reverb | Auto: `tests/state.rs::effects_are_applied_with_latency_removed`, `a_bypassed_chain_saves_bit_exact` | ⏳ |
+| FX11 | Undo a removal | Set a Pro-Q 4 band to +6 dB, remove Pro-Q 4, Undo | Pro-Q 4 is back in its place with the +6 dB band | Auto: `tests/state.rs::undo_a_removal_brings_the_effect_back_with_its_settings` | ⏳ |
+| FX12 | Edits and effects in one history | Silence a selection of A, add Pro-L 2, Undo twice | The first Undo removes Pro-L 2, the second the silence | Auto: `tests/state.rs::edits_and_effects_share_one_history` | ⏳ |
+| FX13 | Effect alone marks the tab | Add Pro-Q 4 to an unedited A, close the tab | The tab shows the unsaved dot, and closing asks whether to save | Auto: `tests/state.rs::an_effect_alone_marks_the_file_unsaved` | ⏳ |
+| FX14 | Everything bypassed | Bypass A's only effect | No unsaved dot; Save is greyed out | Auto: `tests/state.rs::everything_bypassed_is_not_unsaved` | ⏳ |
+| FX15 | Adjust while listening | Play A through Pro-C 3, raise its ratio in the editor | Heard within 0.25 s; playback doesn't stop | Auto: `playback::engine::fx_tests::parameter_changes_are_heard_within_a_quarter_second` | ⏳ |
+| FX16 | Effect with latency | Add Pro-L 2 with lookahead, play A from 2.0 s | The first audio heard is at 2.0 s and the playhead matches what is heard | Auto: `playback::engine::fx_tests::effects_are_heard_in_time_and_end_with_the_range` | ⏳ |
+| FX17 | Effects not drawn | Add +12 dB of gain (Pro-Q 4 output gain) to A | The waveform and stats are unchanged, and the Effects section notes they show the audio before effects | Auto: `tests/state.rs::chain_changes_do_not_start_an_analysis` | ⏳ |
+| FX18 | After saving | Save FX17's file | The Effects section is empty, the editors close, and the waveform and stats show the louder audio; a notice says how many samples were clipped | Auto: `tests/state.rs::effects_are_baked_in`, `too_much_gain_counts_the_clamped_samples` | ⏳ |
+| FX19 | No output device | Disable every output device, start the app, add Pro-Q 4 to a copy of A and save | Effects can be added and edited; the saved file has the EQ | | ⏳ |
+| FX20 | Overloaded chain | Add 8 heavy instances (e.g. Supermassive at maximum), play A | One notice that the effects are too demanding to play smoothly; saving still renders them | Auto: `playback::engine::fx_tests::a_chain_too_slow_for_real_time_reports_one_overload` | ⏳ |
+| FX21 | Close with editors open | Open two effect editors on A, close A with Don't Save | Both editor windows close | | ⏳ |
+| FX22 | Effects menu without a file | Close every tab, open the Effects menu | Add Effect… and Bypass All Effects are greyed out; Manage Plugins… still works | | ⏳ |
+
+## vst3-plugins
+
+From the VST3 effect chain change (`openspec/changes/add-vst3-effect-chain/specs/vst3-plugins/`). Steps use Effects › Manage Plugins…. Plugins: those installed on the test machine, plus Vital (free synth) for V5.
+
+| # | Scenario | Steps | Expected | Evidence | Result |
+|---|---|---|---|---|---|
+| V1 | Plugins in the standard folders | Start the app | Effects from the standard folders appear in Add Effect once scanned, and Manage Plugins lists the standard folders, which can't be removed | | ⏳ |
+| V2 | Standard folder missing | On Linux without `/usr/local/lib/vst3`, start the app | Scanning finishes with no error or notice | Auto: `tests/plugins.rs::missing_standard_folder_is_skipped_silently` | ⏳ |
+| V3 | Add a folder | Copy a plugin to `D:\Plugins\VST3`, Add Folder… there, then restart | Its effects appear once the rescan finishes, and the folder is still listed after restarting | Auto: `tests/plugins.rs::extra_folders_and_disabled_plugins_are_remembered` | ⏳ |
+| V4 | Remove a folder | With an effect from V3's folder in a chain, Remove the folder | Its plugins leave Manage Plugins and Add Effect; the effect in the chain keeps working until removed | | ⏳ |
+| V5 | Instrument plugin | Find Vital in Manage Plugins | It's listed as "No usable effects" and isn't offered in Add Effect | Auto: `tests/plugins.rs::scan_offers_effects_only_with_their_layouts` | ⏳ |
+| V6 | Bundle with two effects | Find a bundle with several effect classes | Each is offered in Add Effect as its own entry | Auto: `tests/plugins.rs::scan_offers_effects_only_with_their_layouts` | ⏳ |
+| V7 | Crashing or hanging plugin | Put `hd-test-crash.vst3` and `hd-test-hang.vst3` (from the Rust test helper) in an extra folder, Rescan All | The app keeps running; after 20 s they show as Failed with "Crashed while being scanned" and "Timed out while being scanned"; the others scan meanwhile | Auto: `tests/plugins.rs::crashing_plugin_is_reported_and_isolated`, `hanging_plugin_times_out_while_others_scan` | ⏳ |
+| V8 | Open files while scanning | Rescan All, then at once open, play and edit A | All work as normal | | ⏳ |
+| V9 | Second launch is quick | Restart the app with the same plugins | Every plugin is available straight away, with no scan progress shown | Auto: `tests/plugins.rs::second_scan_of_unchanged_bundles_launches_nothing` | ⏳ |
+| V10 | Updated plugin | Update one plugin to a new version, restart | Only it is scanned again; Manage Plugins shows the new version | Auto: `tests/plugins.rs::touching_one_bundle_rescans_only_it` | ⏳ |
+| V11 | Statuses | Look through Manage Plugins | Each plugin shows name, vendor, version, location and status (Ready, Failed, Incompatible, Disabled, No usable effects), with the reason when failed or incompatible | | ⏳ |
+| V12 | Disable a plugin | Untick Pro-C 3, restart | It's listed as Disabled and isn't offered in Add Effect; a Pro-C 3 already in a chain kept working before the restart | Auto: `tests/plugins.rs::extra_folders_and_disabled_plugins_are_remembered` | ⏳ |
+| V13 | Crash while adding an effect | End the app's process (Task Manager) while a large plugin is being added, then start it again | A notice says the plugin was disabled because the app closed unexpectedly while loading it; it's listed as Disabled | Auto: `tests/plugins.rs::leftover_marker_disables_the_class_with_one_notice` | ⏳ |
+| V14 | Re-enable after a crash | Tick V13's plugin again | It's offered in Add Effect again | Auto: `tests/plugins.rs::leftover_marker_disables_the_class_with_one_notice` | ⏳ |

@@ -5,6 +5,7 @@ import { PROGRESS_DELAY_MS, setSelection } from "./app.svelte";
 import { askFadeCurve, curveDialog } from "./curveDialog.svelte";
 import { type EditKind, afterEdit, canApply, remapFrame } from "./editRules";
 import { notify } from "./notices.svelte";
+import { setEditState, showChainOutcome } from "./outcome";
 import { samePath } from "./tabOrder";
 import { type Tab, activeTab, findTab, tabs } from "./tabs.svelte";
 import { prefetchPeaks } from "./waveform/prefetch";
@@ -130,6 +131,8 @@ function run(
       if (!pending) return;
       const outcome = await pending;
       if (!findTab(tab.id)) return;
+      // Undoing or redoing a chain change: the audio, and everything drawn from it, stay.
+      if (!outcome.audioChanged) return showChainOutcome(tab, outcome);
       const after = afterEdit(kind, selection, playheadOf(tab), oldFrames, outcome.metadata.frames);
       await showOutcome(tab, kind, selection, oldClip, outcome, after);
     } catch (e) {
@@ -137,6 +140,84 @@ function run(
       if (findTab(tab.id)) notify("error", TITLES[kind], String(e));
     }
   });
+}
+
+/**
+ * Run a change to `tab`'s effect chain, in turn with its edits. Chain changes leave the
+ * audio, peaks and analysis alone. Resolves the outcome, or null if it failed (with a
+ * notice titled `title`) or no longer applies.
+ */
+function runChain(
+  tab: Tab,
+  title: string,
+  call: () => Promise<api.EditOutcome>,
+): Promise<api.EditOutcome | null> {
+  let result: api.EditOutcome | null = null;
+  return enqueue(tab, async () => {
+    if (!findTab(tab.id) || tab.editing) return;
+    try {
+      const outcome = await call();
+      if (!findTab(tab.id)) return;
+      showChainOutcome(tab, outcome);
+      result = outcome;
+    } catch (e) {
+      if (findTab(tab.id)) notify("error", title, String(e));
+    }
+  }).then(() => result);
+}
+
+/** The active tab, if its effects can be changed now. */
+function effectsTab(): Tab | null {
+  const tab = editableTab();
+  return tab?.chain ? tab : null;
+}
+
+export function canAddEffect(): boolean {
+  const chain = effectsTab()?.chain;
+  return !!chain && chain.effects.length < api.MAX_EFFECTS;
+}
+
+export function canBypassAll(): boolean {
+  return !!effectsTab()?.chain?.effects.length;
+}
+
+/** Add effect `classId` to the end of the active tab's chain; resolves the new effect. */
+export async function addEffect(classId: string): Promise<api.EffectInfo | null> {
+  const tab = effectsTab();
+  if (!tab || !canAddEffect()) return null;
+  const outcome = await runChain(tab, "Could not add the effect", () => api.addEffect(tab.id, classId));
+  return outcome?.chain.effects.at(-1) ?? null;
+}
+
+export async function removeEffect(slotId: number): Promise<void> {
+  const tab = effectsTab();
+  if (tab) await runChain(tab, "Could not remove the effect", () => api.removeEffect(tab.id, slotId));
+}
+
+/** Move an effect of the active tab to position `index` of its chain. */
+export async function moveEffect(slotId: number, index: number): Promise<void> {
+  const tab = effectsTab();
+  if (tab) await runChain(tab, "Could not move the effect", () => api.moveEffect(tab.id, slotId, index));
+}
+
+export async function setEffectBypass(slotId: number, on: boolean): Promise<void> {
+  const tab = effectsTab();
+  if (tab) await runChain(tab, "Could not bypass the effect", () => api.setEffectBypass(tab.id, slotId, on));
+}
+
+export async function setBypassAll(on: boolean): Promise<void> {
+  const tab = effectsTab();
+  if (tab) await runChain(tab, "Could not bypass the effects", () => api.setBypassAll(tab.id, on));
+}
+
+/** Whether Bypass All is on for the active tab. */
+export function bypassAllOn(): boolean {
+  return !!activeTab()?.chain?.bypassAll;
+}
+
+/** Effects › Bypass All Effects. */
+export function toggleBypassAll(): Promise<void> {
+  return canBypassAll() ? setBypassAll(!bypassAllOn()) : Promise.resolve();
 }
 
 /** The tab's playhead: live in `transport` while active, saved on the tab otherwise. */
@@ -168,6 +249,7 @@ async function showOutcome(
   tab.meta = outcome.metadata;
   if (clipRuns) tab.clipRuns = clipRuns;
   tab.clip = outcome.clip;
+  tab.chain = outcome.chain;
   setEditState(tab, outcome.edit_state);
   tab.revision = outcome.edit_state.revision;
   tab.peaksVersion = version;
@@ -235,12 +317,6 @@ async function showAnalysis(tab: Tab, whole: api.Stats, clipRuns: api.ClipRuns) 
   if (!tab.selection) tab.stats = whole;
   // Fetching the whole-file stats cancels a selection request still running: ask again.
   else if (tab.statsPending && tabs.activeId === tab.id) void setSelection(tab.selection);
-}
-
-function setEditState(tab: Tab, state: api.EditState) {
-  tab.dirty = state.dirty;
-  tab.canUndo = state.can_undo;
-  tab.canRedo = state.can_redo;
 }
 
 export function canSave(): boolean {
@@ -332,13 +408,23 @@ async function saveTab(tab: Tab, path: string | null): Promise<boolean> {
       tab.progress.fraction = p.totalFrames ? p.doneFrames / p.totalFrames : 1;
     });
     if (!findTab(tab.id)) return true;
-    // Same audio, now analysed exactly: refresh anything drawn from estimates.
+    // The saved audio, analysed exactly (processed, if effects were applied): refresh
+    // anything drawn from estimates or from the audio before effects.
     tab.meta = outcome.metadata;
     tab.path = outcome.metadata.path;
     tab.name = outcome.metadata.name;
     tab.clip = outcome.clip;
+    tab.chain = outcome.chain;
     tab.revision = outcome.edit_state.revision;
     setEditState(tab, outcome.edit_state);
+    if (outcome.clampedSamples > 0) {
+      const n = outcome.clampedSamples;
+      notify(
+        "warning",
+        `Some samples in “${tab.name}” were clipped`,
+        `The effects pushed ${n.toLocaleString()} ${n === 1 ? "sample" : "samples"} past full scale, so ${n === 1 ? "it was" : "they were"} clipped to fit the file's format.`,
+      );
+    }
     const [whole, clipRuns] = await Promise.all([api.computeStats(tab.id, null), api.getClipRuns(tab.id)]);
     if (findTab(tab.id) && whole) await showAnalysis(tab, whole, clipRuns);
     return true;
