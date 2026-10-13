@@ -42,7 +42,7 @@ Kept separate from `layout.svelte.ts` (which holds the runes state and storage s
 **Icons.** Two new 16×16 inline SVGs in the existing stroke style:
 - Metrics: a bar chart (three vertical bars of different heights on a baseline) — reads as "levels/statistics".
 - Effects: a plug (two prongs, body, cable) — the user calls these "plugins", and a plug is the clearest metaphor for VST3 plug-ins. *Alternatives considered:* sliders/knob (could be mistaken for the generic-controls window), puzzle piece (VS Code's extensions icon — implies installing extensions, which the Plugin Manager does, not the chain).
-Active button: accent-coloured icon plus a 2px accent bar on its outer (right) edge, like VS Code's active indicator. Badge: small pill in `--accent` with `--accent-text`, bottom-right of the icon.
+Active button: accent-coloured icon only. A VS Code–style edge bar was tried and dropped; with two icons the colour alone reads clearly. Badge: small pill in `--accent` with `--accent-text`, bottom-right of the icon.
 
 **Accessibility.** The activity bar is `role="tablist"` with `aria-orientation="vertical"`; each button `role="tab"`, `aria-selected`, `aria-controls="sidebar"`. Because clicking the selected tab collapses, `aria-expanded` is also set on the selected tab. Up/Down arrow keys move focus between the two tabs (Left/Right in the narrow horizontal layout); Enter/Space activate.
 
@@ -50,7 +50,7 @@ Active button: accent-coloured icon plus a 2px accent bar on its outer (right) e
 
 **Toolbar toggle removed.** The activity bar is always visible while files are open and does both jobs (show/hide and choose view), so the toolbar button and its `.panel-toggle` styles are deleted. `toggleDetails` is removed.
 
-**Narrow layout (<820px).** Keep the existing breakpoint. Grid rows: waveform `1fr`, activity bar `auto` (horizontal strip, `aria-orientation="horizontal"`), sidebar `auto` with `max-height: 40vh`. Active indicator moves to the bottom edge.
+**Narrow layout (<820px).** Keep the existing breakpoint. Grid rows: waveform `1fr`, activity bar `auto` (horizontal strip, `aria-orientation="horizontal"`), sidebar `auto` with `max-height: 40vh`.
 
 ## Risks / Trade-offs
 

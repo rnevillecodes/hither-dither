@@ -29,7 +29,7 @@ The installers aren't code-signed yet, so the OS warns the first time you open t
 
 ## VST3 effects
 
-Each tab can run its audio through a chain of up to 8 VST3 effect plugins: EQs, compressors, limiters, reverbs and so on. Add them from the **Effects** section of the details panel or **Effects › Add Effect…**. The chain is heard live as the file plays, and is written into the audio only when you export. The waveform and statistics always show the audio before effects. Instruments, VST2, AU, CLAP and LV2 plugins aren't supported.
+Each tab can run its audio through a chain of up to 8 VST3 effect plugins: EQs, compressors, limiters, reverbs and so on. Add them from the **Effects** view of the sidebar (the plug icon on the right edge) or **Effects › Add Effect…**. The chain is heard live as the file plays, and is written into the audio only when you export. The waveform and statistics always show the audio before effects. Instruments, VST2, AU, CLAP and LV2 plugins aren't supported.
 
 HitherDither looks for plugins in the standard VST3 folders, including their subfolders:
 

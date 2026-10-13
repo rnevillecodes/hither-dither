@@ -5,6 +5,7 @@ import * as api from "./api";
 import { PROGRESS_DELAY_MS, forgetStats, setSelection, showEffectWarnings, showLoaded } from "./app.svelte";
 import { askFadeCurve, curveDialog } from "./curveDialog.svelte";
 import { type EditKind, afterEdit, canApply, remapFrame, replaceNeedsConfirmation } from "./editRules";
+import { revealSidebarView } from "./layout.svelte";
 import { notify } from "./notices.svelte";
 import { setEditState, showChainOutcome } from "./outcome";
 import { closePrompt, defaultExportPath, defaultSessionPath, withSessionExtension } from "./sessionFiles";
@@ -188,6 +189,8 @@ export async function addEffect(classId: string): Promise<api.EffectInfo | null>
   const tab = effectsTab();
   if (!tab || !canAddEffect()) return null;
   const outcome = await runChain(tab, "Could not add the effect", () => api.addEffect(tab.id, classId));
+  // However it was added, show the new effect in the sidebar.
+  if (outcome) revealSidebarView("effects");
   return outcome?.chain.effects.at(-1) ?? null;
 }
 

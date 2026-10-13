@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ActivityBar from "./components/ActivityBar.svelte";
   import CurveDialog from "./components/CurveDialog.svelte";
   import EffectBrowser from "./components/EffectBrowser.svelte";
   import EffectsPanel from "./components/EffectsPanel.svelte";
@@ -77,7 +78,7 @@
   });
 
   const active = $derived(activeTab());
-  const showDetails = $derived(tabs.list.length > 0 && layout.detailsOpen);
+  const showSidebar = $derived(tabs.list.length > 0 && layout.sidebarOpen);
 
   $effect(() => {
     void setMenuEnabled({
@@ -210,7 +211,7 @@
     <TabBar />
   {/if}
 
-  <main class:with-details={showDetails}>
+  <main class:with-bar={tabs.list.length > 0} class:with-sidebar={showSidebar}>
     <section class="wave-area">
       {#if active && app.meta}
         <!-- Remount per file; edits refetch peaks in place (keyed by peaksVersion). -->
@@ -241,22 +242,35 @@
       {/if}
     </section>
 
-    {#if showDetails}
-      <aside id="details-panel" aria-label="Details">
-        {#if active && app.meta}
-          <EffectsPanel tab={active} />
-          <MetadataPanel meta={app.meta} />
-          <StatsPanel
-            stats={app.stats}
-            labels={app.meta.channel_labels}
-            scope={app.selection ? "Selection" : "Whole file"}
-            pending={app.statsPending}
-            updating={!app.selection && app.analysing}
-          />
-        {:else}
-          <p class="dim">File details and level statistics appear here.</p>
-        {/if}
+    {#if showSidebar}
+      <aside id="sidebar" aria-labelledby="sidebar-title">
+        <h2 id="sidebar-title" class="view-title">{layout.sidebarView === "metrics" ? "Metrics" : "Effects"}</h2>
+        <div class="view">
+          {#if active && app.meta}
+            {#if layout.sidebarView === "effects"}
+              <EffectsPanel tab={active} titled={false} />
+            {:else}
+              <MetadataPanel meta={app.meta} />
+              <StatsPanel
+                stats={app.stats}
+                labels={app.meta.channel_labels}
+                scope={app.selection ? "Selection" : "Whole file"}
+                pending={app.statsPending}
+                updating={!app.selection && app.analysing}
+              />
+            {/if}
+          {:else}
+            <p class="dim">
+              {layout.sidebarView === "effects"
+                ? "The file's effects appear here."
+                : "File details and level statistics appear here."}
+            </p>
+          {/if}
+        </div>
       </aside>
+    {/if}
+    {#if tabs.list.length > 0}
+      <ActivityBar />
     {/if}
   </main>
 
@@ -281,19 +295,47 @@
     min-height: 0;
     display: grid;
     grid-template-columns: 1fr;
+    grid-template-areas: "wave";
   }
-  main.with-details {
-    grid-template-columns: 1fr 340px;
+  /* The activity bar sits on the window's right edge, with the sidebar between it and the waveform. */
+  main.with-bar {
+    grid-template-columns: 1fr 44px;
+    grid-template-areas: "wave bar";
+  }
+  main.with-sidebar {
+    grid-template-columns: 1fr 340px 44px;
+    grid-template-areas: "wave side bar";
   }
   .wave-area {
+    grid-area: wave;
     min-width: 0;
     min-height: 0;
     position: relative;
   }
+  main > :global(.activity-bar) {
+    grid-area: bar;
+  }
   aside {
+    grid-area: side;
+    min-height: 0;
     border-left: 1px solid var(--border);
     background: var(--panel-bg);
-    padding: 14px;
+    display: flex;
+    flex-direction: column;
+  }
+  .view-title {
+    margin: 0;
+    padding: 10px 14px 0;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text);
+  }
+  .view {
+    flex: 1;
+    min-height: 0;
+    padding: 12px 14px 14px;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
@@ -348,9 +390,15 @@
     z-index: 30;
   }
   @media (max-width: 820px) {
-    main.with-details {
+    main.with-bar {
       grid-template-columns: 1fr;
       grid-template-rows: 1fr auto;
+      grid-template-areas: "wave" "bar";
+    }
+    main.with-sidebar {
+      grid-template-columns: 1fr;
+      grid-template-rows: 1fr auto auto;
+      grid-template-areas: "wave" "bar" "side";
     }
     aside {
       border-left: none;

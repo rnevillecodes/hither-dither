@@ -6,7 +6,8 @@
   import { closeControls, closeGeneric, editorOpen, effectsUi, showControls } from "../lib/effects.svelte";
   import type { Tab } from "../lib/tabs.svelte";
 
-  let { tab }: { tab: Tab } = $props();
+  /** `titled` false: the sidebar already shows "Effects" above, so the heading is only read out. */
+  let { tab, titled = true }: { tab: Tab; titled?: boolean } = $props();
 
   /** Vertical movement (px) before a press on a row becomes a drag. */
   const DRAG_THRESHOLD = 4;
@@ -104,7 +105,7 @@
 
 <section aria-labelledby="effects-heading">
   <header>
-    <h2 id="effects-heading">Effects</h2>
+    <h2 id="effects-heading" class:sr-only={!titled}>Effects</h2>
     {#if effects.length > 0}
       <button
         class="small"
@@ -218,7 +219,16 @@
     color: var(--text-dim);
     margin: 0;
   }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
   .small {
+    margin-left: auto;
     padding: 1px 8px;
     font-size: 12px;
   }
