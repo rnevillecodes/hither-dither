@@ -375,10 +375,10 @@ From the VST3 effect chain change (`openspec/changes/add-vst3-effect-chain/specs
 
 | # | Scenario | Steps | Expected | Evidence | Result |
 |---|---|---|---|---|---|
-| FX1 | Empty chain | Open A, click the plug icon | The Effects view has no effects, a short hint and Add Effect | | ⏳ |
+| FX1 | Empty chain | Open A, click the plug icon | The Effects view has an "+ Add" button at the top, no effects and a short hint | | ⏳ |
 | FX2 | Chains are per tab | Add Pro-C 3 to A, switch to B, play B | B's Effects section is empty and B plays unprocessed | | ⏳ |
 | FX3 | Add an EQ | Add Effect…, type "eq", choose Pro-Q 4 | Pro-Q 4 is last in the chain and its editor opens | | ⏳ |
-| FX4 | Full chain | Add 8 effects to A | Add Effect (panel and menu) is greyed out; hovering the button says the chain is full | Auto: `tests/state.rs::a_full_chain_refuses_another_effect` | ⏳ |
+| FX4 | Full chain | Add 8 effects to A | "+ Add" in the Effects view and Effects › Add Effect… are greyed out; hovering "+ Add" says the chain is full | Auto: `tests/state.rs::a_full_chain_refuses_another_effect` | ⏳ |
 | FX5 | Stereo-only plugin on a 5.1 file | Open S, Add Effect… | The stereo-only effect is greyed out with "Doesn't support 5.1 audio"; Pro-Q 4 isn't | Auto: `effectBrowser.test.ts`, `tests/state.rs::stereo_only_plugin_is_refused_for_a_5_1_file` | ⏳ |
 | FX6 | Scan progress in the browser | Rescan All in Manage Plugins, then open Add Effect at once | "Scanning plugins… n of m" with the effects found so far, updating | | ⏳ |
 | FX7 | Reorder | With Pro-Q 4 then Pro-C 3, drag Pro-C 3 above Pro-Q 4 | The chain is Pro-C 3 then Pro-Q 4; Undo puts it back | Auto: `chainOrder.test.ts`, `tests/state.rs::moving_an_effect_reorders_the_chain` | ⏳ |

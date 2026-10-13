@@ -106,9 +106,20 @@
 <section aria-labelledby="effects-heading">
   <header>
     <h2 id="effects-heading" class:sr-only={!titled}>Effects</h2>
-    {#if effects.length > 0}
+    <span class="add" title={full ? `The chain is full (${MAX_EFFECTS} effects)` : "Add Effect…"}>
       <button
         class="small"
+        aria-label="Add Effect"
+        disabled={busy || !canAddEffect()}
+        onclick={() => (effectsUi.browserOpen = true)}
+      >
+        <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 2v8M2 6h8" /></svg>
+        Add
+      </button>
+    </span>
+    {#if effects.length > 0}
+      <button
+        class="small bypass-all"
         class:active={bypassAll}
         aria-pressed={bypassAll}
         disabled={busy}
@@ -199,17 +210,13 @@
       <p class="note">The waveform and statistics show the audio before effects.</p>
     {/if}
   {/if}
-
-  <span class="add" title={full ? `The chain is full (${MAX_EFFECTS} effects)` : undefined}>
-    <button disabled={busy || !canAddEffect()} onclick={() => (effectsUi.browserOpen = true)}>Add Effect…</button>
-  </span>
 </section>
 
 <style>
   header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    gap: 8px;
     margin: 0 0 8px;
   }
   h2 {
@@ -228,9 +235,11 @@
     white-space: nowrap;
   }
   .small {
-    margin-left: auto;
     padding: 1px 8px;
     font-size: 12px;
+  }
+  .bypass-all {
+    margin-left: auto;
   }
   .dim,
   .note {
@@ -323,8 +332,17 @@
     border-radius: 1px;
     pointer-events: none;
   }
-  .add {
-    display: inline-block;
-    margin-top: 8px;
+  .add button {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .add svg {
+    width: 10px;
+    height: 10px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
   }
 </style>
