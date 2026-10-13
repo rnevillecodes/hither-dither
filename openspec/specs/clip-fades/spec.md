@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Lets users trim and shape a file directly on the waveform, the way clip edges work in a DAW. The start and end can be dragged to trim, fades at each end have a draggable length and curve, and joins left by Delete get an adjustable crossfade. All of these stay adjustable until the file is saved.
+Lets users trim and shape a file directly on the waveform, the way clip edges work in a DAW. The start and end can be dragged to trim, fades at each end have a draggable length and curve, and joins left by Delete get an adjustable crossfade. All of these stay adjustable, including after an export.
 
 ## Requirements
 
@@ -106,9 +106,13 @@ Each released handle drag SHALL be one entry in the undo history. Undo and Redo 
 - **WHEN** the file is playing and the user releases a fade-out handle
 - **THEN** playback continues, and the handles and waveform show the new fade with no progress box
 
-### Requirement: Clip settings when saving
-Saving SHALL write the trimmed, faded and crossfaded audio. Afterwards the saved audio SHALL be the new starting point: no trim, no start or end fade, no joins, and empty undo history.
+### Requirement: Clip settings when exporting
+Exporting SHALL write the trimmed, faded and crossfaded audio. Afterwards the trim, the end fades, the joins and their crossfades, and the undo history SHALL be as they were before the export. Saving the session SHALL keep them too, so they come back when the session is reopened.
 
-#### Scenario: Save a shaped take
-- **WHEN** the user trims both ends, adds fades and saves
-- **THEN** the saved file contains exactly the audio that was shown, and the handles are back at the edges with no fades
+#### Scenario: Export a shaped take
+- **WHEN** the user trims both ends, adds fades and exports
+- **THEN** the exported file contains exactly the audio that was shown, and the handles still show the trims and fades
+
+#### Scenario: Shaped take in a session
+- **WHEN** the user trims both ends, adds fades, saves the session, closes the tab and reopens the session
+- **THEN** the handles show the same trims and fades

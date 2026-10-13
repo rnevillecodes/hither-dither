@@ -169,3 +169,4 @@
 
 - Open a pull request from `feat/vst3-plugins` once the tasks are complete.
 - Archive the change after review, which syncs the `effect-chain`, `plugin-editors`, `vst3-plugins` and `wav-export` specs.
+- Before archiving, rebase the `wav-export` delta onto the main spec as `save-sessions-export-audio` left it (archived 2026-10-13): "After saving" no longer exists (Export leaves the chain in place, so drop that block), and "Output format" now says exported files. Keep the processed-samples wording and "Clamped samples are reported" for Export.
