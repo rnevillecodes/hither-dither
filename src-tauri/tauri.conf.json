@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "HitherDither",
   "version": "0.2.0",
-  "identifier": "com.hitherdither.app",
+  "identifier": "io.github.rnevillecodes.hitherdither",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
