@@ -12,6 +12,7 @@ use hither_dither_lib::fx::chain::{ChainInfo, MAX_EFFECTS, SlotId};
 use hither_dither_lib::plugins::ClassId;
 use hither_dither_lib::plugins::cache::PluginCache;
 use hither_dither_lib::plugins::scan::Scanner;
+use hither_dither_lib::session::SessionFile;
 use hither_dither_lib::state::{AppState, ClipSettings, EditOp, FadeSetting, OpenError, Preview};
 use hither_dither_lib::stats::Loudness;
 use hither_dither_lib::wav::synth::{Encoding, WavBuilder, interleave, sine};
@@ -1405,4 +1406,365 @@ fn changes_in_a_plugin_editor_reach_the_generic_controls() {
     // And the processor hears it (after the plugin's latency, which starts out silent).
     let out = process_quarter(&state, 1, slot, 256);
     assert!(out[64..].iter().all(|&v| (v - 0.5).abs() < 1e-6));
+}
+
+// --- Session files -------------------------------------------------------------------------
+
+/// Saves file `id`'s session as `name` in `dir` and reads it back.
+fn save_session(state: &AppState, dir: &tempfile::TempDir, id: u32, name: &str) -> SessionFile {
+    let path = dir.path().join(name);
+    state.save_session(id, &path, true).unwrap();
+    SessionFile::read(&path).unwrap()
+}
+
+#[test]
+fn a_session_captures_the_edits_and_effects() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let wav = dir.path().join("sine1.wav");
+    let before = std::fs::read(&wav).unwrap();
+    state
+        .apply_edit(1, EditOp::Delete, 1_000, 2_000, 0.0)
+        .unwrap();
+    state
+        .apply_edit(1, EditOp::FadeOut, 5_000, 7_000, 0.4)
+        .unwrap();
+    let first = add_double(&state, &fx, 1);
+    let second = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[1];
+    state.set_effect_bypass(1, second, true).unwrap();
+
+    let session = save_session(&state, &dir, 1, "mix.hdsession.json");
+    // The edits as they are, including the crossfade at the join.
+    let edits = state.get(1).unwrap().audio.edits().clone();
+    assert_eq!(session.edit_list(), *edits);
+    assert!(session.edit_list().joins()[0].xfade.len > 0);
+    // Both effects in order, the second bypassed, with the first one's gain in its state.
+    let names: Vec<_> = session
+        .chain
+        .effects
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+    assert_eq!(names, ["HD Test Gain", "HD Test Gain"]);
+    let bypassed: Vec<_> = session.chain.effects.iter().map(|e| e.bypassed).collect();
+    assert_eq!(bypassed, [false, true]);
+    assert!(session.chain.effects.iter().all(|e| e.class_id == fx.gain));
+    assert!(!session.chain.effects[0].state.component.is_empty());
+    assert_ne!(first, second);
+    // The WAV it points to, described as loaded, and left exactly as it was.
+    assert_eq!(session.audio.path, wav);
+    assert_eq!(session.audio.relative_path.as_deref(), Some("sine1.wav"));
+    assert_eq!(
+        (session.audio.sample_rate, session.audio.channels),
+        (8_000, 2)
+    );
+    assert_eq!((session.audio.frames, session.audio.bit_depth), (8_000, 16));
+    assert_eq!(std::fs::read(&wav).unwrap(), before);
+}
+
+#[test]
+fn a_clean_tab_saves_an_empty_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let session = save_session(&state, &dir, 1, "clean.hdsession.json");
+    assert!(session.edit_list().is_identity());
+    assert!(session.chain.effects.is_empty() && !session.chain.bypass_all);
+}
+
+#[test]
+fn a_session_includes_changes_made_while_stopped() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let slot = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[0];
+    // Set in the generic controls without playing: the processor hasn't had it yet.
+    state.set_fx_param(1, slot, GAIN_PARAM, plus_6db()).unwrap();
+    let session = save_session(&state, &dir, 1, "mix.hdsession.json");
+    assert_eq!(
+        session.chain.effects[0].pending_params,
+        [(GAIN_PARAM, plus_6db())]
+    );
+    // Saving leaves it pending for playback (after the latency, which starts out silent).
+    let next = process_quarter(&state, 1, slot, 256);
+    assert!(next[64..].iter().all(|&v| (v - 0.5).abs() < 1e-6));
+}
+
+#[test]
+fn saving_a_session_replaces_the_file_only_when_complete() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let path = dir.path().join("mix.hdsession.json");
+    std::fs::write(&path, "old").unwrap();
+    // Without permission to replace it, an existing file is left alone.
+    assert!(!state.save_session(1, &path, false).unwrap());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
+    assert!(state.save_session(1, &path, true).unwrap());
+    assert!(SessionFile::read(&path).is_ok());
+
+    let missing = dir.path().join("missing").join("mix.hdsession.json");
+    let err = state.save_session(1, &missing, true).unwrap_err();
+    assert!(
+        err.starts_with("Could not save “mix.hdsession.json”"),
+        "{err}"
+    );
+    // No temporary files are left behind, and the existing session is intact.
+    let mut names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["mix.hdsession.json", "sine1.wav"]);
+    assert!(SessionFile::read(&path).is_ok());
+}
+
+/// Rewrites the session file at `path` through its JSON.
+fn edit_session(path: &std::path::Path, edit: impl FnOnce(&mut serde_json::Value)) {
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    edit(&mut json);
+    std::fs::write(path, json.to_string()).unwrap();
+}
+
+fn effect_names(chain: &ChainInfo) -> Vec<&str> {
+    chain.effects.iter().map(|e| e.name.as_str()).collect()
+}
+
+#[test]
+fn a_restored_session_sounds_and_saves_the_same() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    let source = open_tone(
+        &state,
+        &dir,
+        1,
+        WavBuilder::new(Encoding::Pcm, 16, 2, 8_000),
+        0.4,
+    );
+    state
+        .apply_edit(1, EditOp::Delete, 10_000, 20_000, 0.0)
+        .unwrap();
+    state
+        .apply_edit(1, EditOp::FadeOut, 50_000, 70_000, 0.3)
+        .unwrap();
+    add_double(&state, &fx, 1);
+    let session = dir.path().join("tone.hdsession.json");
+    state.save_session(1, &session, true).unwrap();
+    let (clip, chain) = (state.clip(1).unwrap(), state.get_chain(1).unwrap());
+    let first = dir.path().join("first.wav");
+    state.save(1, Some(&first), |_, _| {}).unwrap();
+
+    // Reopened from the session in another tab.
+    state.open(2, &source, |_, _| {}).unwrap();
+    let out = state.restore_session(2, &session, &fx.plugins).unwrap();
+    assert!(out.warnings.is_empty() && !out.wav_changed);
+    // A fresh history at the restored state, which differs from the file on disk.
+    assert!(out.edit_state.dirty && !out.edit_state.can_undo && !out.edit_state.can_redo);
+    assert_eq!(state.clip(2).unwrap(), clip);
+    let restored = state.get_chain(2).unwrap();
+    assert_eq!(effect_names(&restored), effect_names(&chain));
+    assert_eq!(restored.latency, chain.latency);
+    assert_eq!(gain_of(&state, 2, slot_ids(&restored)[0]), plus_6db());
+    // The next change can be undone back to the restored state, not past it.
+    let silenced = state.apply_edit(2, EditOp::Silence, 0, 100, 0.0).unwrap();
+    assert!(silenced.edit_state.can_undo);
+    let undone = state.undo(2).unwrap();
+    assert!(!undone.edit_state.can_undo && undone.edit_state.dirty);
+    assert_eq!(state.clip(2).unwrap(), clip);
+
+    // Saved through the restored chain, the audio is identical.
+    let second = dir.path().join("second.wav");
+    state.save(2, Some(&second), |_, _| {}).unwrap();
+    assert_eq!(native_samples(&second), native_samples(&first));
+}
+
+#[test]
+fn a_restored_session_with_only_bypassed_effects_is_not_unsaved() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    let slot = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[0];
+    state.set_effect_bypass(1, slot, true).unwrap();
+    let session = dir.path().join("mix.hdsession.json");
+    state.save_session(1, &session, true).unwrap();
+    state.close(1);
+
+    state
+        .open(2, &dir.path().join("sine1.wav"), |_, _| {})
+        .unwrap();
+    let out = state.restore_session(2, &session, &fx.plugins).unwrap();
+    assert!(!out.edit_state.dirty && !out.edit_state.can_undo);
+    let chain = state.get_chain(2).unwrap();
+    assert!(chain.effects[0].bypassed && !chain.bypass_all);
+    // Skipped by the host, as when bypassed by hand.
+    assert_eq!(chain.latency, 0);
+}
+
+#[test]
+fn a_session_is_not_applied_to_a_different_recording() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    state.apply_edit(1, EditOp::Silence, 0, 100, 0.0).unwrap();
+    let session = dir.path().join("mix.hdsession.json");
+    state.save_session(1, &session, true).unwrap();
+    state.close(1);
+
+    // Re-rendered shorter after the session was saved.
+    let s = sine(440.0, 0.5, 8_000, 7_000);
+    let wav = write(
+        &dir,
+        "sine1.wav",
+        WavBuilder::new(Encoding::Pcm, 16, 2, 8_000),
+        &interleave(&[s.clone(), s]),
+    );
+    state.open(2, &wav, |_, _| {}).unwrap();
+    let err = state.restore_session(2, &session, &fx.plugins).unwrap_err();
+    assert_eq!(
+        err,
+        "The audio file “sine1.wav” no longer matches the session."
+    );
+    let st = state.edit_state(2).unwrap();
+    assert!(!st.dirty && !st.can_undo);
+    assert_eq!(state.get(2).unwrap().metadata.frames, 7_000);
+}
+
+#[test]
+fn a_touched_wav_is_restored_with_a_warning() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    state.apply_edit(1, EditOp::Silence, 0, 100, 0.0).unwrap();
+    let session = dir.path().join("mix.hdsession.json");
+    state.save_session(1, &session, true).unwrap();
+    state.close(1);
+
+    // Same audio and format, written again later.
+    let wav = dir.path().join("sine1.wav");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    std::fs::write(&wav, std::fs::read(&wav).unwrap()).unwrap();
+    state.open(2, &wav, |_, _| {}).unwrap();
+    let out = state.restore_session(2, &session, &fx.plugins).unwrap();
+    assert!(out.wav_changed);
+    assert!(out.edit_state.dirty);
+}
+
+#[test]
+fn effects_that_cant_be_found_are_left_out() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    let wav = open_tone(
+        &state,
+        &dir,
+        1,
+        WavBuilder::new(Encoding::Pcm, 16, 2, 8_000),
+        0.4,
+    );
+    add_double(&state, &fx, 1);
+    state.add_effect(1, &fx.plugins, fx.stereo).unwrap();
+    let session = dir.path().join("mix.hdsession.json");
+    state.save_session(1, &session, true).unwrap();
+    // An effect that has since been uninstalled, between the two.
+    edit_session(&session, |json| {
+        let effects = json["chain"]["effects"].as_array_mut().unwrap();
+        let mut gone = effects[0].clone();
+        gone["classId"] = "00000000000000000000000000000000".into();
+        gone["name"] = "Gone FX".into();
+        effects.insert(1, gone);
+    });
+
+    state.open(2, &wav, |_, _| {}).unwrap();
+    let out = state.restore_session(2, &session, &fx.plugins).unwrap();
+    let chain = state.get_chain(2).unwrap();
+    assert_eq!(effect_names(&chain), ["HD Test Gain", "HD Test Stereo"]);
+    assert_eq!(gain_of(&state, 2, slot_ids(&chain)[0]), plus_6db());
+    assert_eq!(out.warnings.len(), 1);
+    assert_eq!(out.warnings[0].effect, "Gone FX");
+    assert!(out.warnings[0].reason.contains("isn't available"));
+}
+
+#[test]
+fn an_effect_that_rejects_its_settings_keeps_its_defaults() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    add_double(&state, &fx, 1);
+    let session = dir.path().join("mix.hdsession.json");
+    state.save_session(1, &session, true).unwrap();
+    edit_session(&session, |json| {
+        let effect = &mut json["chain"]["effects"][0];
+        // Three bytes: not a gain value.
+        effect["state"]["component"] = "AQID".into();
+        effect["pendingParams"] = serde_json::json!([]);
+    });
+
+    state
+        .open(2, &dir.path().join("sine1.wav"), |_, _| {})
+        .unwrap();
+    let out = state.restore_session(2, &session, &fx.plugins).unwrap();
+    let chain = state.get_chain(2).unwrap();
+    assert_eq!(effect_names(&chain), ["HD Test Gain"]);
+    assert_eq!(gain_of(&state, 2, slot_ids(&chain)[0]), 0.5);
+    assert_eq!(out.warnings.len(), 1);
+    assert!(out.warnings[0].reason.contains("could not be restored"));
+}
+
+#[test]
+fn a_stereo_only_effect_is_left_out_of_a_5_1_session() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let s = sine(440.0, 0.5, 8_000, 1_000);
+    let path = write(
+        &dir,
+        "surround.wav",
+        WavBuilder::new(Encoding::Pcm, 16, 6, 8_000).extensible(true),
+        &interleave(&vec![s; 6]),
+    );
+    let state = AppState::default();
+    state.open(1, &path, |_, _| {}).unwrap();
+    state.add_effect(1, &fx.plugins, fx.gain).unwrap();
+    let session = dir.path().join("surround.hdsession.json");
+    state.save_session(1, &session, true).unwrap();
+    edit_session(&session, |json| {
+        json["chain"]["effects"][0]["classId"] = fx.stereo.to_string().into();
+        json["chain"]["effects"][0]["name"] = "HD Test Stereo".into();
+    });
+
+    state.open(2, &path, |_, _| {}).unwrap();
+    let out = state.restore_session(2, &session, &fx.plugins).unwrap();
+    assert!(state.get_chain(2).unwrap().effects.is_empty());
+    assert_eq!(out.warnings[0].effect, "HD Test Stereo");
+    assert_eq!(
+        out.warnings[0].reason,
+        "HD Test Stereo doesn't support 5.1 audio"
+    );
+}
+
+#[test]
+fn restored_edits_are_analysed() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    state.apply_edit(1, EditOp::Silence, 0, 4_000, 0.0).unwrap();
+    let expected = analysed_stats(&state, 1);
+    let session = dir.path().join("mix.hdsession.json");
+    state.save_session(1, &session, true).unwrap();
+
+    state
+        .open(2, &dir.path().join("sine1.wav"), |_, _| {})
+        .unwrap();
+    let out = state.restore_session(2, &session, &fx.plugins).unwrap();
+    assert!(out.edit_state.revision > 0);
+    assert_eq!(analysed_stats(&state, 2), expected);
 }

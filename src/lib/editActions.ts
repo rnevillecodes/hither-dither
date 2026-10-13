@@ -6,6 +6,7 @@ import { askFadeCurve, curveDialog } from "./curveDialog.svelte";
 import { type EditKind, afterEdit, canApply, remapFrame } from "./editRules";
 import { notify } from "./notices.svelte";
 import { setEditState, showChainOutcome } from "./outcome";
+import { defaultSessionPath, withSessionExtension } from "./sessionFiles";
 import { samePath } from "./tabOrder";
 import { type Tab, activeTab, findTab, tabs } from "./tabs.svelte";
 import { prefetchPeaks } from "./waveform/prefetch";
@@ -292,7 +293,7 @@ async function showOutcome(
  * Mark `tab`'s whole-file stats as updating until revision `revision` has been analysed,
  * then show the exact stats, clip markers and peaks (unless a newer change came first).
  */
-function watchAnalysis(tab: Tab, revision: number) {
+export function watchAnalysis(tab: Tab, revision: number) {
   tab.analysing = true;
   void api
     .waitAnalysis(tab.id, revision)
@@ -373,6 +374,63 @@ export async function saveAs(): Promise<boolean> {
   const ok = await saveTab(tab, itself ? null : path);
   if (ok) tab.overwriteConfirmed = true;
   return ok;
+}
+
+/** Whether File › Save Session (As) is available: the active tab is loaded and not saving. */
+export function canSaveSession(): boolean {
+  return !!editableTab();
+}
+
+/** File › Save Session: overwrite the tab's session file, or ask where the first time. */
+export async function saveSession(): Promise<boolean> {
+  const tab = editableTab();
+  if (!tab || duplicatePress()) return false;
+  return tab.sessionPath ? writeSession(tab, tab.sessionPath, true) : askSessionPath(tab);
+}
+
+/** File › Save Session As: save the active tab's session to a new file. */
+export async function saveSessionAs(): Promise<boolean> {
+  const tab = editableTab();
+  if (!tab || duplicatePress()) return false;
+  return askSessionPath(tab);
+}
+
+async function askSessionPath(tab: Tab): Promise<boolean> {
+  const chosen = await saveDialog({
+    title: "Save Session As",
+    defaultPath: defaultSessionPath(tab),
+    filters: [{ name: "HitherDither sessions", extensions: ["hdsession.json"] }],
+  });
+  if (!chosen || !findTab(tab.id)) return false;
+  // The dialog has asked about replacing the name it was given, but not one completed here.
+  const path = withSessionExtension(chosen);
+  return writeSession(tab, path, path === chosen);
+}
+
+/**
+ * Save `tab`'s session to `path`, which becomes the tab's session file. Unless `replace`,
+ * an existing file is only replaced once the user agrees. Resolves whether it was saved.
+ */
+async function writeSession(tab: Tab, path: string, replace: boolean): Promise<boolean> {
+  // Let changes already on their way land first, so the session has them.
+  await queues.get(tab.id);
+  if (!findTab(tab.id) || tab.editing) return false;
+  try {
+    if (!(await api.saveSession(tab.id, path, replace))) {
+      const name = path.split(/[\\/]/).pop();
+      const choice = await message(`“${name}” already exists. Replace it?`, {
+        title: "Save Session As",
+        kind: "warning",
+        buttons: { ok: "Replace", cancel: "Cancel" },
+      });
+      return choice === "Replace" && findTab(tab.id) !== null && writeSession(tab, path, true);
+    }
+    tab.sessionPath = path;
+    return true;
+  } catch (e) {
+    if (findTab(tab.id)) notify("error", "Could not save session", String(e));
+    return false;
+  }
 }
 
 /**

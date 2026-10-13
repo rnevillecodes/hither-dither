@@ -17,9 +17,12 @@ use crate::fx::render::Render;
 use crate::peaks::{PeakPyramid, PyramidBuilder};
 use crate::plugins::cache::{LoadStep, PluginCache};
 use crate::plugins::host::HandlerEvent;
-use crate::plugins::instance::{Config, Instance, Param, speaker_arrangement};
+use crate::plugins::instance::{
+    Config, Instance, Param, State as PluginState, speaker_arrangement,
+};
 use crate::plugins::main_thread::{self, Inline, UiThread};
 use crate::plugins::{ClassId, module};
+use crate::session::{self, AudioRef, SessionFile, StoredChain, StoredEffect};
 use crate::stats::{self, Analysis, ClipRun, MAX_STORED_RUNS, Stats, StatsRunner, map_runs};
 use crate::wav::{
     NativeFrames, SampleFormat, SampleSource, WavError, WavInfo, check_size,
@@ -280,6 +283,24 @@ pub struct EditOutcome {
     pub clamped_samples: u64,
 }
 
+/// Result of restoring a session onto a freshly opened file.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreOutcome {
+    pub edit_state: EditState,
+    /// The WAV's size or modification time differ from when the session was saved.
+    pub wav_changed: bool,
+    /// Effects left out or kept at their defaults, in chain order.
+    pub warnings: Vec<EffectWarning>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct EffectWarning {
+    /// The effect's name, as saved in the session.
+    pub effect: String,
+    pub reason: String,
+}
+
 /// One step of a file's history: its edits and the effects in its chain, in order.
 #[derive(Clone)]
 struct Snapshot {
@@ -309,6 +330,24 @@ impl History {
             revision: 0,
             slots: HashMap::new(),
             bypass_all: false,
+        }
+    }
+
+    /// A history starting at a restored session: `edits` with `slots` as the chain, in
+    /// order. `revision` continues from the history it replaces.
+    fn restored(
+        edits: Arc<EditList>,
+        slots: Vec<Arc<Slot>>,
+        bypass_all: bool,
+        revision: u64,
+    ) -> Self {
+        let chain = slots.iter().map(|s| s.id()).collect();
+        Self {
+            states: vec![Snapshot { edits, chain }],
+            pos: 0,
+            revision,
+            slots: slots.into_iter().map(|s| (s.id(), s)).collect(),
+            bypass_all,
         }
     }
 
@@ -758,6 +797,65 @@ impl AppState {
         handler.set_listener(Some(Box::new(on_event)));
     }
 
+    /// Load effect `class_id` from `plugins`, configured for live playback with `config`.
+    /// Fails when the effect isn't available, is disabled, can't process the channels, or
+    /// the plugin fails to load.
+    ///
+    /// With `saved` settings (plugin state, plus parameter changes it hadn't processed),
+    /// the state is restored before processing is set up, as DAWs load projects, and the
+    /// changes are then applied. Also returns whether the plugin accepted the state; if it
+    /// didn't, it keeps its defaults.
+    fn load_slot(
+        &self,
+        plugins: &Arc<PluginCache>,
+        class_id: ClassId,
+        config: Config,
+        saved: Option<(PluginState, Vec<(u32, f64)>)>,
+    ) -> Result<(Slot, bool), String> {
+        let (bundle, class) = plugins
+            .find_class(class_id)
+            .filter(|(_, c)| c.error.is_none())
+            .ok_or("That effect isn't available. Rescan the plugins and try again.")?;
+        if plugins.settings().disabled.contains(&class_id) {
+            return Err(format!(
+                "{} is disabled. You can enable it in Manage Plugins.",
+                class.name
+            ));
+        }
+        let (channels, mask) = (config.channels, config.channel_mask);
+        if !class.supports(channels, mask) {
+            return Err(format!(
+                "{} doesn't support {} audio",
+                class.name,
+                layout_name(channels, mask)
+            ));
+        }
+        let slot_id = self.next_slot.fetch_add(1, Ordering::Relaxed);
+        let (cache, ui, name) = (plugins.clone(), self.ui.clone(), class.name.clone());
+        main_thread::run(&*self.ui, move || {
+            let mut loading = Some(cache.loading(class_id, LoadStep::Create));
+            let module = module::load(&bundle).map_err(|e| e.to_string())?;
+            let instance = Instance::create(module, class_id).map_err(|e| e.to_string())?;
+            let restored = match &saved {
+                None => true,
+                Some((state, _)) => {
+                    // A crash while restoring a bad state is that session's fault, not
+                    // the plugin's, so the marker ends before it.
+                    loading = None;
+                    instance.set_state(state)
+                }
+            };
+            let latency = instance.configure(config).map_err(|e| e.to_string())?;
+            drop(loading);
+            for &(param, value) in saved.iter().flat_map(|(_, pending)| pending) {
+                instance.set_param(param, value);
+            }
+            Ok::<_, String>((Slot::new(slot_id, &class, instance, latency, ui), restored))
+        })
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("“{name}” could not be loaded: {e}"))
+    }
+
     /// Load effect `class_id` from `plugins` and add it to the end of file `id`'s chain, as
     /// one undo step. Fails, leaving the chain as it was, when the chain is full, the effect
     /// can't process the file's channels, or the plugin fails to load.
@@ -774,47 +872,12 @@ impl AppState {
         if self.with_history(id, full)? {
             return Err(FULL.to_string());
         }
-        let (bundle, class) = plugins
-            .find_class(class_id)
-            .filter(|(_, c)| c.error.is_none())
-            .ok_or("That effect isn't available. Rescan the plugins and try again.")?;
-        if plugins.settings().disabled.contains(&class_id) {
-            return Err(format!(
-                "{} is disabled. You can enable it in Manage Plugins.",
-                class.name
-            ));
-        }
-        let info = file.audio.info();
-        let (channels, mask) = (info.channels, info.channel_mask);
-        if !class.supports(channels, mask) {
-            return Err(format!(
-                "{} doesn't support {} audio",
-                class.name,
-                layout_name(channels, mask)
-            ));
-        }
-        let config = Config {
-            channels,
-            channel_mask: mask,
-            sample_rate: info.sample_rate as f64,
-            max_block: LIVE_BLOCK,
-            offline: false,
-        };
+        let config = live_config(file.audio.info());
         let source = file.audio.source().clone();
         drop(file);
 
-        let slot_id = self.next_slot.fetch_add(1, Ordering::Relaxed);
-        let (cache, ui, name) = (plugins.clone(), self.ui.clone(), class.name.clone());
-        let slot = main_thread::run(&*self.ui, move || {
-            let _loading = cache.loading(class_id, LoadStep::Create);
-            let module = module::load(&bundle).map_err(|e| e.to_string())?;
-            let instance = Instance::create(module, class_id).map_err(|e| e.to_string())?;
-            let latency = instance.configure(config).map_err(|e| e.to_string())?;
-            Ok::<_, String>(Slot::new(slot_id, &class, instance, latency, ui))
-        })
-        .map_err(|e| e.to_string())?
-        .map_err(|e| format!("“{name}” could not be loaded: {e}"))?;
-        let slot = Arc::new(slot);
+        let (slot, _) = self.load_slot(plugins, class_id, config, None)?;
+        let (slot_id, slot) = (slot.id(), Arc::new(slot));
         self.watch_slot(id, &slot);
 
         self.change_chain(id, |h, file| {
@@ -884,6 +947,156 @@ impl AppState {
             h.bypass_all = on;
             Ok(())
         })
+    }
+
+    // --- Sessions -----------------------------------------------------------------------
+
+    /// File `id`'s current edits and effects, with each plugin's settings, as a session to
+    /// be saved at `session_path`. Fails, naming it, if an effect can't report its state.
+    pub fn capture_session(&self, id: FileId, session_path: &Path) -> Result<SessionFile, String> {
+        self.check_not_saving(id)?;
+        let file = self.require(id)?;
+        let (edits, chain) = self.with_history(id, |h| (h.current().edits.clone(), h.chain()))?;
+        let slots = chain.slots.clone();
+        let effects = main_thread::run(&*self.ui, move || {
+            slots
+                .iter()
+                .map(|s| {
+                    let state = s
+                        .instance()
+                        .get_state()
+                        .ok_or_else(|| format!("“{}” could not save its settings", s.name()))?;
+                    Ok(StoredEffect {
+                        class_id: s.class_id(),
+                        name: s.name().to_string(),
+                        vendor: s.vendor().to_string(),
+                        version: s.version().to_string(),
+                        bypassed: s.bypassed(),
+                        state: state.into(),
+                        pending_params: s.instance().pending().values(),
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .map_err(|e| e.to_string())??;
+
+        let chain = StoredChain {
+            bypass_all: chain.bypass_all,
+            effects,
+        };
+        Ok(SessionFile::new(
+            file.audio_ref(session_path),
+            &edits,
+            chain,
+        ))
+    }
+
+    /// Apply the session at `session_path` to file `id`, freshly opened from the session's
+    /// WAV: its edits, Bypass All and effects with their settings, as a new history.
+    /// Fails, changing nothing, if the session is invalid or the WAV no longer matches it.
+    /// Effects that can't be restored are left out, or kept at their defaults, with warnings.
+    pub fn restore_session(
+        &self,
+        id: FileId,
+        session_path: &Path,
+        plugins: &Arc<PluginCache>,
+    ) -> Result<RestoreOutcome, String> {
+        let session = SessionFile::read(session_path).map_err(|e| e.to_string())?;
+        self.check_not_saving(id)?;
+        let file = self.require(id)?;
+        let loaded = file.audio_ref(session_path);
+        if !session.audio.format_matches(&loaded) {
+            return Err(format!(
+                "The audio file “{}” no longer matches the session.",
+                loaded.name()
+            ));
+        }
+        let mut edits = Arc::new(session.edit_list());
+        if *edits == **file.audio.edits() {
+            // Unedited: keep the source's own list, and with it its analysis.
+            edits = file.audio.edits().clone();
+        }
+        let config = live_config(file.audio.info());
+        let source = file.audio.source().clone();
+        drop(file);
+
+        let mut warnings = Vec::new();
+        let mut slots = Vec::new();
+        for effect in &session.chain.effects {
+            let mut warn = |reason: String| {
+                warnings.push(EffectWarning {
+                    effect: effect.name.clone(),
+                    reason,
+                })
+            };
+            if slots.len() >= MAX_EFFECTS {
+                warn("The effect chain is full".to_string());
+                continue;
+            }
+            let saved = (
+                PluginState::from(&effect.state),
+                effect.pending_params.clone(),
+            );
+            match self.load_slot(plugins, effect.class_id, config, Some(saved)) {
+                Ok((slot, restored)) => {
+                    if !restored {
+                        warn("Its settings could not be restored, so it has its defaults.".into());
+                    }
+                    slot.set_bypassed(effect.bypassed);
+                    // Its restored state may hold either bypass value.
+                    slot.resend_bypass();
+                    slots.push(Arc::new(slot));
+                }
+                Err(reason) => warn(reason),
+            }
+        }
+        for slot in &slots {
+            self.watch_slot(id, slot);
+        }
+
+        let mut history = self.history.lock().unwrap();
+        let h = history.get_mut(&id).ok_or(NO_FILE)?;
+        let file = self.require(id)?;
+        let fresh = h.states.len() == 1
+            && h.current().chain.is_empty()
+            && Arc::ptr_eq(&h.current().edits, file.audio.edits());
+        // Reopened or edited while the plugins loaded (the frontend never allows it).
+        if !fresh || !Arc::ptr_eq(file.audio.source(), &source) {
+            return Err(CANCELLED.to_string());
+        }
+        *h = History::restored(edits, slots, session.chain.bypass_all, h.revision);
+        let outcome = self.install(id, &file, h);
+        drop(history);
+        self.sync_bypass(id);
+        Ok(RestoreOutcome {
+            edit_state: outcome.edit_state,
+            wav_changed: !session.audio.stamp_matches(&loaded),
+            warnings,
+        })
+    }
+
+    /// Save file `id`'s session to `path`, replacing the file there only once the new one
+    /// is complete. The WAV itself is never written. Unless `replace`, an existing file is
+    /// left alone and this returns false, so the caller can ask first.
+    pub fn save_session(&self, id: FileId, path: &Path, replace: bool) -> Result<bool, String> {
+        if !replace && path.exists() {
+            return Ok(false);
+        }
+        let session = self.capture_session(id, path)?;
+        let fail = |e: std::io::Error| format!("Could not save “{}”: {e}", file_name(path));
+        let temp = temp_path(path);
+        let written = (|| {
+            let mut out = std::fs::File::create_new(&temp)?;
+            std::io::Write::write_all(&mut out, session.to_json().as_bytes())?;
+            out.sync_all()?;
+            drop(out);
+            rename_with_retry(&temp, path)
+        })();
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&temp);
+            return Err(fail(e));
+        }
+        Ok(true)
     }
 
     fn with_history<T>(&self, id: FileId, f: impl FnOnce(&History) -> T) -> Result<T, String> {
@@ -1392,6 +1605,23 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Milliseconds since the Unix epoch, as session files store modification times.
+fn epoch_millis(time: std::time::SystemTime) -> Option<u64> {
+    let since = time.duration_since(std::time::UNIX_EPOCH).ok()?;
+    u64::try_from(since.as_millis()).ok()
+}
+
+/// How effects process a file with `info` during playback.
+fn live_config(info: &WavInfo) -> Config {
+    Config {
+        channels: info.channels,
+        channel_mask: info.channel_mask,
+        sample_rate: info.sample_rate as f64,
+        max_block: LIVE_BLOCK,
+        offline: false,
+    }
+}
+
 /// A unique hidden file next to `target`, so the final rename stays on one volume.
 fn temp_path(target: &Path) -> PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -1433,6 +1663,27 @@ fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 impl LoadedFile {
+    /// The file as a session saved at `session_path` describes it.
+    fn audio_ref(&self, session_path: &Path) -> AudioRef {
+        let (meta, info) = (&self.metadata, self.audio.info());
+        let (size_bytes, modified) = self.disk_stamp;
+        AudioRef {
+            path: meta.path.clone(),
+            relative_path: session_path
+                .parent()
+                .and_then(|dir| session::relative_path(dir, &meta.path)),
+            sample_rate: meta.sample_rate,
+            channels: meta.channels,
+            channel_mask: info.channel_mask,
+            encoding: meta.encoding.to_string(),
+            bit_depth: meta.bit_depth,
+            valid_bits: meta.valid_bits,
+            frames: self.audio.edits().source_frames(),
+            size_bytes,
+            modified: modified.and_then(epoch_millis),
+        }
+    }
+
     /// With the source's analysis as the analysis of `audio` when it is the source
     /// unedited (as opened, saved, or undone back to that).
     fn seeded(self) -> Self {

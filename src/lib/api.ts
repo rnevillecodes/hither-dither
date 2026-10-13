@@ -287,6 +287,45 @@ export function saveFile(fileId: number, path: string | null, onProgress: (p: Lo
   return invoke("save_file", { fileId, path, onProgress: progressChannel(onProgress) });
 }
 
+// --- Session files ---------------------------------------------------------------------
+
+export interface SessionInfo {
+  /** The WAV to open for the session (where it was, or next to the session if moved). */
+  audioPath: string;
+}
+
+export interface EffectWarning {
+  /** The effect's name, as saved in the session. */
+  effect: string;
+  reason: string;
+}
+
+export interface RestoreOutcome {
+  editState: EditState;
+  /** The WAV's size or modification time differ from when the session was saved. */
+  wavChanged: boolean;
+  /** Effects left out or kept at their defaults, in chain order. */
+  warnings: EffectWarning[];
+}
+
+/**
+ * Write the file's edits and effects to a session file. The WAV is not written. Resolves
+ * false, writing nothing, when `path` exists and `replace` is false.
+ */
+export function saveSession(fileId: number, path: string, replace: boolean): Promise<boolean> {
+  return invoke("save_session", { fileId, path, replace });
+}
+
+/** Check a session file and find its WAV, opening nothing. */
+export function readSession(path: string): Promise<SessionInfo> {
+  return invoke("read_session", { path });
+}
+
+/** Apply a session to a file just opened from its `audioPath`. */
+export function restoreSession(fileId: number, path: string): Promise<RestoreOutcome> {
+  return invoke("restore_session", { fileId, path });
+}
+
 // --- Plugins ---------------------------------------------------------------------------
 
 export interface ScanProgress {

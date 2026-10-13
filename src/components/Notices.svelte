@@ -50,6 +50,8 @@
     margin: 4px 0 0;
     color: var(--text-dim);
     overflow-wrap: anywhere;
+    /* Lists in a notice, such as effects a session couldn't restore, are one per line. */
+    white-space: pre-line;
   }
   .close {
     border: none;

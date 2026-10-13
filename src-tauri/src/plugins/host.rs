@@ -128,6 +128,11 @@ impl PendingParams {
         lock(&self.values).is_empty()
     }
 
+    /// Every pending value, leaving them pending.
+    pub fn values(&self) -> Vec<(ParamID, f64)> {
+        lock(&self.values).clone()
+    }
+
     /// Takes every pending value.
     pub fn take(&self) -> Vec<(ParamID, f64)> {
         std::mem::take(&mut *lock(&self.values))

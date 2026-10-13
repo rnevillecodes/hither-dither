@@ -57,7 +57,7 @@
 ```
 - Readers ignore unknown fields, so later minor additions don't need a new version. A `version` above the supported one is rejected with the "newer version" message; a wrong `format` or any parse failure is "not a valid session file".
 - Plugin state is base64 (`base64` crate, standard alphabet). It adds a third to the size, which is fine next to the clarity of a text format.
-- `f64` ramp positions round-trip exactly through `serde_json`'s shortest representation, which the bit-identical goal relies on. A test asserts `EditList` equality after a round trip.
+- `f64` ramp positions must round-trip exactly, which the bit-identical goal relies on. `serde_json` writes the shortest exact representation, but its default parser can be off by one ulp (`0.49748743718592964` read back as `0.4974874371859296`), so its `float_roundtrip` feature is enabled. A test asserts `EditList` equality after a round trip.
 
 *Alternatives:* a binary format (bincode/CBOR) is smaller but opaque and harder to version by hand; embedding state as a separate sidecar folder complicates moving and copying.
 
@@ -108,13 +108,13 @@ The crash marker covers creation only, not `set_state`. A crash while reading a 
 - New `src/lib/sessionFiles.ts`: `isSessionPath(path)` (name ends in `.hdsession.json`, ignoring case; other `.json` files are not sessions), `defaultSessionPath(tab)` (`sessionPath`, else the WAV path with `.wav` replaced, so `take.wav` → `take.hdsession.json`) and `withSessionExtension(path)` (`mix` and `mix.json` → `mix.hdsession.json`; a full suffix is kept), with vitest tests. `session.ts` (the launch-time tab restore) is unchanged and keeps storing WAV paths, so a tab opened from a session reopens at launch as its plain WAV.
 - `openPaths` accepts both kinds of path. WAVs keep their current behaviour; session paths go through `read_session` first, in the same queue, so the order requested is kept.
 - `openDialog` filters: "WAV audio and sessions" (default), "WAV audio", "HitherDither sessions". `main.ts` drag and drop already passes every path to `dropPaths`. The drop hint becomes "Drop WAV or session files to open them".
-- `editActions.ts`: `saveSession()` and `saveSessionAs()` share a `writeSession(tab, path)`, with the save dialog filtered to `.hdsession.json`. Both use `duplicatePress`. The dialog result goes through `withSessionExtension`, because native dialogs handle a two-part extension differently (see Risks). If that changes the path and the new path already exists, a confirmation asks before replacing it, since the dialog only checked the name the user typed.
+- `editActions.ts`: `saveSession()` and `saveSessionAs()` share a `writeSession(tab, path)`, with the save dialog filtered to `.hdsession.json`. Both use `duplicatePress`. The dialog result goes through `withSessionExtension`, because native dialogs handle a two-part extension differently (see Risks). If that changes the path and the new path already exists, a confirmation asks before replacing it, since the dialog only checked the name the user typed. The webview can't check whether a file exists, so `save_session` takes `replace`: without it, an existing target is left alone and the call resolves `false`.
 - `menu.ts`: `save-session` (CmdOrCtrl+Alt+S) and `save-session-as` items after Save As, with new `ToggleId`s, enabled when the active tab is ready and not `editing`. The webview key handler checks `altKey` so Ctrl/Cmd+Alt+S isn't taken as Save.
 
 ### IPC
 | Command | Purpose |
 | --- | --- |
-| `save_session(fileId, path)` | Capture the tab and write the session file |
+| `save_session(fileId, path, replace)` | Capture the tab and write the session file; resolves `false`, writing nothing, if the file exists and `replace` is false |
 | `read_session(path)` | Validate a session and resolve its WAV: `{ audioPath }` |
 | `restore_session(fileId, path)` | Apply a session to a freshly opened file: `{ editState, warnings }` |
 

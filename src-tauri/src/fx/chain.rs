@@ -34,6 +34,7 @@ pub struct Slot {
     class_id: ClassId,
     name: String,
     vendor: String,
+    version: String,
     has_editor: bool,
     /// Taken by `Drop`, which hands it to the UI thread.
     instance: Option<Instance>,
@@ -46,6 +47,9 @@ pub struct Slot {
     wanted_bypass: AtomicBool,
     /// The value last sent to the plugin's bypass parameter.
     applied_bypass: AtomicBool,
+    /// The plugin's bypass parameter may hold anything (its state was just restored), so
+    /// the next [`Slot::apply_bypass`] sends the wanted value even if it seems unchanged.
+    bypass_unknown: AtomicBool,
 }
 
 impl Slot {
@@ -62,6 +66,7 @@ impl Slot {
             class_id: class.class_id,
             name: class.name.clone(),
             vendor: class.vendor.clone(),
+            version: class.version.clone(),
             has_editor: class.has_editor,
             instance: Some(instance),
             ui,
@@ -69,6 +74,7 @@ impl Slot {
             bypassed: AtomicBool::new(false),
             wanted_bypass: AtomicBool::new(false),
             applied_bypass: AtomicBool::new(false),
+            bypass_unknown: AtomicBool::new(false),
         }
     }
 
@@ -82,6 +88,15 @@ impl Slot {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn vendor(&self) -> &str {
+        &self.vendor
+    }
+
+    /// The plugin's version, as scanned.
+    pub fn version(&self) -> &str {
+        &self.version
     }
 
     pub fn instance(&self) -> &Instance {
@@ -106,6 +121,12 @@ impl Slot {
         self.bypassed.store(on, Ordering::Relaxed);
     }
 
+    /// Makes the next [`Chain::apply_bypass`] send this slot's bypass state to the plugin
+    /// whatever was sent before, after restoring a state that may contain any value.
+    pub fn resend_bypass(&self) {
+        self.bypass_unknown.store(true, Ordering::Relaxed);
+    }
+
     /// Whether the host leaves this slot out of processing: it is bypassed and the plugin
     /// has no bypass parameter to do it itself.
     pub fn skipped(&self) -> bool {
@@ -118,7 +139,8 @@ impl Slot {
             return;
         };
         let want = self.wanted_bypass.load(Ordering::Relaxed);
-        if self.applied_bypass.swap(want, Ordering::Relaxed) != want {
+        let unknown = self.bypass_unknown.swap(false, Ordering::Relaxed);
+        if self.applied_bypass.swap(want, Ordering::Relaxed) != want || unknown {
             self.instance()
                 .set_param(param, if want { 1.0 } else { 0.0 });
         }

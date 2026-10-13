@@ -27,10 +27,12 @@
     canRedo,
     canSave,
     canSaveAs,
+    canSaveSession,
     canUndo,
     redo,
     save,
     saveAs,
+    saveSession,
     undo,
   } from "./lib/editActions";
   import { takeStartupNotices } from "./lib/api";
@@ -80,6 +82,8 @@
       "close-tab": tabs.list.length > 0,
       save: canSave(),
       "save-as": canSaveAs(),
+      "save-session": canSaveSession(),
+      "save-session-as": canSaveSession(),
       undo: canUndo(),
       redo: canRedo(),
       crop: canEdit("crop"),
@@ -132,7 +136,12 @@
       void redo();
       return;
     }
-    if (mod && e.key.toLowerCase() === "s") {
+    if (mod && e.altKey && !e.shiftKey && (e.key.toLowerCase() === "s" || e.code === "KeyS")) {
+      e.preventDefault();
+      void saveSession();
+      return;
+    }
+    if (mod && !e.altKey && e.key.toLowerCase() === "s") {
       e.preventDefault();
       void (e.shiftKey ? saveAs() : save());
       return;
@@ -250,7 +259,7 @@
   </main>
 
   {#if dropHover.active}
-    <div class="drop-hint">Drop WAV files to open them</div>
+    <div class="drop-hint">Drop WAV or session files to open them</div>
   {/if}
   <Notices />
   <CurveDialog />

@@ -17,9 +17,10 @@ use crate::plugins::cache::{Folders, PluginCache, PluginList, StartupNotice, sta
 use crate::plugins::editor::{EditorOpened, Editors};
 use crate::plugins::instance::Param;
 use crate::plugins::scan::Scanner;
+use crate::session::SessionFile;
 use crate::state::{
     AppState, ClipInfo, ClipRuns, ClipSettings, EditOp, EditOutcome, FadeSetting, FileId,
-    LoadedFile, Metadata, Preview,
+    LoadedFile, Metadata, Preview, RestoreOutcome,
 };
 use crate::stats::Stats;
 
@@ -246,6 +247,50 @@ pub async fn save_file(
         saved
     })
     .await?
+}
+
+/// Save `file_id`'s edits and effects, with every plugin's settings, as a session file at
+/// `path`. The WAV is not written. Resolves false, writing nothing, if `path` exists and
+/// `replace` is false.
+#[tauri::command]
+pub async fn save_session(
+    state: State<'_, SharedState>,
+    file_id: FileId,
+    path: PathBuf,
+    replace: bool,
+) -> Result<bool, String> {
+    let state = state.inner().clone();
+    blocking(move || state.save_session(file_id, &path, replace)).await?
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfo {
+    /// The WAV to open for the session: where it was, or next to the session if moved.
+    pub audio_path: PathBuf,
+}
+
+/// Check the session file at `path` and find its WAV. Nothing is opened.
+#[tauri::command]
+pub async fn read_session(path: PathBuf) -> Result<SessionInfo, String> {
+    blocking(move || {
+        let session = SessionFile::read(&path).map_err(|e| e.to_string())?;
+        let audio_path = session.resolve_audio(&path).map_err(|e| e.to_string())?;
+        Ok(SessionInfo { audio_path })
+    })
+    .await?
+}
+
+/// Apply the session at `path` to `file_id`, just opened from the session's WAV.
+#[tauri::command]
+pub async fn restore_session(
+    state: State<'_, SharedState>,
+    plugins: State<'_, SharedPlugins>,
+    file_id: FileId,
+    path: PathBuf,
+) -> Result<RestoreOutcome, String> {
+    let (state, plugins) = (state.inner().clone(), plugins.inner().clone());
+    blocking(move || state.restore_session(file_id, &path, &plugins)).await?
 }
 
 /// Cancel an `open_file` still running for `file_id`; that call then rejects as cancelled.

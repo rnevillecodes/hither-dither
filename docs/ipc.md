@@ -653,3 +653,66 @@ interface FxParamsReset {
   slotId: number;
 }
 ```
+
+## Session files
+
+A session file (`*.hdsession.json`) holds one tab's state: which WAV it refers to, its unsaved edits, Bypass All, and its effects in order with their bypass switches and complete plugin settings. Saving a session never writes the WAV. The file is versioned JSON; readers ignore fields they don't know. Opening a session takes three calls: `read_session` to find its WAV, `open_file` for that WAV as usual, then `restore_session` before the tab can be edited.
+
+### `save_session`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `path` | string | Where to write the session, ending in `.hdsession.json` |
+| `replace` | boolean | Whether an existing file at `path` may be replaced |
+
+Captures the file's current edits and chain and writes them to `path`: each plugin's saved state (`getState`), plus parameter changes it hasn't processed yet (made while stopped). The WAV is described by its absolute path, its path relative to the session's folder, its format and length, and its size and modification time. The session is written to a temporary file next to the target and then renamed over it, so a failure leaves any existing file intact. Playback continues. Resolves `true` once written, or `false`, writing nothing, if a file exists at `path` and `replace` is false (the frontend then asks before trying again with `replace`).
+
+Rejects:
+- with `The file is being saved` while the WAV is being saved;
+- with `“Effect” could not save its settings` if a plugin fails to report its state, writing nothing;
+- with `Could not save “mix.hdsession.json”: …` for I/O errors such as a missing or read-only folder.
+
+### `read_session`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `path` | string | A session file |
+
+Checks the session and finds its WAV, opening nothing. The WAV is the recorded absolute path if that file exists, otherwise the recorded relative path from the session's current folder.
+
+```ts
+interface SessionInfo {
+  audioPath: string;   // open this with open_file, then call restore_session
+}
+```
+
+Rejects:
+- with `“x.hdsession.json” is not a valid session file.` for anything that isn't a session this app wrote, including edits that don't fit the recorded length;
+- with `“x.hdsession.json” was made by a newer version of HitherDither.` for a higher format version;
+- with `The session's audio file “take.wav” could not be found.` when neither path exists;
+- with `Could not read “x.hdsession.json”: …` for I/O errors.
+
+### `restore_session`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | The file just opened from `audioPath` |
+| `path` | string | The session file |
+
+Reads the session again and applies it to the file: the edits, Bypass All, and each effect, loaded with its saved state restored before processing is set up, then its unprocessed parameter changes and its bypass switch. The file's history is replaced by a single state, the restored one, so there is nothing to undo. When the restored edits change the audio, the revision increases and the background analysis starts as after an edit (use `wait_analysis`). Effect editors start closed. Afterwards, fetch the clip, chain, stats and clip runs as after `open_file`.
+
+```ts
+interface RestoreOutcome {
+  editState: EditState;            // dirty follows the usual rule
+  wavChanged: boolean;             // the WAV's size or modification time differ: warn
+  warnings: { effect: string; reason: string }[];   // show as one notice
+}
+```
+
+An effect is left out, with a warning, when its plugin isn't available, is disabled, doesn't support the file's channels, or fails to load. A plugin that rejects its saved state stays in the chain at its defaults, with the warning `Its settings could not be restored, so it has its defaults.`
+
+Rejects, leaving the file as opened:
+- with the `read_session` messages if the session became unreadable meanwhile;
+- with `The audio file “take.wav” no longer matches the session.` when the WAV's sample rate, channels or layout, sample format or length differ from the recorded ones;
+- with `The edit was cancelled` if the file was edited or reopened while the effects loaded.

@@ -1,7 +1,18 @@
 // The active document (facade over the active tab), loading a file into a tab, and
 // selection statistics.
-import { computeStats, getChain, getClip, getClipRuns, openFile } from "./api";
+import {
+  type RestoreOutcome,
+  closeFile,
+  computeStats,
+  getChain,
+  getClip,
+  getClipRuns,
+  getMetadata,
+  openFile,
+  restoreSession,
+} from "./api";
 import { notify } from "./notices.svelte";
+import { setEditState } from "./outcome";
 import type { Selection } from "./selection";
 import { type Tab, activeTab } from "./tabs.svelte";
 
@@ -52,9 +63,12 @@ export const app = {
 export async function loadIntoTab(tab: Tab): Promise<void> {
   const timer = setTimeout(() => (tab.progress.visible = true), PROGRESS_DELAY_MS);
   try {
-    const meta = await openFile(tab.id, tab.path, (p) => {
+    let meta = await openFile(tab.id, tab.path, (p) => {
       tab.progress.fraction = p.totalFrames ? p.doneFrames / p.totalFrames : 1;
     });
+    // Before anything is fetched or the tab can be edited, so all of it is the session's.
+    const restored = tab.sessionPath ? await restoreInto(tab, tab.sessionPath) : null;
+    if (restored) meta = (await getMetadata(tab.id)) ?? meta;
     const [whole, clipRuns, clip, chain] = await Promise.all([
       computeStats(tab.id, null),
       getClipRuns(tab.id),
@@ -67,6 +81,12 @@ export async function loadIntoTab(tab: Tab): Promise<void> {
     tab.wholeStats = whole;
     tab.stats = whole;
     tab.clipRuns = clipRuns;
+    if (restored) {
+      setEditState(tab, restored.editState);
+      tab.revision = restored.editState.revision;
+      // Restored edits are analysed in the background, as after an edit (see `loadTab`).
+      tab.analysing = whole === null;
+    }
     tab.status = "ready";
     if (meta.truncated) {
       notify(
@@ -75,8 +95,36 @@ export async function loadIntoTab(tab: Tab): Promise<void> {
         "The data chunk is shorter than its header declares. The audio that is present was loaded.",
       );
     }
+    if (restored) showRestoreNotices(meta.name, restored);
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/** Apply session `sessionPath` to `tab`'s file, just opened. On failure the file is released. */
+async function restoreInto(tab: Tab, sessionPath: string): Promise<RestoreOutcome> {
+  try {
+    return await restoreSession(tab.id, sessionPath);
+  } catch (e) {
+    void closeFile(tab.id);
+    throw e;
+  }
+}
+
+function showRestoreNotices(name: string, restored: RestoreOutcome) {
+  if (restored.wavChanged) {
+    notify(
+      "warning",
+      `“${name}” has changed since the session was saved`,
+      "Its format and length are the same, so the session was restored. Check that it is the recording you expect.",
+    );
+  }
+  if (restored.warnings.length > 0) {
+    notify(
+      "warning",
+      restored.warnings.length === 1 ? "An effect wasn't fully restored" : "Some effects weren't fully restored",
+      restored.warnings.map((w) => `${w.effect}: ${w.reason}`).join("\n"),
+    );
   }
 }
 

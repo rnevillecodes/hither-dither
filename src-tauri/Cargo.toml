@@ -20,13 +20,15 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Exact float parsing: session files must give back the same fade positions.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 memmap2 = "0.9"
 ebur128 = "0.1"
 cpal = "0.16"
 rubato = "0.16"
 rtrb = "0.3"
 thiserror = "2"
+base64 = "0.22"
 # VST3 hosting. `vst3` is MIT OR Apache-2.0 bindings generated from the
 # MIT-licensed SDK headers; pinned because its generated API changes freely.
 vst3 = "=0.3.0"

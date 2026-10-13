@@ -42,6 +42,8 @@ export interface Tab {
   clip: ClipInfo | null;
   /** The effects the audio is heard and saved through. */
   chain: ChainInfo | null;
+  /** The session file this tab was opened from or last saved to; Save Session writes it. */
+  sessionPath: string | null;
 }
 
 export const tabs = $state({
@@ -54,7 +56,7 @@ export const overviewCache = new Map<number, { columns: number; version: number;
 
 let nextId = 1;
 
-export function newTab(path: string): Tab {
+export function newTab(path: string, sessionPath: string | null = null): Tab {
   return {
     id: nextId++,
     path,
@@ -81,6 +83,7 @@ export function newTab(path: string): Tab {
     overwriteConfirmed: false,
     clip: null,
     chain: null,
+    sessionPath,
   };
 }
 

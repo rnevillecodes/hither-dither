@@ -141,6 +141,8 @@ pub enum EditError {
     WholeFile,
     #[error("there is no join there")]
     NotAJoin,
+    #[error("the edits are inconsistent: {0}")]
+    Inconsistent(&'static str),
 }
 
 /// A join as the handles need it.
@@ -190,6 +192,74 @@ impl EditList {
             fade_in: ClipFade::default(),
             fade_out: ClipFade::default(),
         }
+    }
+
+    /// Rebuilds a list from its parts (as stored in a session file), checking every
+    /// invariant the edit operations keep, so a list that would misplay is rejected.
+    pub fn from_parts(
+        source_frames: u64,
+        segments: Vec<Segment>,
+        trim: Range<u64>,
+        fade_in: ClipFade,
+        fade_out: ClipFade,
+    ) -> Result<Self, EditError> {
+        use EditError::Inconsistent as Bad;
+        let curve_ok = |c: Curve| c.bend.is_finite() && (-1.0..=1.0).contains(&c.bend);
+        let mut next_src = 0;
+        for s in &segments {
+            if s.len == 0 {
+                return Err(Bad("empty segment"));
+            }
+            // Segments are in source order and don't overlap (`output_of` relies on it).
+            if s.src_start < next_src || s.src_start.saturating_add(s.len) > source_frames {
+                return Err(Bad("segment outside the source"));
+            }
+            next_src = s.src_start + s.len;
+            if s.silent && !s.ramps.is_empty() {
+                return Err(Bad("silent segment with fades"));
+            }
+            let in_unit = |t: f64| (0.0..=1.0).contains(&t);
+            if !s
+                .ramps
+                .iter()
+                .all(|r| in_unit(r.t0) && in_unit(r.t1) && curve_ok(r.curve))
+            {
+                return Err(Bad("fade outside its segment"));
+            }
+        }
+        if segments.first().is_some_and(|s| s.xfade.is_some()) {
+            return Err(Bad("crossfade before the first segment"));
+        }
+        let list = Self {
+            source_frames,
+            segments,
+            trim,
+            fade_in,
+            fade_out,
+        };
+        for (i, s) in list.segments.iter().enumerate() {
+            if let Some(x) = s.xfade
+                && (x.len % 2 != 0 || x.len > list.max_crossfade(i) || !curve_ok(x.curve))
+            {
+                return Err(Bad("crossfade too long"));
+            }
+        }
+        let total = list.untrimmed_frames();
+        let trim_ok = if total == 0 {
+            list.trim == (0..0)
+        } else {
+            list.trim.start < list.trim.end && list.trim.end <= total
+        };
+        if !trim_ok {
+            return Err(Bad("trim outside the audio"));
+        }
+        if !curve_ok(fade_in.curve)
+            || !curve_ok(fade_out.curve)
+            || fade_in.len.saturating_add(fade_out.len) > list.frames()
+        {
+            return Err(Bad("clip fades longer than the audio"));
+        }
+        Ok(list.normalized())
     }
 
     pub fn segments(&self) -> &[Segment] {
@@ -823,5 +893,93 @@ mod tests {
             .unwrap();
         assert_eq!(spans(&list), [(15, 45)]);
         assert_eq!(list.trim(), 0..45);
+    }
+
+    fn rebuild(list: &EditList) -> Result<EditList, EditError> {
+        EditList::from_parts(
+            list.source_frames(),
+            list.segments().to_vec(),
+            list.trim(),
+            list.fade_in(),
+            list.fade_out(),
+        )
+    }
+
+    #[test]
+    fn from_parts_rebuilds_edited_lists() {
+        let f = |len| ClipFade {
+            len,
+            curve: Curve::new(0.3),
+        };
+        let lists = [
+            EditList::identity(1_000),
+            EditList::identity(0),
+            EditList::identity(1_000).crop(100, 900).unwrap(),
+            EditList::identity(1_000).delete(400, 500, 40).unwrap(),
+            EditList::identity(1_000).silence(10, 20).unwrap(),
+            EditList::identity(1_000)
+                .fade_in_range(0, 300, Curve::new(-0.4))
+                .unwrap()
+                .delete(100, 200, 20)
+                .unwrap()
+                .fade_out_range(150, 700, LIN)
+                .unwrap(),
+            EditList::identity(1_000)
+                .delete(400, 500, 10)
+                .unwrap()
+                .set_trim(50, 850)
+                .set_clip_fades(f(100), f(200)),
+        ];
+        for list in lists {
+            assert_eq!(rebuild(&list).as_ref(), Ok(&list));
+        }
+    }
+
+    #[test]
+    fn from_parts_rejects_broken_invariants() {
+        let base = EditList::identity(1_000).delete(400, 500, 40).unwrap();
+        let with = |edit: &dyn Fn(&mut EditList)| {
+            let mut list = base.clone();
+            edit(&mut list);
+            rebuild(&list)
+        };
+        let bad = |r: Result<EditList, EditError>| matches!(r, Err(EditError::Inconsistent(_)));
+        assert!(bad(with(&|l| l.segments[1].len = 600)), "past the source");
+        assert!(bad(with(&|l| l.segments[0].len = 0)), "empty segment");
+        assert!(bad(with(&|l| l.segments.swap(0, 1))), "out of source order");
+        assert!(bad(with(&|l| l.segments[0].ramps.push(Ramp {
+            t0: 0.0,
+            t1: 1.5,
+            dir: Dir::In,
+            curve: LIN,
+        }))));
+        assert!(bad(with(&|l| {
+            l.segments[0].silent = true;
+            l.segments[0].ramps.push(Ramp {
+                t0: 0.0,
+                t1: 1.0,
+                dir: Dir::In,
+                curve: LIN,
+            });
+        })));
+        assert!(
+            bad(with(&|l| l.segments[1].xfade.as_mut().unwrap().len = 41)),
+            "odd"
+        );
+        assert!(
+            bad(with(&|l| l.segments[1].xfade.as_mut().unwrap().len = 1_000)),
+            "long"
+        );
+        assert!(bad(with(
+            &|l| l.segments[0].xfade = Some(Crossfade::default())
+        )));
+        assert!(bad(with(&|l| l.trim = 0..901)), "trim past the end");
+        assert!(bad(with(&|l| l.trim = 10..10)), "nothing heard");
+        assert!(bad(with(&|l| l.fade_in.len = 901)), "clip fade too long");
+        assert!(bad(with(&|l| {
+            l.fade_in.len = 500;
+            l.fade_out.len = 401;
+        })));
+        assert!(bad(with(&|l| l.fade_out.curve.bend = 2.0)));
     }
 }

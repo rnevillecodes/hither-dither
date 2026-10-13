@@ -4,6 +4,7 @@ pub mod fx;
 pub mod peaks;
 pub mod playback;
 pub mod plugins;
+pub mod session;
 pub mod state;
 pub mod stats;
 pub mod wav;
@@ -79,6 +80,9 @@ pub fn run() {
             commands::undo_edit,
             commands::redo_edit,
             commands::save_file,
+            commands::save_session,
+            commands::read_session,
+            commands::restore_session,
             commands::set_clip,
             commands::set_crossfade,
             commands::get_clip,

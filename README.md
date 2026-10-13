@@ -50,6 +50,20 @@ Things to know:
 
 VST is a registered trademark of Steinberg Media Technologies GmbH.
 
+## Session files
+
+Edits and effects stay unsaved until you save the WAV, which bakes them in. To stop and carry on later without changing the WAV, save a session: **File › Save Session** (Ctrl/Cmd+Alt+S) or **Save Session As…**. A session file (`take.hdsession.json`) holds the tab's unsaved edits, its effect chain in order with each effect's bypass switch, Bypass All, and every plugin's complete settings. It doesn't contain the audio: it points to the WAV, which is never written by saving a session.
+
+Open a session with **File › Open…** or by dropping it on the window. Its WAV opens in a new tab with the edits and effects as they were. Effect editors start closed, and there is nothing to undo until the next change.
+
+Things to know:
+
+- **Keep the session with its WAV.** A session finds its WAV at the path it was saved with, or at the same place relative to the session, so moving or copying a folder holding both works. Renaming or moving only the WAV doesn't.
+- **A session only applies to the same recording.** If the WAV's format or length has changed, the session doesn't open. If only its date or size has changed, it opens with a warning.
+- **Missing effects are left out.** An effect that is no longer installed, is disabled, or fails to load is left out of the chain, with a notice. One that won't take its saved settings keeps its defaults.
+- **Plugins that depend on more than their settings** (random modulation, sample files that have moved) may not sound identical when a session is reopened.
+- The file is JSON, so it can be read in a text editor. Plugin settings are stored as the plugin's own data, in base64.
+
 ## Development
 
 ### Prerequisites
