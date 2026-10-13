@@ -58,8 +58,10 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum PlaybackEvent {
-    /// Audible file frame (latency-compensated).
-    Position { frame: f64 },
+    /// Audible file frame (latency-compensated), and `[peak, rms]` (linear) per file
+    /// channel of the audio heard since the last event, after the effects and before the
+    /// volume (empty if no more has been heard).
+    Position { frame: f64, levels: Vec<[f32; 2]> },
     /// Playback reached the end of the requested range.
     Ended { frame: f64 },
     /// The effects are too demanding to play smoothly (sent at most once per playback).
@@ -425,6 +427,7 @@ pub async fn play(
                 }
                 let event = PlaybackEvent::Position {
                     frame: shared.position(),
+                    levels: shared.levels().unwrap_or_default(),
                 };
                 if on_event.send(event).is_err() {
                     break;
@@ -783,4 +786,25 @@ pub async fn set_active_file(
 ) -> Result<(), String> {
     let editors = editors.inner().clone();
     blocking(move || editors.set_active_file(file_id).map_err(|e| e.to_string())).await?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn position_events_carry_levels_per_channel() {
+        let event = PlaybackEvent::Position {
+            frame: 1_200.0,
+            levels: vec![[0.5, 0.25], [1.0, 0.125]],
+        };
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "kind": "position",
+                "frame": 1_200.0,
+                "levels": [[0.5, 0.25], [1.0, 0.125]],
+            })
+        );
+    }
 }

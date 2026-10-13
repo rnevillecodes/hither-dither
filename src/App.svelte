@@ -5,6 +5,7 @@
   import EffectsPanel from "./components/EffectsPanel.svelte";
   import GenericControls from "./components/GenericControls.svelte";
   import MetadataPanel from "./components/MetadataPanel.svelte";
+  import LevelMeter from "./components/LevelMeter.svelte";
   import Notices from "./components/Notices.svelte";
   import PluginManager from "./components/PluginManager.svelte";
   import ProgressOverlay from "./components/ProgressOverlay.svelte";
@@ -242,6 +243,13 @@
       {/if}
     </section>
 
+    {#if active && app.meta}
+      <!-- Fresh for each file (and its channels): playback stops on switching tabs anyway. -->
+      {#key `${active.id}:${app.meta.channel_labels.join()}`}
+        <LevelMeter labels={app.meta.channel_labels} />
+      {/key}
+    {/if}
+
     {#if showSidebar}
       <aside id="sidebar" aria-labelledby="sidebar-title">
         <h2 id="sidebar-title" class="view-title">{layout.sidebarView === "metrics" ? "Metrics" : "Effects"}</h2>
@@ -297,14 +305,15 @@
     grid-template-columns: 1fr;
     grid-template-areas: "wave";
   }
-  /* The activity bar sits on the window's right edge, with the sidebar between it and the waveform. */
+  /* The activity bar sits on the window's right edge, with the sidebar between it and the
+     waveform, and the level meter right beside the waveform. */
   main.with-bar {
-    grid-template-columns: 1fr 44px;
-    grid-template-areas: "wave bar";
+    grid-template-columns: 1fr auto 44px;
+    grid-template-areas: "wave meter bar";
   }
   main.with-sidebar {
-    grid-template-columns: 1fr 340px 44px;
-    grid-template-areas: "wave side bar";
+    grid-template-columns: 1fr auto 340px 44px;
+    grid-template-areas: "wave meter side bar";
   }
   .wave-area {
     grid-area: wave;
@@ -314,6 +323,9 @@
   }
   main > :global(.activity-bar) {
     grid-area: bar;
+  }
+  main > :global(.meter) {
+    grid-area: meter;
   }
   aside {
     grid-area: side;
@@ -392,13 +404,13 @@
   @media (max-width: 820px) {
     main.with-bar {
       grid-template-columns: 1fr;
-      grid-template-rows: 1fr auto;
-      grid-template-areas: "wave" "bar";
+      grid-template-rows: 1fr auto auto;
+      grid-template-areas: "wave" "meter" "bar";
     }
     main.with-sidebar {
       grid-template-columns: 1fr;
-      grid-template-rows: 1fr auto auto;
-      grid-template-areas: "wave" "bar" "side";
+      grid-template-rows: 1fr auto auto auto;
+      grid-template-areas: "wave" "meter" "bar" "side";
     }
     aside {
       border-left: none;

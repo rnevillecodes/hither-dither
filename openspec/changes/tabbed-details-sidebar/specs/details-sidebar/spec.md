@@ -42,7 +42,7 @@ Clicking the button of a view that is not shown SHALL open the sidebar on that v
 
 #### Scenario: Collapse by clicking the active button
 - **WHEN** the Effects view is shown and the user clicks the plug button
-- **THEN** the sidebar is hidden, the waveform fills the space up to the activity bar, and no button is highlighted
+- **THEN** the sidebar is hidden, the waveform widens into the freed space (up to the level meter beside it), and no button is highlighted
 
 #### Scenario: Reopen from collapsed
 - **WHEN** the sidebar is collapsed and the user clicks the bar-chart button

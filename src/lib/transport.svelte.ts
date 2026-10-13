@@ -1,6 +1,7 @@
 // Playback transport: play/pause/stop, seeking, looping, volume and the playhead.
 import * as api from "./api";
 import { app } from "./app.svelte";
+import { meterPlaybackStarted, pushLevels } from "./meterFeed";
 import { notify } from "./notices.svelte";
 import { tabs } from "./tabs.svelte";
 import { reveal, view } from "./view.svelte";
@@ -69,6 +70,8 @@ export async function play() {
   }
   from = Math.round(from);
   playback.fromSelection = !!sel;
+  // A new playback starts the meter's readouts afresh (seeking while playing does not).
+  if (!transport.playing) meterPlaybackStarted();
   const token = ++session;
   transport.playStart = from;
   transport.playhead = from;
@@ -79,6 +82,7 @@ export async function play() {
       if (token !== session) return;
       if (e.kind === "position") {
         reported = { frame: e.frame, at: performance.now() };
+        pushLevels(e.levels);
       } else if (e.kind === "overload") {
         // Sent at most once per playback.
         notify(

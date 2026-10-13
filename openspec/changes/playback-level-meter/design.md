@@ -25,15 +25,15 @@
 
 **Measure in the feeder, after `Live`, before `ChannelMap`.** This is the only point where the audio is post-effects but still in file channels at the file rate. *Alternative:* measure in `Engine::render`. Rejected: that's device channels (a mono file shows two bars, 5.1 is down-mixed and limited), it includes volume, and it puts work in the realtime callback.
 
-**Measurement blocks tagged with output position.** The feeder splits each processed chunk into 256-frame blocks (about 6 ms at 44.1 kHz). For each block and channel it records `peak` (max |x|) and `sum_sq` and `frames`, plus `out_end` (the feeder's `written` count, in output frames, once that block is queued, so resampling is accounted for). Blocks go into a `Mutex<VecDeque<LevelBlock>>` on `Shared`, capped at 1 s of blocks; the oldest are dropped. The feeder isn't realtime, and the reporter takes the lock briefly every 16 ms, so a mutex is fine. *Alternative:* a second `rtrb` ring. Not needed, since neither side is realtime and the deque makes windowing simpler.
+**Measurement blocks tagged with output position.** The feeder splits each processed chunk into 256-frame blocks (about 6 ms at 44.1 kHz). For each block and channel it records `peak` (max |x|) and `sum_sq` and `frames`, plus `out_end`: the output index at which the block will have been heard, `base + round(frames measured since the latest switch × out_rate / file_rate)`, as the loop markers compute it (the feeder's `written` count would lag behind while the resampler holds input). Blocks go into a `Mutex<VecDeque<LevelBlock>>` on `Shared`, capped at 1 s of blocks; the oldest are dropped. The feeder isn't realtime, and the reporter takes the lock briefly every 16 ms, so a mutex is fine. *Alternative:* a second `rtrb` ring. Not needed, since neither side is realtime and the deque makes windowing simpler.
 
 **Aligning to what is heard.** The engine already publishes the audible file frame. It also needs to publish the **audible output index**: `out_index − latency × device_rate`, written next to `audible` with the same stamp so it can be interpolated the same way. The reporter does this every tick:
 1. Read the audible output index `a`.
 2. Pop every block with `out_end ≤ a` into a short history covering 300 ms.
 3. `peak` for this report is the max over blocks popped since the last report (so a short transient between reports isn't missed). `rms` is `sqrt(Σ sum_sq / Σ frames)` over the history.
-4. On a switch flush, blocks whose output was discarded are never heard. When the feeder publishes a flush, it drops queued blocks with `out_end > flush_to`.
+4. On a switch, some measured audio is never heard: the rest of the stale audio the engine stops playing, and new audio it skips because time moved on while waiting. When the engine completes a switch it publishes the output range it jumped over (`skip_from`, `skip_to`, bumped `skip_seq`: three atomic stores, nothing else in the callback). The reporter reads the audible index first, then the skip, and drops blocks ending in that range before advancing. (The plan first had the feeder drop blocks past `flush_to`; it always finishes writing before taking a switch, so there are none. The engine-side skip is where audio is lost.)
 
-This logic lives in a new `src-tauri/src/playback/levels.rs` (`LevelBlock`, `Meter` accumulator with `push_block`, `advance_to(a) -> Option<Levels>`) and is unit-tested without a device.
+This logic lives in a new `src-tauri/src/playback/levels.rs` (`LevelBlock`, `Meter` accumulator with `push_block`, `drop_range`, `advance_to(a) -> Option<Levels>`) and is unit-tested without a device.
 
 **IPC shape.** `PlaybackEvent::Position { frame, levels }` where `levels: Vec<[f32; 2]>` holds linear `[peak, rms]` per file channel. It's empty when nothing new has been heard (e.g. before the first callback). Linear values keep the backend free of display policy; the frontend converts to dB. The payload is about 20 bytes per channel every 16 ms. *Alternative:* a separate `Levels` event. Rejected: it needs its own timing, and the two would drift.
 
@@ -64,8 +64,8 @@ This logic lives in a new `src-tauri/src/playback/levels.rs` (`LevelBlock`, `Met
 
 - [Wide meter for many channels: 5.1 is about 210px] → Acceptable for an occasional format. If it proves too wide, narrow the columns above two channels and show readouts on hover. This would only change the drawing, not the spec.
 - [Block granularity: 256 frames is 2.7 ms at 96 kHz and 5.8 ms at 44.1 kHz] → Fine for a visual meter. Peaks between reports are kept by taking the max.
-- [Alignment across a switch (edit during playback)] → Blocks after `flush_to` are dropped when the flush is published. An engine test covers an edit mid-playback (no levels from the discarded audio appear).
-- [Effects with latency] → `Live` already removes the chain latency before output, so measured blocks line up with output indices. The HD Test Gain test (64 frames latency) covers it.
+- [Alignment across a switch (edit during playback)] → The engine publishes the range it skips and the reporter drops it. If two switches complete between reports (16 ms), only the latest range is dropped; edits are far rarer than that. An engine test covers an edit mid-playback and fails without the skip.
+- [Effects with latency] → `Live` already removes the chain latency before output, so measured blocks line up with output indices (block boundaries shift by the latency, which only matters to tests). The HD Test Gain test (64 frames latency) covers it.
 - [CPU] → One pass over the processed samples (max and multiply-add) per chunk. That's negligible next to resampling and effects.
 - [`details-sidebar` wording] → Its "Collapse" scenario says the waveform widens "up to the activity bar". With the meter in between, it becomes "up to the meter". tasks.md updates that change's spec.
 

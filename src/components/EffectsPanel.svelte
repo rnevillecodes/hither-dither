@@ -16,8 +16,6 @@
   const bypassAll = $derived(tab.chain?.bypassAll ?? false);
   const full = $derived(effects.length >= MAX_EFFECTS);
   const busy = $derived(tab.editing);
-  /** Some effect changes what is heard. */
-  const active = $derived(!bypassAll && effects.some((e) => !e.bypassed));
 
   let list = $state<HTMLOListElement>();
 
@@ -206,9 +204,6 @@
         <div class="drop-marker" style:top="{markerY}px" aria-hidden="true"></div>
       {/if}
     </div>
-    {#if active}
-      <p class="note">The waveform and statistics show the audio before effects.</p>
-    {/if}
   {/if}
 </section>
 
@@ -241,14 +236,9 @@
   .bypass-all {
     margin-left: auto;
   }
-  .dim,
-  .note {
+  .dim {
     color: var(--text-dim);
     margin: 0 0 8px;
-  }
-  .note {
-    font-size: 12px;
-    margin-top: 6px;
   }
   .chain-wrap {
     position: relative;

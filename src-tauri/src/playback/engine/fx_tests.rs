@@ -319,3 +319,27 @@ fn a_dry_playback_never_reports_an_overload() {
     assert!(!engine.shared().take_overload());
     engine.shared().stop.store(true, Ordering::Relaxed);
 }
+
+#[test]
+fn levels_are_measured_after_the_effects() {
+    let fx = gain(8_000, double());
+    let audio = ramp(48_000, 8_000);
+    let mut engine = play(&audio, (24_000, 48_000, 24_000), false, fx.live());
+    let mut reported = 0;
+    for k in 0..40u64 {
+        play_for(&mut engine, 256);
+        let Some(levels) = engine.shared().levels() else {
+            continue;
+        };
+        // The blocks heard so far end within a block before where buffer `k` starts (the
+        // latency removed at the start shifts them), and the ramp, doubled, peaks there.
+        let heard = sample(&audio, 24_000 + 256 * k - 1) * 2.0;
+        let block_before = sample(&audio, 24_000 + 256 * (k - 1) - 1) * 2.0;
+        assert_eq!(levels.len(), 1);
+        let peak = levels[0][0];
+        assert!(peak <= heard && peak > block_before, "buffer {k}: {peak}");
+        reported += 1;
+    }
+    assert!(reported > 30, "{reported}");
+    engine.shared().stop.store(true, Ordering::Relaxed);
+}

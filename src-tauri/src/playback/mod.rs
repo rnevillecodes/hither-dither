@@ -2,6 +2,7 @@
 
 mod device;
 mod engine;
+mod levels;
 mod mapping;
 
 pub use device::DeviceInfo;

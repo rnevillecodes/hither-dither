@@ -143,7 +143,8 @@ export interface PlaybackInfo {
 }
 
 export type PlaybackEvent =
-  | { kind: "position"; frame: number }
+  /** `levels`: `[peak, rms]` (linear) per file channel heard since the last event. */
+  | { kind: "position"; frame: number; levels: [number, number][] }
   | { kind: "ended"; frame: number }
   /** The effects can't keep up with real time (at most once per playback). */
   | { kind: "overload" };
