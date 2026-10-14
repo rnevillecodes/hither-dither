@@ -1,0 +1,214 @@
+/* Colours follow the app's dark theme and icon gradient. */
+:root {
+  --bg: #12161c;
+  --panel-bg: #1c222a;
+  --border: #2f3843;
+  --text: #eef2f6;
+  --text-dim: #a8b3bf;
+  --accent: #2dd4bf;
+  --accent-text: #062b27;
+  --teal: #2fd3c9;
+  --green: #7fd98a;
+  --amber: #ffc23a;
+  --radius: 14px;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+a { color: var(--accent); }
+a:hover { color: var(--green); }
+
+code {
+  font: 0.9em ui-monospace, "Cascadia Code", Menlo, monospace;
+  background: var(--panel-bg);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+
+.wrap {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+/* Hero */
+.hero {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(135deg, #2b2f7a 0%, #0e1330 70%);
+  border-bottom: 1px solid var(--border);
+}
+
+.hero-inner {
+  position: relative;
+  z-index: 1;
+  text-align: center;
+  padding-top: 72px;
+  padding-bottom: 150px;
+}
+
+#dither {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: 150px;
+  display: block;
+}
+
+.hero-icon {
+  filter: drop-shadow(0 10px 30px rgba(0, 0, 0, 0.45));
+}
+
+h1 {
+  margin: 16px 0 8px;
+  font-size: clamp(2.4rem, 7vw, 3.6rem);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.tagline {
+  max-width: 620px;
+  margin: 0 auto;
+  color: #d4dae8;
+  font-size: 1.15rem;
+}
+
+.cta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 32px;
+}
+
+.btn {
+  display: inline-block;
+  padding: 12px 22px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  color: var(--text);
+  text-decoration: none;
+  font-weight: 600;
+  transition: background 0.15s, transform 0.15s;
+}
+
+.btn:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.btn-primary {
+  border: 0;
+  background: linear-gradient(90deg, var(--teal), var(--green) 60%, var(--amber));
+  color: var(--accent-text);
+}
+
+.btn-primary:hover {
+  color: var(--accent-text);
+  background: linear-gradient(90deg, var(--teal), var(--green) 60%, var(--amber));
+  transform: translateY(-1px);
+}
+
+.meta {
+  margin: 14px 0 0;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+}
+
+/* Sections */
+section { padding-top: 72px; }
+
+h2 {
+  font-size: 1.8rem;
+  margin: 0 0 24px;
+  letter-spacing: -0.01em;
+}
+
+h3 { margin: 0 0 8px; font-size: 1.1rem; }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  gap: 16px;
+}
+
+.card, .platform, .note {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px;
+}
+
+.card p, .platform p, .note p { margin: 0; color: var(--text-dim); }
+
+.card h3::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 10px;
+  border-radius: 2px;
+  vertical-align: 0.15em;
+  background: var(--accent);
+}
+
+.card:nth-child(3n + 2) h3::before { background: var(--green); }
+.card:nth-child(3n) h3::before { background: var(--amber); }
+
+.lede { margin: -12px 0 24px; color: var(--text-dim); }
+
+.platforms {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+}
+
+.platform.current {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.platform .req { font-size: 0.9rem; margin-bottom: 12px; }
+
+.platform ul, .note ul { margin: 0; padding-left: 20px; }
+.platform li { margin: 4px 0; }
+
+.note { margin-top: 16px; }
+.note p { margin-bottom: 8px; }
+.note li { margin: 6px 0; color: var(--text-dim); }
+.note strong { color: var(--text); }
+
+.footer {
+  margin-top: 72px;
+  padding-top: 24px;
+  padding-bottom: 40px;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 0.9rem;
+}
+
+.footer p { margin: 0 0 6px; }
+.fine { font-size: 0.8rem; opacity: 0.8; }
+
+@media (max-width: 560px) {
+  .hero-inner { padding-top: 48px; padding-bottom: 120px; }
+  #dither { height: 120px; }
+  section { padding-top: 56px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .btn { transition: none; }
+}

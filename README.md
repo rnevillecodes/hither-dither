@@ -4,6 +4,8 @@
 
 <h1 align="center">HitherDither</h1>
 
+<p align="center"><a href="https://rnevillecodes.github.io/hither-dither/">rnevillecodes.github.io/hither-dither</a></p>
+
 <p align="center">
   <a href="https://github.com/rnevillecodes/hither-dither/actions/workflows/ci.yml"><img src="https://github.com/rnevillecodes/hither-dither/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status"></a>
 </p>
@@ -104,4 +106,5 @@ See the [Tauri prerequisites guide](https://tauri.app/start/prerequisites/) for 
 - `src-tauri/test-plugins/`: small VST3 plugins built for the Rust tests
 - `src/`: Svelte frontend (`lib/` holds pure logic and the canvas renderer, `components/` holds UI panels)
 - `docs/`: IPC reference, performance and acceptance notes
+- `site/`: the project website, published to GitHub Pages by `.github/workflows/pages.yml` when it changes on `main` (the icons are copied in from `src-tauri/icons/` at deploy time)
 - `scripts/gen-icons.mjs`: generates the icon source (`src-tauri/icons/app-icon.svg`) and the empty-screen imprint (`src/assets/logo-shadow.svg`). After changing it, run `node scripts/gen-icons.mjs` and then `npx tauri icon src-tauri/icons/app-icon.svg`, and delete the generated `android/`, `ios/` and `64x64.png`, which the app doesn't use.
