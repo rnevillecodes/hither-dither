@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HitherDither</title>
+  <meta name="description" content="A lightweight desktop app for inspecting and editing WAV files, with VST3 effect chains. Free for Windows, macOS and Linux.">
+  <meta property="og:title" content="HitherDither">
+  <meta property="og:description" content="Inspect, edit and process WAV files on Windows, macOS and Linux.">
+  <meta property="og:image" content="https://rnevillecodes.github.io/hither-dither/icon.png">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="hero">
+    <div class="wrap hero-inner">
+      <img class="hero-icon" src="icon.svg" alt="" width="112" height="112">
+      <h1>HitherDither</h1>
+      <p class="tagline">A lightweight desktop app for inspecting WAV files: waveform, format and levels at a glance, with editing and VST3 effects when you need them.</p>
+
+      <div class="cta">
+        <a class="btn btn-primary" id="primary-download" href="https://github.com/rnevillecodes/hither-dither/releases/latest">
+          <span id="primary-label">Download</span>
+        </a>
+        <a class="btn" href="#download">Other platforms</a>
+      </div>
+      <p class="meta" id="release-meta">Free for Windows, macOS and Linux</p>
+    </div>
+    <canvas id="dither" aria-hidden="true"></canvas>
+  </header>
+
+  <main>
+    <section class="wrap features" aria-labelledby="features-title">
+      <h2 id="features-title">What it does</h2>
+      <div class="grid">
+        <article class="card">
+          <h3>See the whole file</h3>
+          <p>A fast waveform with an overview strip, format metadata, and peak, RMS and clipping statistics per channel. Play the file, or just a selection of it.</p>
+        </article>
+        <article class="card">
+          <h3>Many files, one window</h3>
+          <p>Each WAV opens in its own tab. Drop files on the window to open them, and your tabs come back the next time you start the app.</p>
+        </article>
+        <article class="card">
+          <h3>Quick edits</h3>
+          <p>Crop, delete or silence a selection, add fades and crossfades with draggable handles, and undo anything. Edits show up straight away, even while playing.</p>
+        </article>
+        <article class="card">
+          <h3>VST3 effect chains</h3>
+          <p>Run each tab through up to eight VST3 effects, heard live with their own editors. A level meter shows peak and RMS after the chain.</p>
+        </article>
+        <article class="card">
+          <h3>Your original stays put</h3>
+          <p>HitherDither never changes the WAV you open. Work is saved as a small session file holding your edits and every plugin's settings.</p>
+        </article>
+        <article class="card">
+          <h3>Export when ready</h3>
+          <p>Render edits and effects to a new WAV, or swap in a new take with Replace Audio and keep the effect chain you dialled in.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="wrap download" id="download" aria-labelledby="download-title">
+      <h2 id="download-title">Download</h2>
+      <p class="lede" id="download-lede">Installers for every release are on the <a href="https://github.com/rnevillecodes/hither-dither/releases">Releases page</a>.</p>
+      <div class="platforms">
+        <div class="platform" data-os="windows">
+          <h3>Windows</h3>
+          <p class="req">Windows 10 or 11, x64</p>
+          <ul>
+            <li><a data-asset="x64-setup.exe" href="https://github.com/rnevillecodes/hither-dither/releases/latest">Installer (.exe)</a></li>
+            <li><a data-asset="_en-US.msi" href="https://github.com/rnevillecodes/hither-dither/releases/latest">MSI, for managed installs</a></li>
+          </ul>
+        </div>
+        <div class="platform" data-os="mac">
+          <h3>macOS</h3>
+          <p class="req">macOS 11+, Apple Silicon and Intel</p>
+          <ul>
+            <li><a data-asset="_universal.dmg" href="https://github.com/rnevillecodes/hither-dither/releases/latest">Disk image (.dmg)</a></li>
+          </ul>
+        </div>
+        <div class="platform" data-os="linux">
+          <h3>Linux</h3>
+          <p class="req">x64</p>
+          <ul>
+            <li><a data-asset=".AppImage" href="https://github.com/rnevillecodes/hither-dither/releases/latest">AppImage</a></li>
+            <li><a data-asset=".deb" href="https://github.com/rnevillecodes/hither-dither/releases/latest">.deb, for Debian and Ubuntu</a></li>
+            <li><a data-asset=".rpm" href="https://github.com/rnevillecodes/hither-dither/releases/latest">.rpm, for Fedora and openSUSE</a></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="note">
+        <h3>Opening unsigned builds</h3>
+        <p>The installers aren't code-signed yet, so your OS warns you the first time.</p>
+        <ul>
+          <li><strong>Windows:</strong> if SmartScreen says “Windows protected your PC”, click <em>More info</em>, then <em>Run anyway</em>.</li>
+          <li><strong>macOS:</strong> right-click <em>HitherDither</em> in Applications and choose <em>Open</em>, then <em>Open</em> again. On newer versions, use <em>System Settings › Privacy &amp; Security › Open Anyway</em>.</li>
+          <li><strong>Linux:</strong> make the AppImage executable first with <code>chmod +x</code>.</li>
+        </ul>
+      </div>
+    </section>
+  </main>
+
+  <footer class="wrap footer">
+    <p>
+      <a href="https://github.com/rnevillecodes/hither-dither">Source on GitHub</a> ·
+      <a href="https://github.com/rnevillecodes/hither-dither/issues">Report a problem</a> ·
+      Built with Tauri, Rust and Svelte
+    </p>
+    <p class="fine">VST is a registered trademark of Steinberg Media Technologies GmbH.</p>
+  </footer>
+
+  <script src="main.js"></script>
+</body>
+</html>
