@@ -5,13 +5,16 @@ import {
   applyEdit,
   bypassAllOn,
   fadeWithCurve,
+  groupSelected,
   redo,
+  startRenameGroup,
   save,
   saveAs,
   exportAudio,
   replaceAudio,
   toggleBypassAll,
   undo,
+  ungroup,
 } from "./editActions";
 import { effectsUi } from "./effects.svelte";
 import { zoomIn, zoomOut, zoomToFit } from "./view.svelte";
@@ -31,6 +34,9 @@ export type ToggleId =
   | "fade-in"
   | "fade-out"
   | "add-effect"
+  | "group-effects"
+  | "ungroup"
+  | "rename-group"
   | "bypass-all";
 
 /** Check items whose checked state follows the app (see `setMenuChecked`). */
@@ -129,6 +135,9 @@ export async function installMenu(): Promise<void> {
     text: "Effects",
     items: [
       await toggle("add-effect", "Add Effect…", () => (effectsUi.browserOpen = true)),
+      await toggle("group-effects", "Group Effects", () => void groupSelected(), "CmdOrCtrl+G"),
+      await toggle("ungroup", "Ungroup", () => void ungroup(), "CmdOrCtrl+Shift+G"),
+      await toggle("rename-group", "Rename Group", startRenameGroup, "CmdOrCtrl+R"),
       bypassAll,
       await PredefinedMenuItem.new({ item: "Separator" }),
       await MenuItem.new({ id: "manage-plugins", text: "Manage Plugins…", action: () => (effectsUi.managerOpen = true) }),

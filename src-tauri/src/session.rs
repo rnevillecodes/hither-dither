@@ -10,13 +10,18 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::edit::{ClipFade, Crossfade, Curve, Dir, EditList, Ramp, Segment};
+use crate::fx::layout;
 use crate::plugins::ClassId;
 use crate::plugins::instance::State;
 
 /// The `format` field of every session file.
 pub const FORMAT: &str = "hitherdither-session";
-/// Newest format version this build reads and the one it writes.
-pub const VERSION: u32 = 1;
+/// Newest format version this build reads. It writes this version for a session with
+/// effect groups, and [`VERSION_UNGROUPED`] otherwise, so builds without groups can still
+/// open those.
+pub const VERSION: u32 = 2;
+/// The version written for a session without groups, the first one.
+pub const VERSION_UNGROUPED: u32 = 1;
 /// Session file names end with this (compared ignoring case).
 pub const EXTENSION: &str = ".hdsession.json";
 
@@ -200,6 +205,40 @@ impl StoredEdits {
 pub struct StoredChain {
     pub bypass_all: bool,
     pub effects: Vec<StoredEffect>,
+    /// Effect groups in chain order, each holding neighbouring `effects`. Absent from
+    /// version 1 files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<StoredGroup>,
+}
+
+/// An effect group: `count` effects of the chain from index `first`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredGroup {
+    pub name: String,
+    pub bypassed: bool,
+    pub first: usize,
+    pub count: usize,
+}
+
+impl StoredChain {
+    /// Whether every group holds at least one effect, within the chain, without overlapping
+    /// another, and has a valid name.
+    fn groups_valid(&self) -> bool {
+        let mut end = 0;
+        let mut groups: Vec<&StoredGroup> = self.groups.iter().collect();
+        groups.sort_by_key(|g| g.first);
+        groups.iter().all(|g| {
+            let ok = g.count > 0
+                && g.first >= end
+                && g.first
+                    .checked_add(g.count)
+                    .is_some_and(|e| e <= self.effects.len())
+                && layout::valid_name(&g.name).is_some();
+            end = g.first.saturating_add(g.count);
+            ok
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -268,9 +307,14 @@ struct Header {
 
 impl SessionFile {
     pub fn new(audio: AudioRef, edits: &EditList, chain: StoredChain) -> Self {
+        let version = if chain.groups.is_empty() {
+            VERSION_UNGROUPED
+        } else {
+            VERSION
+        };
         SessionFile {
             format: FORMAT.to_string(),
-            version: VERSION,
+            version,
             audio,
             edits: edits.into(),
             chain,
@@ -288,7 +332,10 @@ impl SessionFile {
             return Err(SessionError::Newer(name.to_string()));
         }
         let file: SessionFile = serde_json::from_str(text).map_err(|_| invalid())?;
-        if file.edits.source_frames != file.audio.frames || file.edits.to_edit_list().is_none() {
+        if file.edits.source_frames != file.audio.frames
+            || file.edits.to_edit_list().is_none()
+            || !file.chain.groups_valid()
+        {
             return Err(invalid());
         }
         Ok(file)
@@ -470,8 +517,66 @@ mod tests {
                 },
                 pending_params: vec![(0, 0.1 + 0.2)],
             }],
+            groups: Vec::new(),
         };
         SessionFile::new(audio(Path::new("/takes/take.wav"), 3_000), &edited(), chain)
+    }
+
+    /// [`sample`] with three effects, the last two in a bypassed group.
+    fn grouped() -> SessionFile {
+        let mut session = sample();
+        let effect = session.chain.effects[0].clone();
+        session.chain.effects = vec![effect.clone(), effect.clone(), effect];
+        session.chain.groups = vec![StoredGroup {
+            name: "Vocal cleanup".into(),
+            bypassed: true,
+            first: 1,
+            count: 2,
+        }];
+        SessionFile::new(session.audio, &edited(), session.chain)
+    }
+
+    #[test]
+    fn groups_round_trip_as_version_2() {
+        let session = grouped();
+        assert_eq!(session.version, 2);
+        let json = session.to_json();
+        assert!(json.contains("\"groups\""));
+        assert_eq!(SessionFile::parse(&json, "s"), Ok(session));
+    }
+
+    #[test]
+    fn a_session_without_groups_stays_version_1() {
+        let session = sample();
+        assert_eq!(session.version, 1);
+        assert!(!session.to_json().contains("\"groups\""));
+        // A version 1 file, as older builds wrote it, reads the same.
+        let mut json: serde_json::Value = serde_json::from_str(&session.to_json()).unwrap();
+        json["chain"].as_object_mut().unwrap().remove("groups");
+        assert_eq!(SessionFile::parse(&json.to_string(), "s"), Ok(session));
+    }
+
+    #[test]
+    fn rejects_groups_that_dont_fit() {
+        let bad = |edit: fn(&mut StoredGroup)| {
+            let mut session = grouped();
+            edit(&mut session.chain.groups[0]);
+            SessionFile::parse(&session.to_json(), "s")
+        };
+        let invalid = Err(SessionError::Invalid("s".into()));
+        assert_eq!(bad(|g| g.count = 0), invalid);
+        assert_eq!(bad(|g| g.count = 3), invalid);
+        assert_eq!(bad(|g| g.first = usize::MAX), invalid);
+        assert_eq!(bad(|g| g.name = "  ".into()), invalid);
+        assert_eq!(bad(|g| g.name = "x".repeat(65)), invalid);
+        let mut session = grouped();
+        session.chain.groups.push(StoredGroup {
+            name: "Overlap".into(),
+            bypassed: false,
+            first: 0,
+            count: 2,
+        });
+        assert_eq!(SessionFile::parse(&session.to_json(), "s"), invalid);
     }
 
     #[test]

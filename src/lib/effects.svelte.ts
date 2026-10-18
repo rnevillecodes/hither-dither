@@ -19,6 +19,8 @@ export const effectsUi = $state({
   generic: null as GenericTarget | null,
   browserOpen: false,
   managerOpen: false,
+  /** A group whose name the Effects panel should start editing (Rename Group). */
+  renameGroup: null as number | null,
 });
 
 const key = (fileId: number, slotId: number) => `${fileId}:${slotId}`;

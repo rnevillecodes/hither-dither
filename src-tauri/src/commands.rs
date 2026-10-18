@@ -9,6 +9,7 @@ use tauri::ipc::{Channel, Response};
 use tauri::{AppHandle, Emitter, Runtime, State};
 
 use crate::fx::chain::{ChainInfo, SlotId};
+use crate::fx::layout::{GroupId, Target};
 use crate::fx::live::LiveChain;
 use crate::peaks::query_edited;
 use crate::playback::{PlayRequest, PlaybackInfo, Player};
@@ -650,10 +651,12 @@ pub async fn move_effect(
     editors: State<'_, SharedEditors>,
     file_id: FileId,
     slot_id: SlotId,
+    group: Option<GroupId>,
     index: usize,
 ) -> Result<EditOutcome, String> {
+    let to = Target { group, index };
     chain_change(state, player, editors, file_id, move |s| {
-        s.move_effect(file_id, slot_id, index)
+        s.move_effect(file_id, slot_id, to)
     })
     .await
 }
@@ -669,6 +672,93 @@ pub async fn set_effect_bypass(
 ) -> Result<EditOutcome, String> {
     chain_change(state, player, editors, file_id, move |s| {
         s.set_effect_bypass(file_id, slot_id, on)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn group_effects(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
+    file_id: FileId,
+    slot_ids: Vec<SlotId>,
+) -> Result<EditOutcome, String> {
+    chain_change(state, player, editors, file_id, move |s| {
+        s.group_effects(file_id, &slot_ids)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn ungroup(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
+    file_id: FileId,
+    group_id: GroupId,
+) -> Result<EditOutcome, String> {
+    chain_change(state, player, editors, file_id, move |s| {
+        s.ungroup(file_id, group_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn rename_group(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
+    file_id: FileId,
+    group_id: GroupId,
+    name: String,
+) -> Result<EditOutcome, String> {
+    chain_change(state, player, editors, file_id, move |s| {
+        s.rename_group(file_id, group_id, &name)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn move_group(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
+    file_id: FileId,
+    group_id: GroupId,
+    index: usize,
+) -> Result<EditOutcome, String> {
+    chain_change(state, player, editors, file_id, move |s| {
+        s.move_group(file_id, group_id, index)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn remove_group(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
+    file_id: FileId,
+    group_id: GroupId,
+) -> Result<EditOutcome, String> {
+    chain_change(state, player, editors, file_id, move |s| {
+        s.remove_group(file_id, group_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn set_group_bypass(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
+    file_id: FileId,
+    group_id: GroupId,
+    on: bool,
+) -> Result<EditOutcome, String> {
+    chain_change(state, player, editors, file_id, move |s| {
+        s.set_group_bypass(file_id, group_id, on)
     })
     .await
 }

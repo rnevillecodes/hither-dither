@@ -456,6 +456,29 @@ export interface ChainInfo {
   bypassAll: boolean;
   /** Total processing delay in frames. */
   latency: number;
+  /** In order; each group's effects are neighbours in `effects`. */
+  groups: GroupInfo[];
+}
+
+export interface GroupInfo {
+  groupId: number;
+  name: string;
+  /** The group's own switch; its effects keep their own. */
+  bypassed: boolean;
+  /** Its effects, in processing order (never empty). */
+  slotIds: number[];
+}
+
+/** Longest group name, in characters. */
+export const MAX_GROUP_NAME = 64;
+
+/**
+ * Where `moveEffect` puts an effect: position `index` among `group`'s effects, or among the
+ * top-level items (effects and groups) when `group` is null, counted after it is taken out.
+ */
+export interface EffectTarget {
+  group: number | null;
+  index: number;
 }
 
 export function getChain(fileId: number): Promise<ChainInfo | null> {
@@ -470,8 +493,33 @@ export function removeEffect(fileId: number, slotId: number): Promise<EditOutcom
   return invoke("remove_effect", { fileId, slotId });
 }
 
-export function moveEffect(fileId: number, slotId: number, index: number): Promise<EditOutcome> {
-  return invoke("move_effect", { fileId, slotId, index });
+export function moveEffect(fileId: number, slotId: number, to: EffectTarget): Promise<EditOutcome> {
+  return invoke("move_effect", { fileId, slotId, group: to.group, index: to.index });
+}
+
+export function groupEffects(fileId: number, slotIds: number[]): Promise<EditOutcome> {
+  return invoke("group_effects", { fileId, slotIds });
+}
+
+export function ungroup(fileId: number, groupId: number): Promise<EditOutcome> {
+  return invoke("ungroup", { fileId, groupId });
+}
+
+export function renameGroup(fileId: number, groupId: number, name: string): Promise<EditOutcome> {
+  return invoke("rename_group", { fileId, groupId, name });
+}
+
+/** Move a group to top-level position `index`, counted after it is taken out. */
+export function moveGroup(fileId: number, groupId: number, index: number): Promise<EditOutcome> {
+  return invoke("move_group", { fileId, groupId, index });
+}
+
+export function removeGroup(fileId: number, groupId: number): Promise<EditOutcome> {
+  return invoke("remove_group", { fileId, groupId });
+}
+
+export function setGroupBypass(fileId: number, groupId: number, on: boolean): Promise<EditOutcome> {
+  return invoke("set_group_bypass", { fileId, groupId, on });
 }
 
 export function setEffectBypass(fileId: number, slotId: number, on: boolean): Promise<EditOutcome> {

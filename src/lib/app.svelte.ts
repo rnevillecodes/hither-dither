@@ -15,7 +15,7 @@ import {
   restoreSession,
 } from "./api";
 import { notify } from "./notices.svelte";
-import { setEditState } from "./outcome";
+import { setChain, setEditState } from "./outcome";
 import type { Selection } from "./selection";
 import { type Tab, activeTab } from "./tabs.svelte";
 
@@ -92,7 +92,7 @@ export async function showLoaded(tab: Tab, meta: Metadata, editState: EditState 
   ]);
   tab.meta = meta;
   tab.clip = clip;
-  tab.chain = chain;
+  setChain(tab, chain);
   tab.wholeStats = whole;
   tab.stats = whole;
   tab.clipRuns = clipRuns;

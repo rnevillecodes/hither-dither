@@ -5,9 +5,11 @@ import * as api from "./api";
 import { PROGRESS_DELAY_MS, forgetStats, setSelection, showEffectWarnings, showLoaded } from "./app.svelte";
 import { askFadeCurve, curveDialog } from "./curveDialog.svelte";
 import { type EditKind, afterEdit, canApply, remapFrame, replaceNeedsConfirmation } from "./editRules";
+import { groupOfSelection } from "./chainOrder";
 import { revealSidebarView } from "./layout.svelte";
+import { effectsUi } from "./effects.svelte";
 import { notify } from "./notices.svelte";
-import { setEditState, showChainOutcome } from "./outcome";
+import { setChain, setEditState, showChainOutcome } from "./outcome";
 import { closePrompt, defaultExportPath, defaultSessionPath, withSessionExtension } from "./sessionFiles";
 import { samePath } from "./tabOrder";
 import { type Tab, activeTab, findTab, overviewCache, tabs } from "./tabs.svelte";
@@ -198,10 +200,75 @@ export async function removeEffect(slotId: number): Promise<void> {
   if (tab) await runChain(tab, "Could not remove the effect", () => api.removeEffect(tab.id, slotId));
 }
 
-/** Move an effect of the active tab to position `index` of its chain. */
-export async function moveEffect(slotId: number, index: number): Promise<void> {
+/** Move an effect of the active tab to `to`: a place in a group, or among the top-level items. */
+export async function moveEffect(slotId: number, to: api.EffectTarget): Promise<void> {
   const tab = effectsTab();
-  if (tab) await runChain(tab, "Could not move the effect", () => api.moveEffect(tab.id, slotId, index));
+  if (tab) await runChain(tab, "Could not move the effect", () => api.moveEffect(tab.id, slotId, to));
+}
+
+/** Whether Group Effects is available: some effects of the active tab are selected. */
+export function canGroup(): boolean {
+  return !!effectsTab()?.fxSelected.length;
+}
+
+/**
+ * The group Ungroup and Rename Group apply to: the first one holding a selected (highlighted)
+ * effect of the active tab.
+ */
+function groupToUngroup(): number | null {
+  const tab = effectsTab();
+  return tab?.chain ? groupOfSelection(tab.chain, tab.fxSelected) : null;
+}
+
+export function canUngroup(): boolean {
+  return groupToUngroup() !== null;
+}
+
+export function canRenameGroup(): boolean {
+  return groupToUngroup() !== null;
+}
+
+/** Effects › Rename Group: start editing the highlighted group's name in the Effects panel. */
+export function startRenameGroup(): void {
+  const groupId = groupToUngroup();
+  if (groupId === null) return;
+  revealSidebarView("effects");
+  effectsUi.renameGroup = groupId;
+}
+
+/** Effects › Group Effects: the selected effects of the active tab, in a new group. */
+export async function groupSelected(): Promise<void> {
+  const tab = effectsTab();
+  if (!tab || !tab.fxSelected.length) return;
+  const slots = [...tab.fxSelected];
+  await runChain(tab, "Could not group the effects", () => api.groupEffects(tab.id, slots));
+}
+
+/** Effects › Ungroup: the group holding the selection, or group `groupId`. */
+export async function ungroup(groupId = groupToUngroup()): Promise<void> {
+  const tab = effectsTab();
+  if (tab && groupId !== null) await runChain(tab, "Could not ungroup the effects", () => api.ungroup(tab.id, groupId));
+}
+
+export async function renameGroup(groupId: number, name: string): Promise<void> {
+  const tab = effectsTab();
+  if (tab) await runChain(tab, "Could not rename the group", () => api.renameGroup(tab.id, groupId, name));
+}
+
+/** Move a group of the active tab to top-level position `index`, counted after it is taken out. */
+export async function moveGroup(groupId: number, index: number): Promise<void> {
+  const tab = effectsTab();
+  if (tab) await runChain(tab, "Could not move the group", () => api.moveGroup(tab.id, groupId, index));
+}
+
+export async function removeGroup(groupId: number): Promise<void> {
+  const tab = effectsTab();
+  if (tab) await runChain(tab, "Could not remove the group", () => api.removeGroup(tab.id, groupId));
+}
+
+export async function setGroupBypass(groupId: number, on: boolean): Promise<void> {
+  const tab = effectsTab();
+  if (tab) await runChain(tab, "Could not bypass the group", () => api.setGroupBypass(tab.id, groupId, on));
 }
 
 export async function setEffectBypass(slotId: number, on: boolean): Promise<void> {
@@ -253,7 +320,7 @@ async function showOutcome(
   tab.meta = outcome.metadata;
   if (clipRuns) tab.clipRuns = clipRuns;
   tab.clip = outcome.clip;
-  tab.chain = outcome.chain;
+  setChain(tab, outcome.chain);
   setEditState(tab, outcome.edit_state);
   tab.revision = outcome.edit_state.revision;
   tab.peaksVersion = version;

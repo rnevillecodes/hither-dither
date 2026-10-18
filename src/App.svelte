@@ -25,6 +25,9 @@
     bypassAllOn,
     canAddEffect,
     canBypassAll,
+    canGroup,
+    canRenameGroup,
+    canUngroup,
     canEdit,
     canRedo,
     canSave,
@@ -36,7 +39,10 @@
     save,
     saveAs,
     exportAudio,
+    groupSelected,
+    startRenameGroup,
     undo,
+    ungroup,
   } from "./lib/editActions";
   import { takeStartupNotices } from "./lib/api";
   import { initEffects } from "./lib/effects.svelte";
@@ -96,6 +102,9 @@
       "fade-in": canEdit("fadeIn"),
       "fade-out": canEdit("fadeOut"),
       "add-effect": canAddEffect(),
+      "group-effects": canGroup(),
+      ungroup: canUngroup(),
+      "rename-group": canRenameGroup(),
       "bypass-all": canBypassAll(),
     });
     void setMenuChecked({ "bypass-all": bypassAllOn() });
@@ -160,6 +169,18 @@
       void applyEdit("silence");
       return;
     }
+    // Also stops the webview's own Ctrl+G (find next) and Ctrl+Shift+G (find previous).
+    if (mod && e.key.toLowerCase() === "g") {
+      e.preventDefault();
+      void (e.shiftKey ? ungroup() : groupSelected());
+      return;
+    }
+    // Also stops the webview reloading the page.
+    if (mod && !e.shiftKey && e.key.toLowerCase() === "r") {
+      e.preventDefault();
+      startRenameGroup();
+      return;
+    }
     if (mod && e.shiftKey && e.key.toLowerCase() === "b" && app.meta) {
       e.preventDefault();
       runScrollBenchmark();
@@ -180,7 +201,11 @@
         zoomToFit();
         break;
       case "Escape":
-        if (app.selection) void setSelection(null);
+        // Highlighted effects first; the waveform selection with the next Escape.
+        if (active?.fxSelected.length) {
+          active.fxSelected = [];
+          active.fxAnchor = null;
+        } else if (app.selection) void setSelection(null);
         break;
       case " ":
         // Always play/pause, rather than activating whichever button has focus.

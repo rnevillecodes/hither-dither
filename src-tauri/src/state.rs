@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::edit::{Audio, ClipFade, Crossfade, Curve, EditList};
 use crate::fx;
-use crate::fx::chain::{Chain, ChainInfo, LIVE_BLOCK, Slot, SlotId, layout_name};
+use crate::fx::chain::{Chain, ChainInfo, GroupInfo, LIVE_BLOCK, Slot, SlotId, layout_name};
+use crate::fx::layout::{self, GroupId, Item, Layout};
 use crate::fx::live::LiveChain;
 use crate::fx::params::ParamSync;
 use crate::fx::render::Render;
@@ -22,7 +23,7 @@ use crate::plugins::instance::{
 };
 use crate::plugins::main_thread::{self, Inline, UiThread};
 use crate::plugins::{ClassId, module};
-use crate::session::{self, AudioRef, SessionFile, StoredChain, StoredEffect};
+use crate::session::{self, AudioRef, SessionFile, StoredChain, StoredEffect, StoredGroup};
 use crate::stats::{self, Analysis, ClipRun, MAX_STORED_RUNS, Stats, StatsRunner, map_runs};
 use crate::wav::{
     NativeFrames, SampleFormat, SampleSource, WavError, WavInfo, check_size,
@@ -343,13 +344,14 @@ pub struct EffectWarning {
     pub reason: String,
 }
 
-/// One step of a file's history: its edits and the effects in its chain, in order.
+/// One step of a file's history: its edits and the effects in its chain, in order and
+/// grouped.
 #[derive(Clone)]
 struct Snapshot {
     /// Unique within its history, so the saved state can be recognised after undo/redo.
     id: u64,
     edits: Arc<EditList>,
-    chain: Vec<SlotId>,
+    chain: Layout,
 }
 
 /// Every edit and chain state of one file since its tab was opened.
@@ -362,6 +364,9 @@ struct History {
     slots: HashMap<SlotId, Arc<Slot>>,
     /// Bypass All, which isn't part of the history.
     bypass_all: bool,
+    /// Each group's bypass switch, also outside the history. Kept for every group a state
+    /// refers to, so undoing a group's removal brings its switch back too.
+    group_bypass: HashMap<GroupId, bool>,
     /// Counts changes outside the history (bypass switches and plugin settings). Shared with
     /// the plugins' listeners, which bump it on the UI thread without the history lock.
     settings: Arc<AtomicU64>,
@@ -371,20 +376,21 @@ struct History {
 
 impl History {
     fn new(edits: Arc<EditList>) -> Self {
-        Self::restored(edits, Vec::new(), false, 0, Arc::default())
+        let bypass = Bypass::default();
+        Self::restored(edits, Layout::new(), Vec::new(), bypass, 0, Arc::default())
     }
 
-    /// A history starting at a restored session: `edits` with `slots` as the chain, in
-    /// order, and nothing unsaved. `revision` and `settings` carry on from the history it
+    /// A history starting at a restored session: `edits` with `chain` arranging `slots`,
+    /// and nothing unsaved. `revision` and `settings` carry on from the history it
     /// replaces.
     fn restored(
         edits: Arc<EditList>,
+        chain: Layout,
         slots: Vec<Arc<Slot>>,
-        bypass_all: bool,
+        bypass: Bypass,
         revision: u64,
         settings: Arc<AtomicU64>,
     ) -> Self {
-        let chain = slots.iter().map(|s| s.id()).collect();
         let saved = (0, settings.load(Ordering::Relaxed));
         Self {
             states: vec![Snapshot {
@@ -396,7 +402,8 @@ impl History {
             next_id: 1,
             revision,
             slots: slots.into_iter().map(|s| (s.id(), s)).collect(),
-            bypass_all,
+            bypass_all: bypass.all,
+            group_bypass: bypass.groups,
             settings,
             saved,
         }
@@ -418,9 +425,24 @@ impl History {
 
     /// The current state's chain.
     fn chain(&self) -> Chain {
-        let slots = self.current().chain.iter();
-        let slots = slots.filter_map(|id| self.slots.get(id).cloned());
-        Chain::new(slots.collect(), self.bypass_all)
+        let layout = &self.current().chain;
+        let held =
+            |id: SlotId| layout::group_of(layout, id).is_some_and(|g| self.group_bypassed(g.id));
+        let slots = layout::slot_order(layout).into_iter();
+        let slots = slots.filter_map(|id| Some((self.slots.get(&id).cloned()?, held(id))));
+        let groups = layout::groups(layout)
+            .map(|g| GroupInfo {
+                group_id: g.id,
+                name: g.name.clone(),
+                bypassed: self.group_bypassed(g.id),
+                slot_ids: g.slots.clone(),
+            })
+            .collect();
+        Chain::grouped(slots.collect(), self.bypass_all, groups)
+    }
+
+    fn group_bypassed(&self, id: GroupId) -> bool {
+        self.group_bypass.get(&id).copied().unwrap_or(false)
     }
 
     /// Unsaved: something changed since the session was last saved, or the tab was opened.
@@ -436,7 +458,7 @@ impl History {
 
     /// Adds a state with `edits` and `chain` after the current one, discarding the redo
     /// history.
-    fn push(&mut self, edits: Arc<EditList>, chain: Vec<SlotId>) {
+    fn push(&mut self, edits: Arc<EditList>, chain: Layout) {
         let id = self.next_id;
         self.next_id += 1;
         self.states.truncate(self.pos + 1);
@@ -445,12 +467,78 @@ impl History {
         self.release_unreferenced();
     }
 
-    /// Forgets slots no state refers to any more. The last reference to a slot releases its
-    /// plugin on the UI thread.
+    /// Forgets slots and group switches no state refers to any more. The last reference to
+    /// a slot releases its plugin on the UI thread.
     fn release_unreferenced(&mut self) {
-        let used: HashSet<SlotId> = self.states.iter().flat_map(|s| &s.chain).copied().collect();
+        let chains = || self.states.iter().map(|s| &s.chain);
+        let used: HashSet<SlotId> = chains().flat_map(|c| layout::slot_order(c)).collect();
+        let groups: HashSet<GroupId> = chains()
+            .flat_map(|c| layout::groups(c).map(|g| g.id))
+            .collect();
         self.slots.retain(|id, _| used.contains(id));
+        self.group_bypass.retain(|id, _| groups.contains(id));
     }
+}
+
+/// The groups of `chain` as a session stores them, with `bypassed` giving each one's switch.
+fn stored_groups(chain: &[Item], bypassed: impl Fn(GroupId) -> bool) -> Vec<StoredGroup> {
+    let mut first = 0;
+    let mut groups = Vec::new();
+    for item in chain {
+        match item {
+            Item::Effect(_) => first += 1,
+            Item::Group(g) => {
+                groups.push(StoredGroup {
+                    name: g.name.clone(),
+                    bypassed: bypassed(g.id),
+                    first,
+                    count: g.slots.len(),
+                });
+                first += g.slots.len();
+            }
+        }
+    }
+    groups
+}
+
+/// The layout of a restored chain, with each group's switch: `stored`'s effects that were
+/// restored (`restored[i]` is the slot of saved effect `i`, if any), in its groups. A group
+/// none of whose effects were restored is left out.
+fn restored_layout(
+    stored: &StoredChain,
+    restored: &[Option<SlotId>],
+    mut next_group: impl FnMut() -> GroupId,
+) -> (Layout, HashMap<GroupId, bool>) {
+    let mut chain = Layout::new();
+    let mut bypass = HashMap::new();
+    let mut i = 0;
+    while i < restored.len() {
+        let Some(g) = stored.groups.iter().find(|g| g.first == i) else {
+            chain.extend(restored[i].map(Item::Effect));
+            i += 1;
+            continue;
+        };
+        let end = (i + g.count).min(restored.len());
+        let slots: Vec<SlotId> = restored[i..end].iter().flatten().copied().collect();
+        if !slots.is_empty() {
+            let id = next_group();
+            bypass.insert(id, g.bypassed);
+            chain.push(Item::Group(layout::Group {
+                id,
+                name: g.name.clone(),
+                slots,
+            }));
+        }
+        i = end;
+    }
+    (chain, bypass)
+}
+
+/// A chain's bypass switches outside the history: Bypass All and each group's.
+#[derive(Default)]
+struct Bypass {
+    all: bool,
+    groups: HashMap<GroupId, bool>,
 }
 
 const NOT_IN_CHAIN: &str = "That effect isn't in the chain";
@@ -470,6 +558,7 @@ pub struct AppState {
     /// Where plugin calls that must run on the UI thread go.
     ui: Arc<dyn UiThread>,
     next_slot: AtomicU32,
+    next_group: AtomicU32,
     fx_listener: Arc<Mutex<Option<FxListener>>>,
     /// Keeps controllers and generic controls in step with the plugins.
     pub params: Arc<ParamSync>,
@@ -494,6 +583,7 @@ impl AppState {
             params: Arc::new(ParamSync::new(ui.clone())),
             ui,
             next_slot: AtomicU32::new(1),
+            next_group: AtomicU32::new(1),
             fx_listener: Arc::default(),
         }
     }
@@ -766,7 +856,7 @@ impl AppState {
         let s = h
             .slots
             .get(&slot)
-            .filter(|_| h.current().chain.contains(&slot))
+            .filter(|_| layout::contains(&h.current().chain, slot))
             .ok_or(NOT_IN_CHAIN)?;
         Ok((s.clone(), file.metadata.name.clone()))
     }
@@ -967,36 +1057,71 @@ impl AppState {
             }
             h.slots.insert(slot_id, slot);
             let mut chain = h.current().chain.clone();
-            chain.push(slot_id);
+            chain.push(Item::Effect(slot_id));
             Ok(chain)
         })
     }
 
     /// Remove an effect from file `id`'s chain, as one undo step.
     pub fn remove_effect(&self, id: FileId, slot: SlotId) -> Result<EditOutcome, String> {
-        self.change_chain(id, |h, _| {
-            let mut chain = h.current().chain.clone();
-            let index = chain.iter().position(|&s| s == slot).ok_or(NOT_IN_CHAIN)?;
-            chain.remove(index);
-            Ok(chain)
-        })
+        self.change_chain(id, |h, _| layout::remove_effect(&h.current().chain, slot))
     }
 
-    /// Move an effect of file `id` to position `index` of its chain (clamped), as one undo
-    /// step. Moving it to where it already is adds nothing.
+    /// Move an effect of file `id` to `to`: a position among the top-level items of its
+    /// chain or among a group's effects (clamped), as one undo step. Moving it to where it
+    /// already is adds nothing; moving the last effect out of a group removes the group.
     pub fn move_effect(
         &self,
         id: FileId,
         slot: SlotId,
+        to: layout::Target,
+    ) -> Result<EditOutcome, String> {
+        self.change_chain(id, |h, _| layout::move_effect(&h.current().chain, slot, to))
+    }
+
+    /// Put effects of file `id` (`slots`, in any order) in a new group, as one undo step.
+    /// See [`layout::group`] for where the group goes and what it is called.
+    pub fn group_effects(&self, id: FileId, slots: &[SlotId]) -> Result<EditOutcome, String> {
+        let group = self.next_group.fetch_add(1, Ordering::Relaxed);
+        self.change_chain(id, |h, _| {
+            layout::group(&h.current().chain, slots, group, None)
+        })
+    }
+
+    /// Replace group `group` of file `id` by its effects, in place, as one undo step.
+    pub fn ungroup(&self, id: FileId, group: GroupId) -> Result<EditOutcome, String> {
+        self.change_chain(id, |h, _| layout::ungroup(&h.current().chain, group))
+    }
+
+    /// Rename group `group` of file `id` to `name`, trimmed, as one undo step. Fails for an
+    /// empty or too long name.
+    pub fn rename_group(
+        &self,
+        id: FileId,
+        group: GroupId,
+        name: &str,
+    ) -> Result<EditOutcome, String> {
+        self.change_chain(id, |h, _| {
+            layout::rename_group(&h.current().chain, group, name)
+        })
+    }
+
+    /// Move group `group` of file `id` to top-level position `index` (clamped), as one undo
+    /// step.
+    pub fn move_group(
+        &self,
+        id: FileId,
+        group: GroupId,
         index: usize,
     ) -> Result<EditOutcome, String> {
         self.change_chain(id, |h, _| {
-            let mut chain = h.current().chain.clone();
-            let from = chain.iter().position(|&s| s == slot).ok_or(NOT_IN_CHAIN)?;
-            chain.remove(from);
-            chain.insert(index.min(chain.len()), slot);
-            Ok(chain)
+            layout::move_group(&h.current().chain, group, index)
         })
+    }
+
+    /// Remove group `group` of file `id` and its effects, as one undo step.
+    pub fn remove_group(&self, id: FileId, group: GroupId) -> Result<EditOutcome, String> {
+        self.change_chain(id, |h, _| layout::remove_group(&h.current().chain, group))
     }
 
     /// Bypass one effect of file `id`, or stop bypassing it. Not an undo step.
@@ -1007,7 +1132,7 @@ impl AppState {
         on: bool,
     ) -> Result<EditOutcome, String> {
         self.change_bypass(id, |h| {
-            let in_chain = h.current().chain.contains(&slot);
+            let in_chain = layout::contains(&h.current().chain, slot);
             let s = h
                 .slots
                 .get(&slot)
@@ -1022,6 +1147,23 @@ impl AppState {
     pub fn set_bypass_all(&self, id: FileId, on: bool) -> Result<EditOutcome, String> {
         self.change_bypass(id, |h| {
             h.bypass_all = on;
+            Ok(())
+        })
+    }
+
+    /// Bypass group `group` of file `id`, or stop bypassing it, leaving its effects' own
+    /// switches as they are. Not an undo step.
+    pub fn set_group_bypass(
+        &self,
+        id: FileId,
+        group: GroupId,
+        on: bool,
+    ) -> Result<EditOutcome, String> {
+        self.change_bypass(id, |h| {
+            if !layout::groups(&h.current().chain).any(|g| g.id == group) {
+                return Err("That group isn't in the chain".to_string());
+            }
+            h.group_bypass.insert(group, on);
             Ok(())
         })
     }
@@ -1044,8 +1186,10 @@ impl AppState {
     ) -> Result<(SessionFile, (u64, u64)), String> {
         self.check_not_saving(id)?;
         let file = self.require(id)?;
-        let (edits, chain, mark) =
-            self.with_history(id, |h| (h.current().edits.clone(), h.chain(), h.mark()))?;
+        let (edits, chain, groups, mark) = self.with_history(id, |h| {
+            let groups = stored_groups(&h.current().chain, |g| h.group_bypassed(g));
+            (h.current().edits.clone(), h.chain(), groups, h.mark())
+        })?;
         let slots = chain.slots.clone();
         let effects = main_thread::run(&*self.ui, move || {
             slots
@@ -1072,6 +1216,7 @@ impl AppState {
         let chain = StoredChain {
             bypass_all: chain.bypass_all,
             effects,
+            groups,
         };
         let session = SessionFile::new(file.audio_ref(session_path), &edits, chain);
         Ok((session, mark))
@@ -1138,7 +1283,10 @@ impl AppState {
 
         let mut warnings = Vec::new();
         let mut slots = Vec::new();
+        // Each saved effect's slot, if it was restored.
+        let mut restored_ids = Vec::new();
         for effect in &session.chain.effects {
+            restored_ids.push(None);
             let mut warn = |reason: String| {
                 warnings.push(EffectWarning {
                     effect: effect.name.clone(),
@@ -1157,6 +1305,7 @@ impl AppState {
                     slot.set_bypassed(effect.bypassed);
                     // Its restored state may hold either bypass value.
                     slot.resend_bypass();
+                    *restored_ids.last_mut().unwrap() = Some(slot.id());
                     slots.push(Arc::new(slot));
                 }
                 Err(reason) => warn(reason),
@@ -1177,7 +1326,13 @@ impl AppState {
             return Err(CANCELLED.to_string());
         }
         let settings = h.settings.clone();
-        *h = History::restored(edits, slots, session.chain.bypass_all, h.revision, settings);
+        let next_group = || self.next_group.fetch_add(1, Ordering::Relaxed);
+        let (chain, groups) = restored_layout(&session.chain, &restored_ids, next_group);
+        let bypass = Bypass {
+            all: session.chain.bypass_all,
+            groups,
+        };
+        *h = History::restored(edits, chain, slots, bypass, h.revision, settings);
         if mode != RestoreMode::Exact {
             // Not the session as saved: it now belongs to another WAV.
             h.touch();
@@ -1275,7 +1430,7 @@ impl AppState {
     fn change_chain(
         &self,
         id: FileId,
-        edit: impl FnOnce(&mut History, &LoadedFile) -> Result<Vec<SlotId>, String>,
+        edit: impl FnOnce(&mut History, &LoadedFile) -> Result<Layout, String>,
     ) -> Result<EditOutcome, String> {
         self.check_not_saving(id)?;
         let mut history = self.history.lock().unwrap();

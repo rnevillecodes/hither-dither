@@ -33,6 +33,8 @@ The installers aren't code-signed yet, so the OS warns the first time you open t
 
 Each tab can run its audio through a chain of VST3 effect plugins: EQs, compressors, limiters, reverbs and so on. Add them from the **Effects** view of the sidebar (the plug icon on the right edge) or **Effects › Add Effect…**. The chain is heard live as the file plays, and is written into the audio only when you export. The waveform and statistics always show the audio before effects; the level meter beside the waveform shows peak and RMS per channel after them, in step with what you hear (before the volume slider). Instruments, VST2, AU, CLAP and LV2 plugins aren't supported.
 
+To keep a long chain tidy, put effects in groups. Select effects in the Effects view (click, Ctrl/Cmd+click, Shift+click) and press **Group** or **Ctrl/Cmd+G** (also **Effects › Group Effects**). A group has a header you can collapse, rename (double-click its name, press F2, or highlight it and press Ctrl/Cmd+R), drag to move with its effects, bypass, or remove along with its effects. Grouping doesn't change how the audio sounds: effects still run one after another in the order shown. A group's bypass switch bypasses all of its effects but leaves their own switches as they were, so turning it off brings back exactly what was on. **Ungroup** (Ctrl/Cmd+Shift+G, or the button on the group's header) puts the effects back in place. Groups are saved in session files; a session with groups can't be opened by versions of HitherDither from before groups.
+
 HitherDither looks for plugins in the standard VST3 folders, including their subfolders:
 
 | OS | Folders |
