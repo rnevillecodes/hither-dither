@@ -19,9 +19,6 @@ use crate::plugins::scan::ScannedClass;
 /// Identifies an effect slot, unique for the life of the app.
 pub type SlotId = u32;
 
-/// Most effects a chain can hold.
-pub const MAX_EFFECTS: usize = 8;
-
 /// Largest block the live chain processes: the playback feeder's chunk size.
 pub const LIVE_BLOCK: usize = 1024;
 

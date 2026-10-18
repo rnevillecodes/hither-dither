@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::edit::{Audio, ClipFade, Crossfade, Curve, EditList};
 use crate::fx;
-use crate::fx::chain::{Chain, ChainInfo, LIVE_BLOCK, MAX_EFFECTS, Slot, SlotId, layout_name};
+use crate::fx::chain::{Chain, ChainInfo, LIVE_BLOCK, Slot, SlotId, layout_name};
 use crate::fx::live::LiveChain;
 use crate::fx::params::ParamSync;
 use crate::fx::render::Render;
@@ -942,21 +942,16 @@ impl AppState {
     }
 
     /// Load effect `class_id` from `plugins` and add it to the end of file `id`'s chain, as
-    /// one undo step. Fails, leaving the chain as it was, when the chain is full, the effect
-    /// can't process the file's channels, or the plugin fails to load.
+    /// one undo step. Fails, leaving the chain as it was, when the effect can't process the
+    /// file's channels or the plugin fails to load.
     pub fn add_effect(
         &self,
         id: FileId,
         plugins: &Arc<PluginCache>,
         class_id: ClassId,
     ) -> Result<EditOutcome, String> {
-        const FULL: &str = "The effect chain is full";
         self.check_not_saving(id)?;
         let file = self.require(id)?;
-        let full = |h: &History| h.current().chain.len() >= MAX_EFFECTS;
-        if self.with_history(id, full)? {
-            return Err(FULL.to_string());
-        }
         let config = live_config(file.audio.info());
         let source = file.audio.source().clone();
         drop(file);
@@ -969,9 +964,6 @@ impl AppState {
             // The file was reopened while the plugin loaded.
             if !Arc::ptr_eq(file.audio.source(), &source) {
                 return Err(CANCELLED.to_string());
-            }
-            if full(h) {
-                return Err(FULL.to_string());
             }
             h.slots.insert(slot_id, slot);
             let mut chain = h.current().chain.clone();
@@ -1153,10 +1145,6 @@ impl AppState {
                     reason,
                 })
             };
-            if slots.len() >= MAX_EFFECTS {
-                warn("The effect chain is full".to_string());
-                continue;
-            }
             let saved = (
                 PluginState::from(&effect.state),
                 effect.pending_params.clone(),

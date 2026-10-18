@@ -176,8 +176,7 @@ function effectsTab(): Tab | null {
 }
 
 export function canAddEffect(): boolean {
-  const chain = effectsTab()?.chain;
-  return !!chain && chain.effects.length < api.MAX_EFFECTS;
+  return !!effectsTab();
 }
 
 export function canBypassAll(): boolean {

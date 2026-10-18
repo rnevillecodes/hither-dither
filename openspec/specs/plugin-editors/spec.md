@@ -1,10 +1,10 @@
-# Spec Delta
+# plugin-editors Specification
 
 ## Purpose
 
 Shows the controls of an effect in a chain, either as the plugin's own editor in a separate window or as generic parameter controls in the main window. Changes made there are heard straight away.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Native editor window
 Opening an effect's controls SHALL show the plugin's own editor in a separate window titled "<effect name> — <file name>", sized to the editor. The window SHALL stay above the main window, without blocking it, and SHALL be resizable only if the plugin allows. At most one editor window SHALL be open per effect; opening it again SHALL bring the window to the front.
@@ -22,7 +22,7 @@ Opening an effect's controls SHALL show the plugin's own editor in a separate wi
 - **THEN** the window grows to fit it
 
 ### Requirement: Editor windows follow their tab
-Editor windows SHALL be hidden while their tab is not the active tab and shown again, at the same place, when it is. They SHALL close when their effect is removed, when their tab closes, when a save clears the chain, or when the app quits.
+Editor windows SHALL be hidden while their tab is not the active tab and shown again, at the same place, when it is. They SHALL close when their effect is removed, when their tab closes, or when the app quits.
 
 #### Scenario: Switch tabs
 - **WHEN** `a.wav` has its EQ editor open and the user switches to `b.wav`
@@ -58,8 +58,8 @@ When a plugin's own editor can't be shown, opening its controls SHALL show the g
 - **THEN** generic controls are shown with a note that plugin editors need X11 or XWayland
 
 ### Requirement: Parameter changes are live
-Parameter changes made in an editor or in the generic controls SHALL take effect in playback within 0.25 s, as described in the effect-chain capability, and SHALL apply to the next Save. They SHALL NOT add undo steps.
+Parameter changes made in an editor or in the generic controls SHALL take effect in playback within 0.25 s, as described in the effect-chain capability, and SHALL apply to the next Export. They SHALL NOT add undo steps.
 
-#### Scenario: Turn a knob, then save
-- **WHEN** the user sets an EQ band to +3 dB in its editor, closes the editor and saves
-- **THEN** the saved audio has the +3 dB band applied, and Undo is greyed out after the save
+#### Scenario: Turn a knob, then export
+- **WHEN** the user sets an EQ band to +3 dB in its editor, closes the editor and exports
+- **THEN** the exported audio has the +3 dB band applied, and the change added no undo step

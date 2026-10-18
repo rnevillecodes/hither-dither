@@ -458,9 +458,6 @@ export interface ChainInfo {
   latency: number;
 }
 
-/** Most effects a chain can hold. */
-export const MAX_EFFECTS = 8;
-
 export function getChain(fileId: number): Promise<ChainInfo | null> {
   return invoke("get_chain", { fileId });
 }

@@ -8,7 +8,7 @@ use common::test_plugins::{self, TestPlugin};
 use hither_dither_lib::commands::{
     PEAKS_HEADER_BYTES, PEAKS_KIND_MINMAX, PEAKS_KIND_SAMPLES, encode_peaks,
 };
-use hither_dither_lib::fx::chain::{ChainInfo, MAX_EFFECTS, SlotId};
+use hither_dither_lib::fx::chain::{ChainInfo, SlotId};
 use hither_dither_lib::plugins::ClassId;
 use hither_dither_lib::plugins::cache::PluginCache;
 use hither_dither_lib::plugins::scan::Scanner;
@@ -917,21 +917,21 @@ fn bypassing_is_outside_the_history_but_unsaved() {
 }
 
 #[test]
-fn a_full_chain_refuses_another_effect() {
+fn a_chain_has_no_length_limit() {
     let fx = effects();
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::default();
     open_sine(&state, &dir, 1, 8_000);
-    for _ in 0..MAX_EFFECTS {
-        state.add_effect(1, &fx.plugins, fx.gain).unwrap();
+    let mut added = Vec::new();
+    for _ in 0..10 {
+        let out = state.add_effect(1, &fx.plugins, fx.gain).unwrap();
+        added.push(*slot_ids(&out.chain).last().unwrap());
     }
-    let before = state.get_chain(1).unwrap();
-    assert_eq!(before.effects.len(), 8);
-    let err = state.add_effect(1, &fx.plugins, fx.gain).unwrap_err();
-    assert!(err.contains("full"), "{err}");
-    assert_eq!(state.get_chain(1).unwrap(), before);
-    // The last step is still the eighth effect.
-    assert_eq!(state.undo(1).unwrap().chain.effects.len(), 7);
+    let chain = state.get_chain(1).unwrap();
+    assert_eq!(slot_ids(&chain), added);
+    assert_eq!(chain.latency, 10 * 64);
+    // Each effect is its own step.
+    assert_eq!(slot_ids(&state.undo(1).unwrap().chain), added[..9]);
 }
 
 #[test]
@@ -1546,6 +1546,36 @@ fn a_restored_session_sounds_and_saves_the_same() {
     let second = dir.path().join("second.wav");
     state.export(2, &second, |_, _| {}).unwrap();
     assert_eq!(native_samples(&second), native_samples(&first));
+}
+
+#[test]
+fn a_long_chain_is_restored_in_full() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    for i in 0..12 {
+        let out = state.add_effect(1, &fx.plugins, fx.gain).unwrap();
+        // Every third one bypassed, so the order can be told apart.
+        if i % 3 == 0 {
+            let slot = *slot_ids(&out.chain).last().unwrap();
+            state.set_effect_bypass(1, slot, true).unwrap();
+        }
+    }
+    let session = dir.path().join("long.hdsession.json");
+    state.save_session(1, &session, true).unwrap();
+
+    state
+        .open(2, &dir.path().join("sine1.wav"), |_, _| {})
+        .unwrap();
+    let out = state
+        .restore_session(2, &session, false, &fx.plugins)
+        .unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    let bypassed = |c: &ChainInfo| c.effects.iter().map(|e| e.bypassed).collect::<Vec<_>>();
+    let restored = state.get_chain(2).unwrap();
+    assert_eq!(restored.effects.len(), 12);
+    assert_eq!(bypassed(&restored), bypassed(&state.get_chain(1).unwrap()));
 }
 
 #[test]

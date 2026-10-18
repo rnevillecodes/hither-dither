@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import { MAX_EFFECTS, type EffectInfo } from "../lib/api";
+  import type { EffectInfo } from "../lib/api";
   import { dropGap, dropIndex, stepIndex } from "../lib/chainOrder";
   import { canAddEffect, moveEffect, removeEffect, setBypassAll, setEffectBypass } from "../lib/editActions";
   import { closeControls, closeGeneric, editorOpen, effectsUi, showControls } from "../lib/effects.svelte";
@@ -14,7 +14,6 @@
 
   const effects = $derived(tab.chain?.effects ?? []);
   const bypassAll = $derived(tab.chain?.bypassAll ?? false);
-  const full = $derived(effects.length >= MAX_EFFECTS);
   const busy = $derived(tab.editing);
 
   let list = $state<HTMLOListElement>();
@@ -104,7 +103,7 @@
 <section aria-labelledby="effects-heading">
   <header>
     <h2 id="effects-heading" class:sr-only={!titled}>Effects</h2>
-    <span class="add" title={full ? `The chain is full (${MAX_EFFECTS} effects)` : "Add Effect…"}>
+    <span class="add" title="Add Effect…">
       <button
         class="small"
         aria-label="Add Effect"
