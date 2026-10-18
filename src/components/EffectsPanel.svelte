@@ -23,6 +23,7 @@
     setBypassAll,
     setEffectBypass,
     setGroupBypass,
+    startSaveGroupPreset,
     ungroup,
   } from "../lib/editActions";
   import { closeControls, closeGeneric, editorOpen, effectsUi, showControls } from "../lib/effects.svelte";
@@ -309,6 +310,17 @@
                 onclick={() => void setGroupBypass(g.groupId, !g.bypassed)}
               >
                 <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 1.5v4M3.2 3.3a4 4 0 1 0 5.6 0" /></svg>
+              </button>
+              <button
+                class="icon"
+                aria-label="Save {g.name} as a preset"
+                title="Save as Preset…"
+                disabled={busy}
+                onclick={() => startSaveGroupPreset(g.groupId)}
+              >
+                <svg viewBox="0 0 12 12" aria-hidden="true">
+                  <path d="M2 1.5h6.5l1.5 1.5v7.5H2z" /><path d="M4 1.5v3h4v-3M4 10.5V7.5h4v3" />
+                </svg>
               </button>
               <button
                 class="icon"

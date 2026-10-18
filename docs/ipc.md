@@ -451,12 +451,13 @@ Enables or disables an effect, remembered across restarts. Disabling doesn't rem
 
 ### `take_startup_notices`
 
-No arguments. Returns the plugins disabled at startup because the app closed unexpectedly while loading one of them into a chain or opening its editor. Each notice is returned once.
+No arguments. Returns the plugins disabled at startup because the app closed unexpectedly while loading one of them into a chain or opening its editor, and a notice when the effect presets could not be read (see *Effect presets*). Each notice is returned once.
 
 ```ts
 interface StartupNotice {
-  classId: string;
-  name: string;
+  classId?: string; // the disabled plugin; absent for the presets notice
+  name: string;     // the plugin's name; empty for the presets notice
+  title: string;    // e.g. "X was disabled", "Effect presets could not be read"
   message: string;  // e.g. "X was disabled because HitherDither closed unexpectedly while loading it. You can enable it again in Manage Plugins."
 }
 ```
@@ -609,6 +610,84 @@ Bypasses one effect, keeping its settings. A plugin with a bypass parameter bypa
 | `on` | boolean | |
 
 Bypasses the whole chain, keeping each effect's own bypass switch. Not an undo step.
+
+## Effect presets
+
+A preset is a named group of effects, each with its plugin's complete settings and its own bypass switch, kept by the app in `effect-presets.json` in its data folder, and available in every tab and after restarting. Every change rewrites the file through a temporary file, so it is replaced only once the new contents are complete; a change that can't be written rejects with `The presets could not be saved: …` and changes nothing. A file that can't be read gives an empty library and a startup notice (see `take_startup_notices`), and is left alone until the next change replaces it.
+
+Preset names are 1 to 64 characters after trimming, and are compared ignoring case. A preset keeps its id when renamed. Inserting a preset copies it: the inserted group isn't linked to the preset, either way.
+
+```ts
+interface PresetInfo {
+  id: number;
+  name: string;
+  effectCount: number;
+}
+
+interface SavePresetOutcome {
+  saved: boolean;           // false when another preset has the name and `replace` was false:
+                            // nothing changed; ask whether to replace it
+  presets: PresetInfo[];    // the library afterwards
+}
+```
+
+### `list_presets`
+
+No arguments. Returns `PresetInfo[]`, sorted by name ignoring case.
+
+### `save_group_preset`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `groupId` | number | |
+| `name` | string | |
+| `replace` | boolean | Overwrite a preset that has the name |
+
+Saves the group's effects, in order, as a preset. Doesn't change the file, its history or its unsaved state. Returns `SavePresetOutcome`. Rejects, saving nothing:
+- with `That group isn't in the chain`;
+- with `A preset name must be 1 to 64 characters`;
+- with `“X” could not save its settings` when an effect can't report its state.
+
+### `rename_preset`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `presetId` | number | |
+| `name` | string | |
+| `replace` | boolean | Delete another preset that has the name |
+
+Returns `SavePresetOutcome`. Rejects with `That preset no longer exists`, or for an invalid name as `save_group_preset` does. Doesn't change any tab.
+
+### `delete_preset`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `presetId` | number | |
+
+Returns the remaining `PresetInfo[]`. Rejects with `That preset no longer exists`. Doesn't change any tab; groups inserted from the preset stay as they are.
+
+### `insert_preset`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `presetId` | number | |
+
+Loads the preset's effects, each with its saved state restored before processing is set up, then its unprocessed parameter changes and its bypass switch, and adds them to the end of the chain as a new group named after the preset, not bypassed, as one undo step.
+
+```ts
+interface InsertOutcome {
+  outcome: EditOutcome;
+  warnings: { effect: string; reason: string }[];   // show as one notice
+}
+```
+
+Effects are left out, and kept at their defaults, as by `restore_session`. Rejects, leaving the chain unchanged:
+- with `That preset no longer exists`;
+- with `“X” could not be inserted. …`, followed by each effect and the reason it was left out, when none of its effects can be loaded;
+- with `The edit was cancelled` if the file was reopened while the effects loaded;
+- with `The file is being exported` during an export.
 
 ## Effect editors
 

@@ -23,6 +23,7 @@ use crate::plugins::instance::{
 };
 use crate::plugins::main_thread::{self, Inline, UiThread};
 use crate::plugins::{ClassId, module};
+use crate::presets::{Preset, PresetError, PresetLibrary};
 use crate::session::{self, AudioRef, SessionFile, StoredChain, StoredEffect, StoredGroup};
 use crate::stats::{self, Analysis, ClipRun, MAX_STORED_RUNS, Stats, StatsRunner, map_runs};
 use crate::wav::{
@@ -322,6 +323,14 @@ pub struct RestoreOutcome {
     /// The session had edits that were left out, because the WAV is a different recording.
     pub edits_dropped: bool,
     /// Effects left out or kept at their defaults, in chain order.
+    pub warnings: Vec<EffectWarning>,
+}
+
+/// Result of inserting a preset.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct InsertOutcome {
+    pub outcome: EditOutcome,
+    /// Effects left out or kept at their defaults, in the preset's order.
     pub warnings: Vec<EffectWarning>,
 }
 
@@ -1062,6 +1071,81 @@ impl AppState {
         })
     }
 
+    /// Save group `group` of file `id` to `library` as preset `name`: each effect in order,
+    /// with its plugin's settings and own bypass switch. Doesn't change the file or its
+    /// history. Returns false, saving nothing, when another preset has the name and not
+    /// `replace`; fails, naming it, when an effect can't report its settings.
+    pub fn save_group_preset(
+        &self,
+        id: FileId,
+        group: GroupId,
+        name: &str,
+        replace: bool,
+        library: &PresetLibrary,
+    ) -> Result<bool, String> {
+        let slots = self.with_history(id, |h| {
+            let group = layout::groups(&h.current().chain)
+                .find(|g| g.id == group)
+                .ok_or("That group isn't in the chain")?;
+            Ok::<_, String>(group.slots.iter().map(|s| h.slots[s].clone()).collect())
+        })??;
+        let effects = self.store_effects(slots)?;
+        match library.save(name, effects, replace) {
+            Ok(_) => Ok(true),
+            Err(PresetError::NameTaken) => Ok(false),
+            Err(PresetError::Failed(e)) => Err(e),
+        }
+    }
+
+    /// Add `preset`'s effects, with their saved settings and bypass switches, to the end of
+    /// file `id`'s chain as a new group named after it, as one undo step. Effects that can't
+    /// be loaded are left out with warnings (see [`load_stored`](Self::load_stored)); if
+    /// none can, this fails, naming them, and the chain stays as it was.
+    pub fn insert_preset(
+        &self,
+        id: FileId,
+        preset: &Preset,
+        plugins: &Arc<PluginCache>,
+    ) -> Result<InsertOutcome, String> {
+        self.check_not_saving(id)?;
+        let file = self.require(id)?;
+        let config = live_config(file.audio.info());
+        let source = file.audio.source().clone();
+        drop(file);
+
+        let (slots, warnings) = self.load_stored(id, &preset.effects, config, plugins);
+        let slots: Vec<Arc<Slot>> = slots.into_iter().flatten().collect();
+        if slots.is_empty() {
+            let mut message = format!("“{}” could not be inserted", preset.name);
+            if !warnings.is_empty() {
+                let reasons: Vec<String> = warnings
+                    .iter()
+                    .map(|w| format!("{}: {}", w.effect, w.reason))
+                    .collect();
+                message = format!("{message}. {}", reasons.join(" "));
+            }
+            return Err(message);
+        }
+        let outcome = self.change_chain(id, |h, file| {
+            // The file was reopened while the plugins loaded.
+            if !Arc::ptr_eq(file.audio.source(), &source) {
+                return Err(CANCELLED.to_string());
+            }
+            let ids = slots.iter().map(|s| s.id()).collect();
+            for slot in slots {
+                h.slots.insert(slot.id(), slot);
+            }
+            let mut chain = h.current().chain.clone();
+            chain.push(Item::Group(layout::Group {
+                id: self.next_group.fetch_add(1, Ordering::Relaxed),
+                name: preset.name.clone(),
+                slots: ids,
+            }));
+            Ok(chain)
+        })?;
+        Ok(InsertOutcome { outcome, warnings })
+    }
+
     /// Remove an effect from file `id`'s chain, as one undo step.
     pub fn remove_effect(&self, id: FileId, slot: SlotId) -> Result<EditOutcome, String> {
         self.change_chain(id, |h, _| layout::remove_effect(&h.current().chain, slot))
@@ -1190,8 +1274,21 @@ impl AppState {
             let groups = stored_groups(&h.current().chain, |g| h.group_bypassed(g));
             (h.current().edits.clone(), h.chain(), groups, h.mark())
         })?;
-        let slots = chain.slots.clone();
-        let effects = main_thread::run(&*self.ui, move || {
+        let effects = self.store_effects(chain.slots.clone())?;
+
+        let chain = StoredChain {
+            bypass_all: chain.bypass_all,
+            effects,
+            groups,
+        };
+        let session = SessionFile::new(file.audio_ref(session_path), &edits, chain);
+        Ok((session, mark))
+    }
+
+    /// `slots`, in order, each with its plugin's settings (read on the UI thread) and its own
+    /// bypass switch. Fails, naming it, if an effect can't report its state.
+    fn store_effects(&self, slots: Vec<Arc<Slot>>) -> Result<Vec<StoredEffect>, String> {
+        main_thread::run(&*self.ui, move || {
             slots
                 .iter()
                 .map(|s| {
@@ -1211,15 +1308,54 @@ impl AppState {
                 })
                 .collect::<Result<Vec<_>, String>>()
         })
-        .map_err(|e| e.to_string())??;
+        .map_err(|e| e.to_string())?
+    }
 
-        let chain = StoredChain {
-            bypass_all: chain.bypass_all,
-            effects,
-            groups,
-        };
-        let session = SessionFile::new(file.audio_ref(session_path), &edits, chain);
-        Ok((session, mark))
+    /// Loads stored `effects` for file `id`, configured with `config`, each with its saved
+    /// settings and bypass switch, and watched. Returns each effect's slot, or `None` for
+    /// one left out because it isn't available, is disabled, can't process the channels or
+    /// fails to load, with a warning for each of those and for each plugin that rejected its
+    /// settings (it keeps its defaults).
+    fn load_stored(
+        &self,
+        id: FileId,
+        effects: &[StoredEffect],
+        config: Config,
+        plugins: &Arc<PluginCache>,
+    ) -> (Vec<Option<Arc<Slot>>>, Vec<EffectWarning>) {
+        let mut warnings = Vec::new();
+        let mut slots = Vec::new();
+        for effect in effects {
+            let mut warn = |reason: String| {
+                warnings.push(EffectWarning {
+                    effect: effect.name.clone(),
+                    reason,
+                })
+            };
+            let saved = (
+                PluginState::from(&effect.state),
+                effect.pending_params.clone(),
+            );
+            match self.load_slot(plugins, effect.class_id, config, Some(saved)) {
+                Ok((slot, restored)) => {
+                    if !restored {
+                        warn("Its settings could not be restored, so it has its defaults.".into());
+                    }
+                    slot.set_bypassed(effect.bypassed);
+                    // Its restored state may hold either bypass value.
+                    slot.resend_bypass();
+                    slots.push(Some(Arc::new(slot)));
+                }
+                Err(reason) => {
+                    warn(reason);
+                    slots.push(None);
+                }
+            }
+        }
+        for slot in slots.iter().flatten() {
+            self.watch_slot(id, slot);
+        }
+        (slots, warnings)
     }
 
     /// Apply the session at `session_path` to file `id`, freshly opened from the session's
@@ -1281,39 +1417,14 @@ impl AppState {
         let source = file.audio.source().clone();
         drop(file);
 
-        let mut warnings = Vec::new();
-        let mut slots = Vec::new();
+        let (loaded_slots, warnings) =
+            self.load_stored(id, &session.chain.effects, config, plugins);
         // Each saved effect's slot, if it was restored.
-        let mut restored_ids = Vec::new();
-        for effect in &session.chain.effects {
-            restored_ids.push(None);
-            let mut warn = |reason: String| {
-                warnings.push(EffectWarning {
-                    effect: effect.name.clone(),
-                    reason,
-                })
-            };
-            let saved = (
-                PluginState::from(&effect.state),
-                effect.pending_params.clone(),
-            );
-            match self.load_slot(plugins, effect.class_id, config, Some(saved)) {
-                Ok((slot, restored)) => {
-                    if !restored {
-                        warn("Its settings could not be restored, so it has its defaults.".into());
-                    }
-                    slot.set_bypassed(effect.bypassed);
-                    // Its restored state may hold either bypass value.
-                    slot.resend_bypass();
-                    *restored_ids.last_mut().unwrap() = Some(slot.id());
-                    slots.push(Arc::new(slot));
-                }
-                Err(reason) => warn(reason),
-            }
-        }
-        for slot in &slots {
-            self.watch_slot(id, slot);
-        }
+        let restored_ids: Vec<Option<SlotId>> = loaded_slots
+            .iter()
+            .map(|s| s.as_ref().map(|s| s.id()))
+            .collect();
+        let slots: Vec<Arc<Slot>> = loaded_slots.into_iter().flatten().collect();
 
         let mut history = self.history.lock().unwrap();
         let h = history.get_mut(&id).ok_or(NO_FILE)?;

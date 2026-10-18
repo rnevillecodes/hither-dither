@@ -541,7 +541,7 @@ fn leftover_marker_disables_the_class_with_one_notice() {
     assert_eq!(status_of(&restarted, "HD Test Stereo"), PluginStatus::Ready);
     let notices = restarted.take_notices();
     assert_eq!(notices.len(), 1);
-    assert_eq!(notices[0].class_id, gain);
+    assert_eq!(notices[0].class_id, Some(gain));
     assert_eq!(
         notices[0].message,
         "HD Test Gain was disabled because HitherDither closed unexpectedly while opening \

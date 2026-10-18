@@ -9,6 +9,7 @@ import { groupOfSelection } from "./chainOrder";
 import { revealSidebarView } from "./layout.svelte";
 import { effectsUi } from "./effects.svelte";
 import { notify } from "./notices.svelte";
+import { presets, refreshPresets } from "./presets.svelte";
 import { setChain, setEditState, showChainOutcome } from "./outcome";
 import { closePrompt, defaultExportPath, defaultSessionPath, withSessionExtension } from "./sessionFiles";
 import { samePath } from "./tabOrder";
@@ -289,6 +290,109 @@ export function bypassAllOn(): boolean {
 /** Effects › Bypass All Effects. */
 export function toggleBypassAll(): Promise<void> {
   return canBypassAll() ? setBypassAll(!bypassAllOn()) : Promise.resolve();
+}
+
+// --- Effect presets ------------------------------------------------------------------------
+
+/** How saving or renaming a preset went: saved, the name is taken (nothing changed), or failed. */
+export type PresetSaveResult = "saved" | "taken" | "failed";
+
+/** Whether Save Group as Preset is available: a group of the active tab is highlighted. */
+export function canSaveGroupPreset(): boolean {
+  return groupToUngroup() !== null;
+}
+
+/** Save as Preset: ask for a name for group `groupId` of the active tab (the highlighted one). */
+export function startSaveGroupPreset(groupId = groupToUngroup()): void {
+  const tab = effectsTab();
+  const group = tab?.chain?.groups.find((g) => g.groupId === groupId);
+  if (!tab || !group) return;
+  presets.prompt = { kind: "save", fileId: tab.id, groupId: group.groupId, initial: group.name };
+}
+
+/** Save group `groupId` of tab `fileId` as preset `name`. Failures are shown as notices. */
+export async function saveGroupPreset(
+  fileId: number,
+  groupId: number,
+  name: string,
+  replace: boolean,
+): Promise<PresetSaveResult> {
+  const tab = findTab(fileId);
+  if (!tab) return "failed";
+  // Let changes already on their way land first, so the preset has them.
+  await queues.get(tab.id);
+  try {
+    const out = await api.saveGroupPreset(fileId, groupId, name, replace);
+    presets.list = out.presets;
+    return out.saved ? "saved" : "taken";
+  } catch (e) {
+    notify("error", "Could not save the preset", String(e));
+    return "failed";
+  }
+}
+
+export async function renamePreset(presetId: number, name: string, replace: boolean): Promise<PresetSaveResult> {
+  try {
+    const out = await api.renamePreset(presetId, name, replace);
+    presets.list = out.presets;
+    return out.saved ? "saved" : "taken";
+  } catch (e) {
+    notify("error", "Could not rename the preset", String(e));
+    void refreshPresets();
+    return "failed";
+  }
+}
+
+/** Delete a preset after asking. Resolves whether it was deleted. */
+export async function deletePreset(preset: api.PresetInfo): Promise<boolean> {
+  const choice = await message(`Delete the preset “${preset.name}”?\n\nGroups already inserted from it are kept.`, {
+    title: "Delete Preset",
+    kind: "warning",
+    buttons: { ok: "Delete", cancel: "Cancel" },
+  });
+  if (choice !== "Delete") return false;
+  try {
+    presets.list = await api.deletePreset(preset.id);
+    return true;
+  } catch (e) {
+    notify("error", "Could not delete the preset", String(e));
+    void refreshPresets();
+    return false;
+  }
+}
+
+/** Ask whether to replace preset `name`. Resolves true to replace it. */
+export async function confirmReplacePreset(name: string): Promise<boolean> {
+  const choice = await message(`A preset named “${name}” already exists. Replace it?`, {
+    title: "Replace Preset",
+    kind: "warning",
+    buttons: { ok: "Replace", cancel: "Cancel" },
+  });
+  return choice === "Replace";
+}
+
+/** Whether Insert Preset is available: the active tab can take effects. */
+export function canInsertPreset(): boolean {
+  return !!effectsTab();
+}
+
+/** Effects › Insert Preset: add preset `presetId` to the end of the active tab's chain as a group. */
+export async function insertPreset(presetId: number): Promise<void> {
+  const tab = effectsTab();
+  if (!tab) return;
+  let warnings: api.EffectWarning[] = [];
+  const outcome = await runChain(tab, "Could not insert the preset", async () => {
+    const out = await api.insertPreset(tab.id, presetId);
+    warnings = out.warnings;
+    return out.outcome;
+  });
+  if (!outcome) {
+    // It may have been deleted meanwhile.
+    void refreshPresets();
+    return;
+  }
+  revealSidebarView("effects");
+  showEffectWarnings(warnings, "inserted");
 }
 
 /** The tab's playhead: live in `transport` while active, saved on the tab otherwise. */

@@ -157,11 +157,11 @@ function showRestoreNotices(name: string, restored: RestoreOutcome) {
 }
 
 /** Effects that couldn't be brought across to a tab's audio, as one notice. */
-export function showEffectWarnings(warnings: EffectWarning[]) {
+export function showEffectWarnings(warnings: EffectWarning[], done = "restored") {
   if (warnings.length > 0) {
     notify(
       "warning",
-      warnings.length === 1 ? "An effect wasn't fully restored" : "Some effects weren't fully restored",
+      warnings.length === 1 ? `An effect wasn't fully ${done}` : `Some effects weren't fully ${done}`,
       warnings.map((w) => `${w.effect}: ${w.reason}`).join("\n"),
     );
   }

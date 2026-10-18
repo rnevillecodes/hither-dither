@@ -13,6 +13,7 @@ use hither_dither_lib::fx::layout::{GroupId, Target};
 use hither_dither_lib::plugins::ClassId;
 use hither_dither_lib::plugins::cache::PluginCache;
 use hither_dither_lib::plugins::scan::Scanner;
+use hither_dither_lib::presets::{Preset, PresetLibrary};
 use hither_dither_lib::session::SessionFile;
 use hither_dither_lib::state::{AppState, ClipSettings, EditOp, FadeSetting, OpenError, Preview};
 use hither_dither_lib::stats::Loudness;
@@ -2455,4 +2456,182 @@ fn a_failed_replacement_changes_nothing() {
         .unwrap_err();
     assert!(err.contains("already this tab's audio"), "{err}");
     assert_eq!(state.edit_state(1).unwrap(), st);
+}
+
+// --- Presets -------------------------------------------------------------------------------
+
+fn open_5_1(state: &AppState, dir: &tempfile::TempDir, id: u32) {
+    let s = sine(440.0, 0.5, 8_000, 1_000);
+    let path = write(
+        dir,
+        &format!("surround{id}.wav"),
+        WavBuilder::new(Encoding::Pcm, 16, 6, 8_000).extensible(true),
+        &interleave(&vec![s; 6]),
+    );
+    state.open(id, &path, |_, _| {}).unwrap();
+}
+
+/// File 1 with "Vocal cleanup": HD Test Gain at +6.02 dB, then a bypassed HD Test Gain.
+/// Returns the library, the group and its two effects.
+fn vocal_cleanup(
+    state: &AppState,
+    dir: &tempfile::TempDir,
+    fx: &Effects,
+) -> (PresetLibrary, GroupId, [SlotId; 2]) {
+    open_sine(state, dir, 1, 8_000);
+    let eq = add_double(state, fx, 1);
+    let comp = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[1];
+    state.set_effect_bypass(1, comp, true).unwrap();
+    let group = state.group_effects(1, &[eq, comp]).unwrap().chain.groups[0].group_id;
+    state.rename_group(1, group, "Vocal cleanup").unwrap();
+    let (library, _) = PresetLibrary::open(dir.path());
+    (library, group, [eq, comp])
+}
+
+fn preset_named(library: &PresetLibrary, name: &str) -> Preset {
+    let info = library.list().into_iter().find(|p| p.name == name).unwrap();
+    library.get(info.id).unwrap()
+}
+
+#[test]
+fn saving_a_group_as_a_preset_keeps_settings_and_leaves_the_tab_alone() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    let (library, group, _) = vocal_cleanup(&state, &dir, &fx);
+    // Another effect outside the group isn't saved.
+    state.add_effect(1, &fx.plugins, fx.stereo).unwrap();
+    state
+        .save_session(1, &dir.path().join("s.hdsession.json"), true)
+        .unwrap();
+    let (before, chain) = (state.edit_state(1).unwrap(), state.get_chain(1).unwrap());
+
+    let saved = state
+        .save_group_preset(1, group, "Vocal cleanup", false, &library)
+        .unwrap();
+    assert!(saved);
+    let preset = preset_named(&library, "Vocal cleanup");
+    let names: Vec<&str> = preset.effects.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["HD Test Gain", "HD Test Gain"]);
+    let bypassed: Vec<bool> = preset.effects.iter().map(|e| e.bypassed).collect();
+    assert_eq!(bypassed, [false, true]);
+    assert_eq!(state.edit_state(1).unwrap(), before);
+    assert!(!before.dirty);
+    assert_eq!(state.get_chain(1).unwrap(), chain);
+
+    // A taken name saves nothing unless replacing.
+    let again = state.save_group_preset(1, group, "vocal CLEANUP", false, &library);
+    assert_eq!(again, Ok(false));
+    assert_eq!(library.list().len(), 1);
+    assert!(
+        state
+            .save_group_preset(1, 999, "X", false, &library)
+            .is_err()
+    );
+}
+
+#[test]
+fn inserting_a_preset_adds_a_group_in_one_undo_step() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    let (library, group, _) = vocal_cleanup(&state, &dir, &fx);
+    state
+        .save_group_preset(1, group, "Vocal cleanup", false, &library)
+        .unwrap();
+    open_sine(&state, &dir, 2, 8_000);
+    let preset = preset_named(&library, "Vocal cleanup");
+
+    let out = state.insert_preset(2, &preset, &fx.plugins).unwrap();
+    assert!(out.warnings.is_empty());
+    let chain = &out.outcome.chain;
+    let ids = slot_ids(chain);
+    assert_eq!(groups(chain), [("Vocal cleanup", ids.clone())]);
+    assert!(!chain.groups[0].bypassed);
+    let own: Vec<bool> = chain.effects.iter().map(|e| e.bypassed).collect();
+    assert_eq!(own, [false, true]);
+    assert!((gain_of(&state, 2, ids[0]) - plus_6db()).abs() < 1e-6);
+    assert!(out.outcome.edit_state.dirty && out.outcome.edit_state.can_undo);
+    assert!(!out.outcome.audio_changed);
+
+    let undone = state.undo(2).unwrap();
+    assert!(undone.chain.effects.is_empty() && undone.chain.groups.is_empty());
+    assert!(!undone.edit_state.can_undo);
+}
+
+#[test]
+fn an_inserted_group_is_not_linked_to_its_preset() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    let (library, group, _) = vocal_cleanup(&state, &dir, &fx);
+    state
+        .save_group_preset(1, group, "Vocal cleanup", false, &library)
+        .unwrap();
+    open_sine(&state, &dir, 2, 8_000);
+    let preset = preset_named(&library, "Vocal cleanup");
+
+    let first = state.insert_preset(2, &preset, &fx.plugins).unwrap();
+    let eq = slot_ids(&first.outcome.chain)[0];
+    state.set_fx_param(2, eq, GAIN_PARAM, 0.5).unwrap();
+    let second = state.insert_preset(2, &preset, &fx.plugins).unwrap();
+    let chain = &second.outcome.chain;
+    assert_eq!(chain.groups.len(), 2);
+    assert_ne!(chain.groups[0].group_id, chain.groups[1].group_id);
+    let second_eq = chain.groups[1].slot_ids[0];
+    assert!((gain_of(&state, 2, second_eq) - plus_6db()).abs() < 1e-6);
+    assert!((gain_of(&state, 2, eq) - 0.5).abs() < 1e-6);
+    // Nor is the preset changed by the group.
+    assert_eq!(preset_named(&library, "Vocal cleanup"), preset);
+}
+
+#[test]
+fn a_stereo_only_preset_effect_is_left_out_of_a_5_1_tab() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    open_sine(&state, &dir, 1, 8_000);
+    let gain = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[0];
+    let stereo = slot_ids(&state.add_effect(1, &fx.plugins, fx.stereo).unwrap().chain)[1];
+    let group = state
+        .group_effects(1, &[gain, stereo])
+        .unwrap()
+        .chain
+        .groups[0]
+        .group_id;
+    let (library, _) = PresetLibrary::open(dir.path());
+    state
+        .save_group_preset(1, group, "Mixed", false, &library)
+        .unwrap();
+    open_5_1(&state, &dir, 2);
+
+    let out = state
+        .insert_preset(2, &preset_named(&library, "Mixed"), &fx.plugins)
+        .unwrap();
+    assert_eq!(effect_names(&out.outcome.chain), ["HD Test Gain"]);
+    assert_eq!(out.outcome.chain.groups[0].name, "Mixed");
+    assert_eq!(out.warnings.len(), 1);
+    assert_eq!(out.warnings[0].effect, "HD Test Stereo");
+    assert_eq!(
+        out.warnings[0].reason,
+        "HD Test Stereo doesn't support 5.1 audio"
+    );
+}
+
+#[test]
+fn a_preset_with_nothing_insertable_leaves_the_chain_alone() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    open_sine(&state, &dir, 1, 8_000);
+    let stereo = slot_ids(&state.add_effect(1, &fx.plugins, fx.stereo).unwrap().chain)[0];
+    let group = state.group_effects(1, &[stereo]).unwrap().chain.groups[0].group_id;
+    let (library, _) = PresetLibrary::open(dir.path());
+    state
+        .save_group_preset(1, group, "Stereo", false, &library)
+        .unwrap();
+    open_5_1(&state, &dir, 2);
+    state.add_effect(2, &fx.plugins, fx.gain).unwrap();
+    let (before, chain) = (state.edit_state(2).unwrap(), state.get_chain(2).unwrap());
+
+    let err = state
+        .insert_preset(2, &preset_named(&library, "Stereo"), &fx.plugins)
+        .unwrap_err();
+    assert!(err.starts_with("“Stereo” could not be inserted"), "{err}");
+    assert!(
+        err.contains("HD Test Stereo doesn't support 5.1 audio"),
+        "{err}"
+    );
+    assert_eq!(state.edit_state(2).unwrap(), before);
+    assert_eq!(state.get_chain(2).unwrap(), chain);
 }

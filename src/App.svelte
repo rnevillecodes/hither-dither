@@ -8,6 +8,8 @@
   import LevelMeter from "./components/LevelMeter.svelte";
   import Notices from "./components/Notices.svelte";
   import PluginManager from "./components/PluginManager.svelte";
+  import PresetManager from "./components/PresetManager.svelte";
+  import PresetNameDialog from "./components/PresetNameDialog.svelte";
   import ProgressOverlay from "./components/ProgressOverlay.svelte";
   import StatsPanel from "./components/StatsPanel.svelte";
   import TabBar from "./components/TabBar.svelte";
@@ -28,6 +30,8 @@
     canGroup,
     canRenameGroup,
     canUngroup,
+    canInsertPreset,
+    canSaveGroupPreset,
     canEdit,
     canRedo,
     canSave,
@@ -46,7 +50,8 @@
   } from "./lib/editActions";
   import { takeStartupNotices } from "./lib/api";
   import { initEffects } from "./lib/effects.svelte";
-  import { onQuit, setMenuChecked, setMenuEnabled } from "./lib/menu";
+  import { onQuit, setMenuChecked, setMenuEnabled, setPresetMenu } from "./lib/menu";
+  import { presets, refreshPresets } from "./lib/presets.svelte";
   import { notify } from "./lib/notices.svelte";
   import { initPlugins } from "./lib/plugins.svelte";
   import { runScrollBenchmark } from "./lib/perf";
@@ -59,10 +64,12 @@
   void initTransport();
   initEffects();
   initPlugins();
+  void refreshPresets();
 
-  // Plugins disabled because the app closed unexpectedly while one was loading.
+  // Plugins disabled because the app closed unexpectedly while one was loading, and saved
+  // presets that could not be read.
   void takeStartupNotices()
-    .then((list) => list.forEach((n) => notify("warning", `${n.name} was disabled`, n.message)))
+    .then((list) => list.forEach((n) => notify("warning", n.title, n.message)))
     .catch(() => {});
 
   // Reopen the last session: WAVs and session files, as the tabs were remembered. Session
@@ -105,9 +112,15 @@
       "group-effects": canGroup(),
       ungroup: canUngroup(),
       "rename-group": canRenameGroup(),
+      "save-group-preset": canSaveGroupPreset(),
       "bypass-all": canBypassAll(),
     });
     void setMenuChecked({ "bypass-all": bypassAllOn() });
+  });
+
+  // Effects › Insert Preset follows saves, renames and deletes.
+  $effect(() => {
+    void setPresetMenu(presets.list, canInsertPreset());
   });
 
   // Closing the window (or File › Quit) asks about unsaved changes first. Tauri closes
@@ -314,6 +327,8 @@
   <CurveDialog />
   <EffectBrowser />
   <PluginManager />
+  <PresetManager />
+  <PresetNameDialog />
   <GenericControls />
 </div>
 
