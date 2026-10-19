@@ -4,10 +4,11 @@ Releases are built by GitHub Actions (`.github/workflows/release.yml`). Pushing 
 
 ## Steps
 
-1. **Bump the version** in all three places to the same value (for example `0.2.0`):
+1. **Bump the version** in all four places to the same value (for example `0.2.0`):
    - `package.json` (`"version"`)
    - `src-tauri/Cargo.toml` (`version` under `[package]`)
    - `src-tauri/tauri.conf.json` (`"version"`)
+   - `site/index.html` (both `<span data-version>` elements). The site shows this until the release is published, then switches to the published release's version.
 
    Then refresh the lock files so they don't drift:
 
@@ -22,7 +23,7 @@ Releases are built by GitHub Actions (`.github/workflows/release.yml`). Pushing 
    node scripts/check-version.mjs v0.2.0
    ```
 
-3. **Commit and merge** the bump to `main` (through a PR, so CI builds it first).
+3. **Commit and merge** the bump to `main` (through a PR, so CI builds it first). CI also runs the version check without a tag, so a file the bump missed fails the PR.
 
 4. **Tag and push** the merged commit:
 
