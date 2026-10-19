@@ -1,5 +1,6 @@
-// Checks that the app version agrees across package.json, src-tauri/Cargo.toml and
-// src-tauri/tauri.conf.json, and (given a tag such as v0.2.0) that it matches the tag.
+// Checks that the app version agrees across package.json, src-tauri/Cargo.toml,
+// src-tauri/tauri.conf.json and the site (site/index.html), and (given a tag such as
+// v0.2.0) that it matches the tag.
 // Usage: node scripts/check-version.mjs [tag]
 import { readFileSync } from "node:fs";
 
@@ -11,10 +12,18 @@ function cargoVersion(toml) {
   return pkg.match(/^version\s*=\s*"([^"]+)"/m)?.[1] ?? null;
 }
 
+// The site shows the version in several data-version spans; spans that disagree
+// are reported together so the mismatch is visible.
+function siteVersion(html) {
+  const found = [...new Set([...html.matchAll(/data-version>([^<]+)</g)].map((m) => m[1].trim()))];
+  return found.length > 0 ? found.join(", ") : null;
+}
+
 const versions = {
   "package.json": JSON.parse(read("package.json")).version ?? null,
   "src-tauri/Cargo.toml": cargoVersion(read("src-tauri/Cargo.toml")),
   "src-tauri/tauri.conf.json": JSON.parse(read("src-tauri/tauri.conf.json")).version ?? null,
+  "site/index.html": siteVersion(read("site/index.html")),
 };
 
 const tag = process.argv[2];

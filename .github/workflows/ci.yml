@@ -15,6 +15,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Catches a bump that missed a file (the site included) before it reaches main.
+  version-check:
+    name: App version agrees across files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: node scripts/check-version.mjs
+
   build:
     uses: ./.github/workflows/build.yml
     with:
