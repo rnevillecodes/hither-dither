@@ -8,10 +8,12 @@ use common::test_plugins::{self, TestPlugin};
 use hither_dither_lib::commands::{
     PEAKS_HEADER_BYTES, PEAKS_KIND_MINMAX, PEAKS_KIND_SAMPLES, encode_peaks,
 };
-use hither_dither_lib::fx::chain::{ChainInfo, MAX_EFFECTS, SlotId};
+use hither_dither_lib::fx::chain::{ChainInfo, SlotId};
+use hither_dither_lib::fx::layout::{GroupId, Target};
 use hither_dither_lib::plugins::ClassId;
 use hither_dither_lib::plugins::cache::PluginCache;
 use hither_dither_lib::plugins::scan::Scanner;
+use hither_dither_lib::presets::{Preset, PresetLibrary};
 use hither_dither_lib::session::SessionFile;
 use hither_dither_lib::state::{AppState, ClipSettings, EditOp, FadeSetting, OpenError, Preview};
 use hither_dither_lib::stats::Loudness;
@@ -917,21 +919,21 @@ fn bypassing_is_outside_the_history_but_unsaved() {
 }
 
 #[test]
-fn a_full_chain_refuses_another_effect() {
+fn a_chain_has_no_length_limit() {
     let fx = effects();
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::default();
     open_sine(&state, &dir, 1, 8_000);
-    for _ in 0..MAX_EFFECTS {
-        state.add_effect(1, &fx.plugins, fx.gain).unwrap();
+    let mut added = Vec::new();
+    for _ in 0..10 {
+        let out = state.add_effect(1, &fx.plugins, fx.gain).unwrap();
+        added.push(*slot_ids(&out.chain).last().unwrap());
     }
-    let before = state.get_chain(1).unwrap();
-    assert_eq!(before.effects.len(), 8);
-    let err = state.add_effect(1, &fx.plugins, fx.gain).unwrap_err();
-    assert!(err.contains("full"), "{err}");
-    assert_eq!(state.get_chain(1).unwrap(), before);
-    // The last step is still the eighth effect.
-    assert_eq!(state.undo(1).unwrap().chain.effects.len(), 7);
+    let chain = state.get_chain(1).unwrap();
+    assert_eq!(slot_ids(&chain), added);
+    assert_eq!(chain.latency, 10 * 64);
+    // Each effect is its own step.
+    assert_eq!(slot_ids(&state.undo(1).unwrap().chain), added[..9]);
 }
 
 #[test]
@@ -970,7 +972,7 @@ fn chain_changes_do_not_start_an_analysis() {
     let a = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[0];
     let b = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[1];
     let outcomes = [
-        state.move_effect(1, b, 0).unwrap(),
+        state.move_effect(1, b, top(0)).unwrap(),
         state.set_effect_bypass(1, a, true).unwrap(),
         state.set_bypass_all(1, true).unwrap(),
         state.remove_effect(1, a).unwrap(),
@@ -998,17 +1000,30 @@ fn moving_an_effect_reorders_the_chain() {
         state.add_effect(1, &fx.plugins, fx.gain).unwrap();
     }
     let ids = slot_ids(&state.get_chain(1).unwrap());
-    let out = state.move_effect(1, ids[2], 0).unwrap();
+    let out = state.move_effect(1, ids[2], top(0)).unwrap();
     assert_eq!(slot_ids(&out.chain), [ids[2], ids[0], ids[1]]);
     // Past the end means last.
-    let out = state.move_effect(1, ids[2], 99).unwrap();
+    let out = state.move_effect(1, ids[2], top(99)).unwrap();
     assert_eq!(slot_ids(&out.chain), ids);
     // Where it already is adds no undo step.
-    let out = state.move_effect(1, ids[2], 2).unwrap();
+    let out = state.move_effect(1, ids[2], top(2)).unwrap();
     assert!(!out.edit_state.can_redo);
     let out = state.undo(1).unwrap();
     assert_eq!(slot_ids(&out.chain), [ids[2], ids[0], ids[1]]);
-    assert!(state.move_effect(1, 999, 0).is_err());
+    assert!(state.move_effect(1, 999, top(0)).is_err());
+}
+
+/// A position among a chain's top-level items.
+fn top(index: usize) -> Target {
+    Target { group: None, index }
+}
+
+/// A position among group `group`'s effects.
+fn inside(group: GroupId, index: usize) -> Target {
+    Target {
+        group: Some(group),
+        index,
+    }
 }
 
 #[test]
@@ -1036,6 +1051,222 @@ fn effects_no_longer_in_the_history_are_released() {
     let weak = [b, c].map(|s| Arc::downgrade(&state.slot(1, s).unwrap()));
     drop(state.close(1));
     assert!(weak.iter().all(|w| w.upgrade().is_none()));
+}
+
+// --- Effect groups -------------------------------------------------------------------------
+
+/// Opens a sine as file 1 with four HD Test Gains, standing in for EQ, De-esser, Compressor
+/// and Reverb, and returns their slots.
+fn four_effects(state: &AppState, dir: &tempfile::TempDir, fx: &Effects) -> [SlotId; 4] {
+    open_sine(state, dir, 1, 8_000);
+    for _ in 0..4 {
+        state.add_effect(1, &fx.plugins, fx.gain).unwrap();
+    }
+    slot_ids(&state.get_chain(1).unwrap()).try_into().unwrap()
+}
+
+/// Each group of `chain` as its name and effects.
+fn groups(chain: &ChainInfo) -> Vec<(&str, Vec<SlotId>)> {
+    let g = chain.groups.iter();
+    g.map(|g| (g.name.as_str(), g.slot_ids.clone())).collect()
+}
+
+#[test]
+fn grouping_neighbours_keeps_the_order_and_can_be_undone() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    let [eq, de, comp, rev] = four_effects(&state, &dir, &fx);
+    state
+        .save_session(1, &dir.path().join("s.hdsession.json"), true)
+        .unwrap();
+
+    let out = state.group_effects(1, &[comp, de]).unwrap();
+    assert_eq!(groups(&out.chain), [("Group 1", vec![de, comp])]);
+    assert_eq!(slot_ids(&out.chain), [eq, de, comp, rev]);
+    assert!(out.edit_state.dirty && out.edit_state.can_undo && !out.audio_changed);
+
+    let out = state.undo(1).unwrap();
+    assert!(out.chain.groups.is_empty() && !out.edit_state.dirty);
+    let out = state.redo(1).unwrap();
+    assert_eq!(groups(&out.chain), [("Group 1", vec![de, comp])]);
+}
+
+#[test]
+fn grouping_effects_that_arent_neighbours_gathers_them_at_the_first() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    let [eq, comp, rev, _] = four_effects(&state, &dir, &fx);
+    let out = state.group_effects(1, &[eq, rev]).unwrap();
+    assert_eq!(groups(&out.chain), [("Group 1", vec![eq, rev])]);
+    assert_eq!(slot_ids(&out.chain)[..3], [eq, rev, comp]);
+    assert!(state.group_effects(1, &[]).is_err());
+    assert!(state.group_effects(1, &[999]).is_err());
+}
+
+#[test]
+fn grouping_across_groups_and_regrouping_a_whole_group() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    let [eq, comp, rev, _] = four_effects(&state, &dir, &fx);
+    state.group_effects(1, &[eq, comp]).unwrap();
+    let out = state.group_effects(1, &[comp, rev]).unwrap();
+    assert_eq!(
+        groups(&out.chain),
+        [("Group 1", vec![eq]), ("Group 2", vec![comp, rev])]
+    );
+    let out = state.group_effects(1, &[eq, comp, rev]).unwrap();
+    assert_eq!(groups(&out.chain), [("Group 1", vec![eq, comp, rev])]);
+}
+
+#[test]
+fn ungrouping_leaves_the_effects_in_place() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    let ids = four_effects(&state, &dir, &fx);
+    let out = state.group_effects(1, &[ids[1], ids[2]]).unwrap();
+    let group = out.chain.groups[0].group_id;
+    let out = state.ungroup(1, group).unwrap();
+    assert!(out.chain.groups.is_empty());
+    assert_eq!(slot_ids(&out.chain), ids);
+    assert!(state.ungroup(1, group).is_err());
+}
+
+#[test]
+fn renaming_trims_and_refuses_empty_names() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    let ids = four_effects(&state, &dir, &fx);
+    let group = state.group_effects(1, &ids[..2]).unwrap().chain.groups[0].group_id;
+    let out = state.rename_group(1, group, "  Vocal cleanup ").unwrap();
+    assert_eq!(groups(&out.chain)[0].0, "Vocal cleanup");
+    assert!(state.rename_group(1, group, "   ").is_err());
+    assert!(state.rename_group(1, group, &"x".repeat(65)).is_err());
+    // The same name again adds no step: one undo goes back to "Group 1".
+    state.rename_group(1, group, "Vocal cleanup").unwrap();
+    assert_eq!(groups(&state.undo(1).unwrap().chain)[0].0, "Group 1");
+}
+
+#[test]
+fn moving_a_group_moves_its_effects_together() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    let [eq, de, comp, rev] = four_effects(&state, &dir, &fx);
+    let group = state.group_effects(1, &[de, comp]).unwrap().chain.groups[0].group_id;
+    let out = state.move_group(1, group, 0).unwrap();
+    assert_eq!(slot_ids(&out.chain), [de, comp, eq, rev]);
+    let out = state.move_group(1, group, 99).unwrap();
+    assert_eq!(slot_ids(&out.chain), [eq, rev, de, comp]);
+    assert!(state.move_group(1, 999, 0).is_err());
+}
+
+#[test]
+fn effects_move_into_and_out_of_groups() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    let [eq, comp, rev, other] = four_effects(&state, &dir, &fx);
+    let group = state.group_effects(1, &[eq, comp]).unwrap().chain.groups[0].group_id;
+
+    // Drag Reverb between EQ and Compressor.
+    let out = state.move_effect(1, rev, inside(group, 1)).unwrap();
+    assert_eq!(groups(&out.chain), [("Group 1", vec![eq, rev, comp])]);
+    assert!(out.edit_state.can_undo);
+
+    // Alt+Down on the last member: just after the group.
+    let out = state.move_effect(1, comp, top(1)).unwrap();
+    assert_eq!(groups(&out.chain), [("Group 1", vec![eq, rev])]);
+    assert_eq!(slot_ids(&out.chain), [eq, rev, comp, other]);
+
+    // Into a group that doesn't exist: refused, nothing changes.
+    let before = state.get_chain(1).unwrap();
+    assert!(state.move_effect(1, comp, inside(999, 0)).is_err());
+    assert_eq!(state.get_chain(1).unwrap(), before);
+
+    // Moving the last members out removes the group.
+    state.move_effect(1, eq, top(99)).unwrap();
+    let out = state.move_effect(1, rev, top(99)).unwrap();
+    assert!(out.chain.groups.is_empty());
+    assert_eq!(slot_ids(&out.chain), [comp, other, eq, rev]);
+}
+
+#[test]
+fn group_bypass_holds_its_effects_and_keeps_their_own_switches() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    let [eq, comp, _, _] = four_effects(&state, &dir, &fx);
+    let group = state.group_effects(1, &[eq, comp]).unwrap().chain.groups[0].group_id;
+    state.set_effect_bypass(1, comp, true).unwrap();
+    state
+        .save_session(1, &dir.path().join("s.hdsession.json"), true)
+        .unwrap();
+    let processed = |state: &AppState| -> Vec<SlotId> {
+        let file = state.get(1).unwrap();
+        file.chain.processed().map(|s| s.id()).collect()
+    };
+    let all = processed(&state);
+    assert!(all.contains(&eq) && !all.contains(&comp));
+
+    let out = state.set_group_bypass(1, group, true).unwrap();
+    // Neither processes; Compressor's own switch is still on and EQ's still off.
+    let now = processed(&state);
+    assert!(!now.contains(&eq) && !now.contains(&comp));
+    assert!(out.chain.groups[0].bypassed);
+    let own: Vec<bool> = out.chain.effects[..2].iter().map(|e| e.bypassed).collect();
+    assert_eq!(own, [false, true]);
+    assert_eq!(out.chain.latency, 2 * 64);
+    // Unsaved, but not an undo step: undo takes back the grouping.
+    assert!(out.edit_state.dirty);
+    assert!(state.undo(1).unwrap().chain.groups.is_empty());
+    state.redo(1).unwrap();
+
+    let out = state.set_group_bypass(1, group, false).unwrap();
+    assert!(!out.chain.groups[0].bypassed);
+    assert_eq!(processed(&state), all);
+    assert!(state.set_group_bypass(1, 999, true).is_err());
+}
+
+#[test]
+fn a_bypassed_group_is_left_out_of_an_export() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    let source = open_tone(
+        &state,
+        &dir,
+        1,
+        WavBuilder::new(Encoding::Pcm, 16, 2, 8_000),
+        0.2,
+    );
+    // A doubling gain in a bypassed group, then another, active.
+    for _ in 0..2 {
+        let out = state.add_effect(1, &fx.plugins, fx.gain).unwrap();
+        let slot = *slot_ids(&out.chain).last().unwrap();
+        let instance = state.slot(1, slot).unwrap();
+        instance.instance().set_param(GAIN_PARAM, plus_6db());
+    }
+    let first = slot_ids(&state.get_chain(1).unwrap())[0];
+    let group = state.group_effects(1, &[first]).unwrap().chain.groups[0].group_id;
+    state.set_group_bypass(1, group, true).unwrap();
+
+    let copy = dir.path().join("grouped.wav");
+    state.export(1, &copy, |_, _| {}).unwrap();
+    let (src, saved) = (native_samples(&source), native_samples(&copy));
+    assert_eq!(saved.len(), src.len());
+    for (i, (s, d)) in src.iter().zip(&saved).enumerate() {
+        assert_eq!(*d, (s * 2.0).clamp(-32_768.0, 32_767.0), "sample {i}");
+    }
+}
+
+#[test]
+fn removing_a_group_can_be_undone_with_its_settings() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    let [eq, de, comp, rev] = four_effects(&state, &dir, &fx);
+    let group = state.group_effects(1, &[de, comp]).unwrap().chain.groups[0].group_id;
+    state.rename_group(1, group, "Vocal cleanup").unwrap();
+    state
+        .slot(1, de)
+        .unwrap()
+        .instance()
+        .set_param(GAIN_PARAM, plus_6db());
+
+    let out = state.remove_group(1, group).unwrap();
+    assert_eq!(slot_ids(&out.chain), [eq, rev]);
+    assert!(out.chain.groups.is_empty());
+    let out = state.undo(1).unwrap();
+    assert_eq!(groups(&out.chain), [("Vocal cleanup", vec![de, comp])]);
+    assert_eq!(slot_ids(&out.chain), [eq, de, comp, rev]);
+    assert_eq!(gain_of(&state, 1, de), plus_6db());
 }
 
 // --- Saving through effects ----------------------------------------------------------------
@@ -1549,6 +1780,36 @@ fn a_restored_session_sounds_and_saves_the_same() {
 }
 
 #[test]
+fn a_long_chain_is_restored_in_full() {
+    let fx = effects();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    open_sine(&state, &dir, 1, 8_000);
+    for i in 0..12 {
+        let out = state.add_effect(1, &fx.plugins, fx.gain).unwrap();
+        // Every third one bypassed, so the order can be told apart.
+        if i % 3 == 0 {
+            let slot = *slot_ids(&out.chain).last().unwrap();
+            state.set_effect_bypass(1, slot, true).unwrap();
+        }
+    }
+    let session = dir.path().join("long.hdsession.json");
+    state.save_session(1, &session, true).unwrap();
+
+    state
+        .open(2, &dir.path().join("sine1.wav"), |_, _| {})
+        .unwrap();
+    let out = state
+        .restore_session(2, &session, false, &fx.plugins)
+        .unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    let bypassed = |c: &ChainInfo| c.effects.iter().map(|e| e.bypassed).collect::<Vec<_>>();
+    let restored = state.get_chain(2).unwrap();
+    assert_eq!(restored.effects.len(), 12);
+    assert_eq!(bypassed(&restored), bypassed(&state.get_chain(1).unwrap()));
+}
+
+#[test]
 fn a_restored_session_with_only_bypassed_effects_is_not_unsaved() {
     let fx = effects();
     let dir = tempfile::tempdir().unwrap();
@@ -1661,6 +1922,88 @@ fn effects_that_cant_be_found_are_left_out() {
     assert_eq!(out.warnings.len(), 1);
     assert_eq!(out.warnings[0].effect, "Gone FX");
     assert!(out.warnings[0].reason.contains("isn't available"));
+}
+
+#[test]
+fn groups_are_saved_and_restored() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    let [_, de, comp, _] = four_effects(&state, &dir, &fx);
+    let group = state.group_effects(1, &[de, comp]).unwrap().chain.groups[0].group_id;
+    state.rename_group(1, group, "Vocal cleanup").unwrap();
+    state.set_group_bypass(1, group, true).unwrap();
+    state
+        .slot(1, de)
+        .unwrap()
+        .instance()
+        .set_param(GAIN_PARAM, plus_6db());
+    let path = dir.path().join("mix.hdsession.json");
+    state.save_session(1, &path, true).unwrap();
+
+    let saved = SessionFile::read(&path).unwrap();
+    assert_eq!(saved.version, 2);
+    let g = &saved.chain.groups[0];
+    assert_eq!(
+        (g.name.as_str(), g.bypassed, g.first, g.count),
+        ("Vocal cleanup", true, 1, 2)
+    );
+
+    state
+        .open(2, &dir.path().join("sine1.wav"), |_, _| {})
+        .unwrap();
+    let out = state.restore_session(2, &path, false, &fx.plugins).unwrap();
+    assert!(out.warnings.is_empty() && !out.edit_state.dirty);
+    let chain = state.get_chain(2).unwrap();
+    let ids = slot_ids(&chain);
+    assert_eq!(groups(&chain), [("Vocal cleanup", vec![ids[1], ids[2]])]);
+    assert!(chain.groups[0].bypassed);
+    assert_eq!(gain_of(&state, 2, ids[1]), plus_6db());
+    // The group's switch holds its effects in the restored chain too.
+    let processed: Vec<SlotId> = state
+        .get(2)
+        .unwrap()
+        .chain
+        .processed()
+        .map(|s| s.id())
+        .collect();
+    assert_eq!(processed, [ids[0], ids[3]]);
+}
+
+#[test]
+fn a_session_without_groups_is_saved_as_version_1() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    four_effects(&state, &dir, &fx);
+    let path = dir.path().join("mix.hdsession.json");
+    state.save_session(1, &path, true).unwrap();
+    let saved = SessionFile::read(&path).unwrap();
+    assert_eq!(saved.version, 1);
+    assert!(saved.chain.groups.is_empty());
+}
+
+#[test]
+fn a_group_keeps_the_effects_that_could_be_restored() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    let [_, de, comp, rev] = four_effects(&state, &dir, &fx);
+    state.group_effects(1, &[de, comp]).unwrap();
+    let group = state.group_effects(1, &[rev]).unwrap().chain.groups[1].group_id;
+    state.rename_group(1, group, "Gone").unwrap();
+    let path = dir.path().join("mix.hdsession.json");
+    state.save_session(1, &path, true).unwrap();
+    // Compressor, in "Group 1", and Reverb, alone in "Gone", have since been uninstalled.
+    edit_session(&path, |json| {
+        for i in [2, 3] {
+            json["chain"]["effects"][i]["classId"] = "00000000000000000000000000000000".into();
+        }
+    });
+
+    state
+        .open(2, &dir.path().join("sine1.wav"), |_, _| {})
+        .unwrap();
+    let out = state.restore_session(2, &path, false, &fx.plugins).unwrap();
+    assert_eq!(out.warnings.len(), 2);
+    let chain = state.get_chain(2).unwrap();
+    let ids = slot_ids(&chain);
+    assert_eq!(ids.len(), 2);
+    assert_eq!(groups(&chain), [("Group 1", vec![ids[1]])]);
 }
 
 #[test]
@@ -2113,4 +2456,182 @@ fn a_failed_replacement_changes_nothing() {
         .unwrap_err();
     assert!(err.contains("already this tab's audio"), "{err}");
     assert_eq!(state.edit_state(1).unwrap(), st);
+}
+
+// --- Presets -------------------------------------------------------------------------------
+
+fn open_5_1(state: &AppState, dir: &tempfile::TempDir, id: u32) {
+    let s = sine(440.0, 0.5, 8_000, 1_000);
+    let path = write(
+        dir,
+        &format!("surround{id}.wav"),
+        WavBuilder::new(Encoding::Pcm, 16, 6, 8_000).extensible(true),
+        &interleave(&vec![s; 6]),
+    );
+    state.open(id, &path, |_, _| {}).unwrap();
+}
+
+/// File 1 with "Vocal cleanup": HD Test Gain at +6.02 dB, then a bypassed HD Test Gain.
+/// Returns the library, the group and its two effects.
+fn vocal_cleanup(
+    state: &AppState,
+    dir: &tempfile::TempDir,
+    fx: &Effects,
+) -> (PresetLibrary, GroupId, [SlotId; 2]) {
+    open_sine(state, dir, 1, 8_000);
+    let eq = add_double(state, fx, 1);
+    let comp = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[1];
+    state.set_effect_bypass(1, comp, true).unwrap();
+    let group = state.group_effects(1, &[eq, comp]).unwrap().chain.groups[0].group_id;
+    state.rename_group(1, group, "Vocal cleanup").unwrap();
+    let (library, _) = PresetLibrary::open(dir.path());
+    (library, group, [eq, comp])
+}
+
+fn preset_named(library: &PresetLibrary, name: &str) -> Preset {
+    let info = library.list().into_iter().find(|p| p.name == name).unwrap();
+    library.get(info.id).unwrap()
+}
+
+#[test]
+fn saving_a_group_as_a_preset_keeps_settings_and_leaves_the_tab_alone() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    let (library, group, _) = vocal_cleanup(&state, &dir, &fx);
+    // Another effect outside the group isn't saved.
+    state.add_effect(1, &fx.plugins, fx.stereo).unwrap();
+    state
+        .save_session(1, &dir.path().join("s.hdsession.json"), true)
+        .unwrap();
+    let (before, chain) = (state.edit_state(1).unwrap(), state.get_chain(1).unwrap());
+
+    let saved = state
+        .save_group_preset(1, group, "Vocal cleanup", false, &library)
+        .unwrap();
+    assert!(saved);
+    let preset = preset_named(&library, "Vocal cleanup");
+    let names: Vec<&str> = preset.effects.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["HD Test Gain", "HD Test Gain"]);
+    let bypassed: Vec<bool> = preset.effects.iter().map(|e| e.bypassed).collect();
+    assert_eq!(bypassed, [false, true]);
+    assert_eq!(state.edit_state(1).unwrap(), before);
+    assert!(!before.dirty);
+    assert_eq!(state.get_chain(1).unwrap(), chain);
+
+    // A taken name saves nothing unless replacing.
+    let again = state.save_group_preset(1, group, "vocal CLEANUP", false, &library);
+    assert_eq!(again, Ok(false));
+    assert_eq!(library.list().len(), 1);
+    assert!(
+        state
+            .save_group_preset(1, 999, "X", false, &library)
+            .is_err()
+    );
+}
+
+#[test]
+fn inserting_a_preset_adds_a_group_in_one_undo_step() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    let (library, group, _) = vocal_cleanup(&state, &dir, &fx);
+    state
+        .save_group_preset(1, group, "Vocal cleanup", false, &library)
+        .unwrap();
+    open_sine(&state, &dir, 2, 8_000);
+    let preset = preset_named(&library, "Vocal cleanup");
+
+    let out = state.insert_preset(2, &preset, &fx.plugins).unwrap();
+    assert!(out.warnings.is_empty());
+    let chain = &out.outcome.chain;
+    let ids = slot_ids(chain);
+    assert_eq!(groups(chain), [("Vocal cleanup", ids.clone())]);
+    assert!(!chain.groups[0].bypassed);
+    let own: Vec<bool> = chain.effects.iter().map(|e| e.bypassed).collect();
+    assert_eq!(own, [false, true]);
+    assert!((gain_of(&state, 2, ids[0]) - plus_6db()).abs() < 1e-6);
+    assert!(out.outcome.edit_state.dirty && out.outcome.edit_state.can_undo);
+    assert!(!out.outcome.audio_changed);
+
+    let undone = state.undo(2).unwrap();
+    assert!(undone.chain.effects.is_empty() && undone.chain.groups.is_empty());
+    assert!(!undone.edit_state.can_undo);
+}
+
+#[test]
+fn an_inserted_group_is_not_linked_to_its_preset() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    let (library, group, _) = vocal_cleanup(&state, &dir, &fx);
+    state
+        .save_group_preset(1, group, "Vocal cleanup", false, &library)
+        .unwrap();
+    open_sine(&state, &dir, 2, 8_000);
+    let preset = preset_named(&library, "Vocal cleanup");
+
+    let first = state.insert_preset(2, &preset, &fx.plugins).unwrap();
+    let eq = slot_ids(&first.outcome.chain)[0];
+    state.set_fx_param(2, eq, GAIN_PARAM, 0.5).unwrap();
+    let second = state.insert_preset(2, &preset, &fx.plugins).unwrap();
+    let chain = &second.outcome.chain;
+    assert_eq!(chain.groups.len(), 2);
+    assert_ne!(chain.groups[0].group_id, chain.groups[1].group_id);
+    let second_eq = chain.groups[1].slot_ids[0];
+    assert!((gain_of(&state, 2, second_eq) - plus_6db()).abs() < 1e-6);
+    assert!((gain_of(&state, 2, eq) - 0.5).abs() < 1e-6);
+    // Nor is the preset changed by the group.
+    assert_eq!(preset_named(&library, "Vocal cleanup"), preset);
+}
+
+#[test]
+fn a_stereo_only_preset_effect_is_left_out_of_a_5_1_tab() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    open_sine(&state, &dir, 1, 8_000);
+    let gain = slot_ids(&state.add_effect(1, &fx.plugins, fx.gain).unwrap().chain)[0];
+    let stereo = slot_ids(&state.add_effect(1, &fx.plugins, fx.stereo).unwrap().chain)[1];
+    let group = state
+        .group_effects(1, &[gain, stereo])
+        .unwrap()
+        .chain
+        .groups[0]
+        .group_id;
+    let (library, _) = PresetLibrary::open(dir.path());
+    state
+        .save_group_preset(1, group, "Mixed", false, &library)
+        .unwrap();
+    open_5_1(&state, &dir, 2);
+
+    let out = state
+        .insert_preset(2, &preset_named(&library, "Mixed"), &fx.plugins)
+        .unwrap();
+    assert_eq!(effect_names(&out.outcome.chain), ["HD Test Gain"]);
+    assert_eq!(out.outcome.chain.groups[0].name, "Mixed");
+    assert_eq!(out.warnings.len(), 1);
+    assert_eq!(out.warnings[0].effect, "HD Test Stereo");
+    assert_eq!(
+        out.warnings[0].reason,
+        "HD Test Stereo doesn't support 5.1 audio"
+    );
+}
+
+#[test]
+fn a_preset_with_nothing_insertable_leaves_the_chain_alone() {
+    let (fx, dir, state) = (effects(), tempfile::tempdir().unwrap(), AppState::default());
+    open_sine(&state, &dir, 1, 8_000);
+    let stereo = slot_ids(&state.add_effect(1, &fx.plugins, fx.stereo).unwrap().chain)[0];
+    let group = state.group_effects(1, &[stereo]).unwrap().chain.groups[0].group_id;
+    let (library, _) = PresetLibrary::open(dir.path());
+    state
+        .save_group_preset(1, group, "Stereo", false, &library)
+        .unwrap();
+    open_5_1(&state, &dir, 2);
+    state.add_effect(2, &fx.plugins, fx.gain).unwrap();
+    let (before, chain) = (state.edit_state(2).unwrap(), state.get_chain(2).unwrap());
+
+    let err = state
+        .insert_preset(2, &preset_named(&library, "Stereo"), &fx.plugins)
+        .unwrap_err();
+    assert!(err.starts_with("“Stereo” could not be inserted"), "{err}");
+    assert!(
+        err.contains("HD Test Stereo doesn't support 5.1 audio"),
+        "{err}"
+    );
+    assert_eq!(state.edit_state(2).unwrap(), before);
+    assert_eq!(state.get_chain(2).unwrap(), chain);
 }

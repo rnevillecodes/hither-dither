@@ -1,6 +1,6 @@
 //! Tauri command handlers. Heavy work runs on blocking worker threads; see `docs/ipc.md`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -9,6 +9,7 @@ use tauri::ipc::{Channel, Response};
 use tauri::{AppHandle, Emitter, Runtime, State};
 
 use crate::fx::chain::{ChainInfo, SlotId};
+use crate::fx::layout::{GroupId, Target};
 use crate::fx::live::LiveChain;
 use crate::peaks::query_edited;
 use crate::playback::{PlayRequest, PlaybackInfo, Player};
@@ -17,10 +18,12 @@ use crate::plugins::cache::{Folders, PluginCache, PluginList, StartupNotice, sta
 use crate::plugins::editor::{EditorOpened, Editors};
 use crate::plugins::instance::Param;
 use crate::plugins::scan::Scanner;
+use crate::presets::{PresetError, PresetId, PresetInfo, PresetLibrary};
 use crate::session::{self, SessionInfo};
 use crate::state::{
     AppState, ClipInfo, ClipRuns, ClipSettings, EditOp, EditOutcome, ExportOutcome, FadeSetting,
-    FileId, LoadedFile, Metadata, Preview, ReplaceOutcome, RestoreOutcome, SessionSaved,
+    FileId, InsertOutcome, LoadedFile, Metadata, Preview, ReplaceOutcome, RestoreOutcome,
+    SessionSaved,
 };
 use crate::stats::Stats;
 
@@ -521,6 +524,23 @@ pub fn open_plugin_cache(dir: PathBuf) -> std::io::Result<SharedPlugins> {
     )))
 }
 
+pub type SharedPresets = Arc<PresetLibrary>;
+
+/// Opens the preset library in the app data directory. A library that can't be read is
+/// reported with the plugins' startup notices.
+pub fn open_presets(dir: &Path, plugins: &PluginCache) -> SharedPresets {
+    let (library, notice) = PresetLibrary::open(dir);
+    if let Some(message) = notice {
+        plugins.add_notice(StartupNotice {
+            class_id: None,
+            name: String::new(),
+            title: "Effect presets could not be read".into(),
+            message,
+        });
+    }
+    Arc::new(library)
+}
+
 /// Rescans in the background, emitting `plugins-changed` as results arrive.
 pub fn start_plugin_scan<R: Runtime>(app: &AppHandle<R>, plugins: &SharedPlugins, all: bool) {
     let app = app.clone();
@@ -581,13 +601,13 @@ pub fn take_startup_notices(plugins: State<'_, SharedPlugins>) -> Vec<StartupNot
 /// Run a change that may change `file_id`'s chain on a worker thread (plugin calls wait for
 /// the UI thread), let playback hear it at once, and close the editors of effects that left
 /// the chain.
-async fn chain_change(
+async fn chain_change<T: Send + 'static>(
     state: State<'_, SharedState>,
     player: State<'_, SharedPlayer>,
     editors: State<'_, SharedEditors>,
     file_id: FileId,
-    change: impl FnOnce(&AppState) -> Result<EditOutcome, String> + Send + 'static,
-) -> Result<EditOutcome, String> {
+    change: impl FnOnce(&AppState) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
     let state = state.inner().clone();
     let player = player.inner().clone();
     let editors = editors.inner().clone();
@@ -650,10 +670,12 @@ pub async fn move_effect(
     editors: State<'_, SharedEditors>,
     file_id: FileId,
     slot_id: SlotId,
+    group: Option<GroupId>,
     index: usize,
 ) -> Result<EditOutcome, String> {
+    let to = Target { group, index };
     chain_change(state, player, editors, file_id, move |s| {
-        s.move_effect(file_id, slot_id, index)
+        s.move_effect(file_id, slot_id, to)
     })
     .await
 }
@@ -674,6 +696,93 @@ pub async fn set_effect_bypass(
 }
 
 #[tauri::command]
+pub async fn group_effects(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
+    file_id: FileId,
+    slot_ids: Vec<SlotId>,
+) -> Result<EditOutcome, String> {
+    chain_change(state, player, editors, file_id, move |s| {
+        s.group_effects(file_id, &slot_ids)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn ungroup(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
+    file_id: FileId,
+    group_id: GroupId,
+) -> Result<EditOutcome, String> {
+    chain_change(state, player, editors, file_id, move |s| {
+        s.ungroup(file_id, group_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn rename_group(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
+    file_id: FileId,
+    group_id: GroupId,
+    name: String,
+) -> Result<EditOutcome, String> {
+    chain_change(state, player, editors, file_id, move |s| {
+        s.rename_group(file_id, group_id, &name)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn move_group(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
+    file_id: FileId,
+    group_id: GroupId,
+    index: usize,
+) -> Result<EditOutcome, String> {
+    chain_change(state, player, editors, file_id, move |s| {
+        s.move_group(file_id, group_id, index)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn remove_group(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
+    file_id: FileId,
+    group_id: GroupId,
+) -> Result<EditOutcome, String> {
+    chain_change(state, player, editors, file_id, move |s| {
+        s.remove_group(file_id, group_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn set_group_bypass(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
+    file_id: FileId,
+    group_id: GroupId,
+    on: bool,
+) -> Result<EditOutcome, String> {
+    chain_change(state, player, editors, file_id, move |s| {
+        s.set_group_bypass(file_id, group_id, on)
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn set_bypass_all(
     state: State<'_, SharedState>,
     player: State<'_, SharedPlayer>,
@@ -683,6 +792,89 @@ pub async fn set_bypass_all(
 ) -> Result<EditOutcome, String> {
     chain_change(state, player, editors, file_id, move |s| {
         s.set_bypass_all(file_id, on)
+    })
+    .await
+}
+
+// --- Effect presets ------------------------------------------------------------------------
+
+/// Result of saving or renaming a preset: `saved` is false, changing nothing, when another
+/// preset has the name and `replace` wasn't set.
+#[derive(Debug, Clone, Serialize)]
+pub struct SavePresetOutcome {
+    pub saved: bool,
+    pub presets: Vec<PresetInfo>,
+}
+
+#[tauri::command]
+pub fn list_presets(presets: State<'_, SharedPresets>) -> Vec<PresetInfo> {
+    presets.list()
+}
+
+#[tauri::command]
+pub async fn save_group_preset(
+    state: State<'_, SharedState>,
+    presets: State<'_, SharedPresets>,
+    file_id: FileId,
+    group_id: GroupId,
+    name: String,
+    replace: bool,
+) -> Result<SavePresetOutcome, String> {
+    let (state, presets) = (state.inner().clone(), presets.inner().clone());
+    // Plugins report their settings on the UI thread, so this can't run on it.
+    blocking(move || {
+        let saved = state.save_group_preset(file_id, group_id, &name, replace, &presets)?;
+        Ok(SavePresetOutcome {
+            saved,
+            presets: presets.list(),
+        })
+    })
+    .await?
+}
+
+#[tauri::command]
+pub fn rename_preset(
+    presets: State<'_, SharedPresets>,
+    preset_id: PresetId,
+    name: String,
+    replace: bool,
+) -> Result<SavePresetOutcome, String> {
+    let saved = match presets.rename(preset_id, &name, replace) {
+        Ok(()) => true,
+        Err(PresetError::NameTaken) => false,
+        Err(PresetError::Failed(e)) => return Err(e),
+    };
+    Ok(SavePresetOutcome {
+        saved,
+        presets: presets.list(),
+    })
+}
+
+#[tauri::command]
+pub fn delete_preset(
+    presets: State<'_, SharedPresets>,
+    preset_id: PresetId,
+) -> Result<Vec<PresetInfo>, String> {
+    presets.delete(preset_id)?;
+    Ok(presets.list())
+}
+
+#[tauri::command]
+pub async fn insert_preset(
+    state: State<'_, SharedState>,
+    player: State<'_, SharedPlayer>,
+    editors: State<'_, SharedEditors>,
+    plugins: State<'_, SharedPlugins>,
+    presets: State<'_, SharedPresets>,
+    file_id: FileId,
+    preset_id: PresetId,
+) -> Result<InsertOutcome, String> {
+    let preset = presets
+        .get(preset_id)
+        .ok_or("That preset no longer exists")?;
+    let plugins = plugins.inner().clone();
+    chain_change(state, player, editors, file_id, move |s| {
+        s.insert_preset(file_id, &preset, &plugins)
     })
     .await
 }

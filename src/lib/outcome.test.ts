@@ -28,7 +28,7 @@ describe("showChainOutcome", () => {
   it("updates the chain and edit state, leaving peaks and analysis alone", () => {
     const tab = newTab("a.wav");
     Object.assign(tab, { meta, revision: 3, peaksVersion: 12, statsPending: true, analysing: true });
-    const chain = { effects: [eq], bypassAll: false, latency: 64 };
+    const chain = { effects: [eq], bypassAll: false, latency: 64, groups: [] };
 
     showChainOutcome(tab, outcome(chain, true));
 
@@ -40,9 +40,19 @@ describe("showChainOutcome", () => {
   it("follows the backend's unsaved state when everything is bypassed", () => {
     const tab = newTab("a.wav");
     tab.dirty = true;
-    showChainOutcome(tab, outcome({ effects: [{ ...eq, bypassed: true }], bypassAll: false, latency: 0 }, false));
+    showChainOutcome(tab, outcome({ effects: [{ ...eq, bypassed: true }], bypassAll: false, latency: 0, groups: [] }, false));
     expect(tab.dirty).toBe(false);
     expect(tab.peaksVersion).toBe(0);
     expect(tab.statsPending).toBe(false);
+  });
+
+  it("forgets selected effects and collapsed groups that left the chain", () => {
+    const tab = newTab("a.wav");
+    Object.assign(tab, { fxSelected: [7, 8], fxAnchor: 8, collapsedGroups: [1, 2] });
+    const group = { groupId: 2, name: "G", bypassed: false, slotIds: [7] };
+    showChainOutcome(tab, outcome({ effects: [eq], bypassAll: false, latency: 0, groups: [group] }, true));
+    expect(tab.fxSelected).toEqual([7]);
+    expect(tab.fxAnchor).toBeNull();
+    expect(tab.collapsedGroups).toEqual([2]);
   });
 });

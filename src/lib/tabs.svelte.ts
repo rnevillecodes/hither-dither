@@ -42,6 +42,11 @@ export interface Tab {
   clip: ClipInfo | null;
   /** The effects the audio is heard and exported through. */
   chain: ChainInfo | null;
+  /** Effects selected in the Effects panel (slot ids), and the one last clicked. */
+  fxSelected: number[];
+  fxAnchor: number | null;
+  /** Groups collapsed in the Effects panel. Not saved: groups start expanded. */
+  collapsedGroups: number[];
   /** The session file this tab was opened from or last saved to; Save writes it. */
   sessionPath: string | null;
   /** The WAV was chosen by the user for `sessionPath`, instead of the session's own. */
@@ -85,6 +90,9 @@ export function newTab(path: string, sessionPath: string | null = null, relink =
     editing: false,
     clip: null,
     chain: null,
+    fxSelected: [],
+    fxAnchor: null,
+    collapsedGroups: [],
     sessionPath,
     relink,
   };

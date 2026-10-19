@@ -186,8 +186,9 @@ impl Marker {
             LoadStep::OpenEditor => "opening its editor",
         };
         StartupNotice {
-            class_id: self.class_id,
+            class_id: Some(self.class_id),
             name: self.name.clone(),
+            title: format!("{name} was disabled"),
             message: format!(
                 "{name} was disabled because HitherDither closed unexpectedly while {doing}. \
                  You can enable it again in Manage Plugins."
@@ -196,12 +197,16 @@ impl Marker {
     }
 }
 
-/// A plugin disabled at startup because the app closed while it was loading.
+/// Something to tell the user once at startup: a plugin disabled because the app closed
+/// while it was loading, or saved app data that couldn't be read.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartupNotice {
-    pub class_id: ClassId,
+    /// The disabled plugin, if the notice is about one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_id: Option<ClassId>,
     pub name: String,
+    pub title: String,
     pub message: String,
 }
 
@@ -255,7 +260,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
 }
 
 /// Writes `value` to `path` through a temporary file, so a crash never leaves half a file.
-fn write_json(path: &Path, value: &impl Serialize) -> std::io::Result<()> {
+pub(crate) fn write_json(path: &Path, value: &impl Serialize) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -366,7 +371,13 @@ impl PluginCache {
         }
     }
 
-    /// The notices for plugins disabled at startup, which are returned only once.
+    /// Adds a notice from elsewhere in the app to those [`take_notices`](Self::take_notices)
+    /// returns.
+    pub fn add_notice(&self, notice: StartupNotice) {
+        lock(&self.inner).notices.push(notice);
+    }
+
+    /// The notices for plugins disabled at startup, and any added, returned only once.
     pub fn take_notices(&self) -> Vec<StartupNotice> {
         std::mem::take(&mut lock(&self.inner).notices)
     }

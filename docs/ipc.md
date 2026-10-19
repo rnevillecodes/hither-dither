@@ -451,27 +451,36 @@ Enables or disables an effect, remembered across restarts. Disabling doesn't rem
 
 ### `take_startup_notices`
 
-No arguments. Returns the plugins disabled at startup because the app closed unexpectedly while loading one of them into a chain or opening its editor. Each notice is returned once.
+No arguments. Returns the plugins disabled at startup because the app closed unexpectedly while loading one of them into a chain or opening its editor, and a notice when the effect presets could not be read (see *Effect presets*). Each notice is returned once.
 
 ```ts
 interface StartupNotice {
-  classId: string;
-  name: string;
+  classId?: string; // the disabled plugin; absent for the presets notice
+  name: string;     // the plugin's name; empty for the presets notice
+  title: string;    // e.g. "X was disabled", "Effect presets could not be read"
   message: string;  // e.g. "X was disabled because HitherDither closed unexpectedly while loading it. You can enable it again in Manage Plugins."
 }
 ```
 
 ## Effect chains
 
-Each open file has a chain of up to 8 effects, processed in order. The chain is non-destructive: it doesn't change the edited audio, its revision, peaks or statistics. Adding, removing and moving effects are undo steps, in the same history as edits (see *Editing*); undoing a removal brings back the same effect with its settings. Bypassing is not an undo step. Effects kept only for undo are released when a new step discards them, and all of a file's effects are released when it closes.
+Each open file has a chain of effects, processed in order, with no limit on how many. Neighbouring effects can be in a named group, which never holds another group; grouping doesn't change processing, except that a bypassed group's effects are bypassed. The chain is non-destructive: it doesn't change the edited audio, its revision, peaks or statistics. Adding, removing and moving effects, and grouping, ungrouping, renaming, moving and removing groups, are undo steps, in the same history as edits (see *Editing*); undoing a removal brings back the same effect, or group, with its settings. Bypassing is not an undo step. Effects kept only for undo are released when a new step discards them, and all of a file's effects are released when it closes.
 
-The chain commands below return an `EditOutcome` with `audioChanged: false` and an unchanged `edit_state.revision`, and reject with `The file is being exported` during an export, or `That effect isn't in the chain` for a `slotId` that isn't in the chain.
+The chain commands below return an `EditOutcome` with `audioChanged: false` and an unchanged `edit_state.revision`, and reject with `The file is being exported` during an export, `That effect isn't in the chain` for a `slotId` that isn't in the chain, or `That group isn't in the chain` for a `groupId` that isn't. A change that leaves the chain as it was adds no undo step.
 
 ```ts
 interface ChainInfo {
   effects: EffectInfo[];   // in processing order
   bypassAll: boolean;
   latency: number;         // total processing delay in frames of the effects that process
+  groups: GroupInfo[];     // in order; each group's effects are neighbours in `effects`
+}
+
+interface GroupInfo {
+  groupId: number;         // identifies this group in the group commands
+  name: string;
+  bypassed: boolean;       // the group's own switch; its effects keep their own
+  slotIds: number[];       // its effects, in processing order (never empty)
 }
 
 interface EffectInfo {
@@ -499,8 +508,7 @@ Returns `ChainInfo | null` (`null` if `fileId` isn't open).
 | `fileId` | number | |
 | `classId` | string | A `ready` effect from `list_plugins` |
 
-Loads the effect with its default settings and adds it to the end of the chain. Rejects, leaving the chain unchanged:
-- with `The effect chain is full` when the chain has 8 effects;
+Loads the effect with its default settings and adds it to the end of the chain, outside any group. Rejects, leaving the chain unchanged:
 - with `That effect isn't available. …` for a class that isn't in the plugin list or failed its scan, or `X is disabled. …` for a disabled one;
 - with `X doesn't support 5.1 audio` (or `mono`, `stereo`, `quad`, `5.0`, `7.1`, `n-channel`) when none of its layouts matches the file's channels;
 - with `“X” could not be loaded: …` when the plugin fails to load or set up.
@@ -514,7 +522,7 @@ Loading writes the crash marker the first time a plugin is loaded in a session (
 | `fileId` | number | |
 | `slotId` | number | |
 
-Removes the effect from the chain. It is kept for undo.
+Removes the effect from the chain, and its group if it was the last effect in it. It is kept for undo.
 
 ### `move_effect`
 
@@ -522,9 +530,67 @@ Removes the effect from the chain. It is kept for undo.
 | --- | --- | --- |
 | `fileId` | number | |
 | `slotId` | number | |
-| `index` | number | Its new position; past the end means last |
+| `group` | number \| null | The group to move it into, or `null` for the top level |
+| `index` | number | Its new position among that group's effects, or among the top-level items (effects and groups), counted after it is taken out; past the end means last |
 
-Moves the effect within the chain. Moving it to where it already is adds no undo step.
+Moves the effect within the chain, into or out of a group. Moving the last effect out of a group removes the group. Moving it to where it already is adds no undo step.
+
+### `group_effects`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `slotIds` | number[] | At least one, in any order |
+
+Puts the effects in a new group named "Group N" (the lowest N no group of the chain is called), in processing order, where the first of them was. Effects already in a group leave it, and a group left empty is removed. If the first effect was in a group that keeps other effects, the new group goes just before that group when none of them came before it, and just after otherwise. Rejects with `No effects are selected` for an empty list.
+
+### `ungroup`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `groupId` | number | |
+
+Removes the group, leaving its effects where it was, in order, with their own bypass switches.
+
+### `rename_group`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `groupId` | number | |
+| `name` | string | Trimmed; 1 to 64 characters |
+
+Renames the group. Rejects with `A group name must be 1 to 64 characters`.
+
+### `move_group`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `groupId` | number | |
+| `index` | number | Its new position among the top-level items, counted after it is taken out; past the end means last |
+
+Moves the group with its effects.
+
+### `remove_group`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `groupId` | number | |
+
+Removes the group and its effects. They are kept for undo, which brings back the group with its name, bypass switch and effects.
+
+### `set_group_bypass`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `groupId` | number | |
+| `on` | boolean | |
+
+Bypasses every effect in the group, keeping each one's own bypass switch and settings. An effect processes only if neither Bypass All, its group's switch nor its own is on. Not an undo step.
 
 ### `set_effect_bypass`
 
@@ -545,6 +611,84 @@ Bypasses one effect, keeping its settings. A plugin with a bypass parameter bypa
 
 Bypasses the whole chain, keeping each effect's own bypass switch. Not an undo step.
 
+## Effect presets
+
+A preset is a named group of effects, each with its plugin's complete settings and its own bypass switch, kept by the app in `effect-presets.json` in its data folder, and available in every tab and after restarting. Every change rewrites the file through a temporary file, so it is replaced only once the new contents are complete; a change that can't be written rejects with `The presets could not be saved: …` and changes nothing. A file that can't be read gives an empty library and a startup notice (see `take_startup_notices`), and is left alone until the next change replaces it.
+
+Preset names are 1 to 64 characters after trimming, and are compared ignoring case. A preset keeps its id when renamed. Inserting a preset copies it: the inserted group isn't linked to the preset, either way.
+
+```ts
+interface PresetInfo {
+  id: number;
+  name: string;
+  effectCount: number;
+}
+
+interface SavePresetOutcome {
+  saved: boolean;           // false when another preset has the name and `replace` was false:
+                            // nothing changed; ask whether to replace it
+  presets: PresetInfo[];    // the library afterwards
+}
+```
+
+### `list_presets`
+
+No arguments. Returns `PresetInfo[]`, sorted by name ignoring case.
+
+### `save_group_preset`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `groupId` | number | |
+| `name` | string | |
+| `replace` | boolean | Overwrite a preset that has the name |
+
+Saves the group's effects, in order, as a preset. Doesn't change the file, its history or its unsaved state. Returns `SavePresetOutcome`. Rejects, saving nothing:
+- with `That group isn't in the chain`;
+- with `A preset name must be 1 to 64 characters`;
+- with `“X” could not save its settings` when an effect can't report its state.
+
+### `rename_preset`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `presetId` | number | |
+| `name` | string | |
+| `replace` | boolean | Delete another preset that has the name |
+
+Returns `SavePresetOutcome`. Rejects with `That preset no longer exists`, or for an invalid name as `save_group_preset` does. Doesn't change any tab.
+
+### `delete_preset`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `presetId` | number | |
+
+Returns the remaining `PresetInfo[]`. Rejects with `That preset no longer exists`. Doesn't change any tab; groups inserted from the preset stay as they are.
+
+### `insert_preset`
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `fileId` | number | |
+| `presetId` | number | |
+
+Loads the preset's effects, each with its saved state restored before processing is set up, then its unprocessed parameter changes and its bypass switch, and adds them to the end of the chain as a new group named after the preset, not bypassed, as one undo step.
+
+```ts
+interface InsertOutcome {
+  outcome: EditOutcome;
+  warnings: { effect: string; reason: string }[];   // show as one notice
+}
+```
+
+Effects are left out, and kept at their defaults, as by `restore_session`. Rejects, leaving the chain unchanged:
+- with `That preset no longer exists`;
+- with `“X” could not be inserted. …`, followed by each effect and the reason it was left out, when none of its effects can be loaded;
+- with `The edit was cancelled` if the file was reopened while the effects loaded;
+- with `The file is being exported` during an export.
+
 ## Effect editors
 
 An effect's controls are shown either in the plugin's own editor, in a separate window the backend creates, or in generic controls the frontend draws. Each effect has at most one editor window, titled "<effect> — <file name>", sized to the plugin's editor and resizable only if the plugin allows. It stays above the main window without blocking it:
@@ -552,7 +696,7 @@ An effect's controls are shown either in the plugin's own editor, in a separate 
 - macOS: a child window of the main window;
 - Linux: an X11 window (also under XWayland), kept above the main window when the app itself runs on X11.
 
-Editor windows close when their effect leaves the chain (`remove_effect`, or an undo or redo that takes it out), when their file closes, and when the app quits. Exporting leaves them open. Opening an editor writes the crash marker the first time that plugin opens an editor in a session (see `take_startup_notices`).
+Editor windows close when their effect leaves the chain (`remove_effect`, `remove_group`, or an undo or redo that takes it out), when their file closes, and when the app quits. Exporting leaves them open. Opening an editor writes the crash marker the first time that plugin opens an editor in a session (see `take_startup_notices`).
 
 ### Event `fx-editor-closed`
 

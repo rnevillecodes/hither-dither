@@ -402,8 +402,10 @@ export interface PluginFolders {
 }
 
 export interface StartupNotice {
-  classId: string;
+  /** The disabled plugin, if the notice is about one. */
+  classId?: string;
   name: string;
+  title: string;
   message: string;
 }
 
@@ -428,7 +430,7 @@ export function setPluginEnabled(classId: string, enabled: boolean): Promise<voi
   return invoke("set_plugin_enabled", { classId, enabled });
 }
 
-/** Plugins disabled at startup after a crash; each is returned once. */
+/** Plugins disabled at startup after a crash, and unreadable presets; each is returned once. */
 export function takeStartupNotices(): Promise<StartupNotice[]> {
   return invoke("take_startup_notices");
 }
@@ -456,10 +458,30 @@ export interface ChainInfo {
   bypassAll: boolean;
   /** Total processing delay in frames. */
   latency: number;
+  /** In order; each group's effects are neighbours in `effects`. */
+  groups: GroupInfo[];
 }
 
-/** Most effects a chain can hold. */
-export const MAX_EFFECTS = 8;
+export interface GroupInfo {
+  groupId: number;
+  name: string;
+  /** The group's own switch; its effects keep their own. */
+  bypassed: boolean;
+  /** Its effects, in processing order (never empty). */
+  slotIds: number[];
+}
+
+/** Longest group name, in characters. */
+export const MAX_GROUP_NAME = 64;
+
+/**
+ * Where `moveEffect` puts an effect: position `index` among `group`'s effects, or among the
+ * top-level items (effects and groups) when `group` is null, counted after it is taken out.
+ */
+export interface EffectTarget {
+  group: number | null;
+  index: number;
+}
 
 export function getChain(fileId: number): Promise<ChainInfo | null> {
   return invoke("get_chain", { fileId });
@@ -473,8 +495,33 @@ export function removeEffect(fileId: number, slotId: number): Promise<EditOutcom
   return invoke("remove_effect", { fileId, slotId });
 }
 
-export function moveEffect(fileId: number, slotId: number, index: number): Promise<EditOutcome> {
-  return invoke("move_effect", { fileId, slotId, index });
+export function moveEffect(fileId: number, slotId: number, to: EffectTarget): Promise<EditOutcome> {
+  return invoke("move_effect", { fileId, slotId, group: to.group, index: to.index });
+}
+
+export function groupEffects(fileId: number, slotIds: number[]): Promise<EditOutcome> {
+  return invoke("group_effects", { fileId, slotIds });
+}
+
+export function ungroup(fileId: number, groupId: number): Promise<EditOutcome> {
+  return invoke("ungroup", { fileId, groupId });
+}
+
+export function renameGroup(fileId: number, groupId: number, name: string): Promise<EditOutcome> {
+  return invoke("rename_group", { fileId, groupId, name });
+}
+
+/** Move a group to top-level position `index`, counted after it is taken out. */
+export function moveGroup(fileId: number, groupId: number, index: number): Promise<EditOutcome> {
+  return invoke("move_group", { fileId, groupId, index });
+}
+
+export function removeGroup(fileId: number, groupId: number): Promise<EditOutcome> {
+  return invoke("remove_group", { fileId, groupId });
+}
+
+export function setGroupBypass(fileId: number, groupId: number, on: boolean): Promise<EditOutcome> {
+  return invoke("set_group_bypass", { fileId, groupId, on });
 }
 
 export function setEffectBypass(fileId: number, slotId: number, on: boolean): Promise<EditOutcome> {
@@ -483,6 +530,65 @@ export function setEffectBypass(fileId: number, slotId: number, on: boolean): Pr
 
 export function setBypassAll(fileId: number, on: boolean): Promise<EditOutcome> {
   return invoke("set_bypass_all", { fileId, on });
+}
+
+// --- Effect presets ----------------------------------------------------------------------
+
+export interface PresetInfo {
+  id: number;
+  name: string;
+  effectCount: number;
+}
+
+export interface SavePresetOutcome {
+  /** False, changing nothing, when another preset has the name and `replace` was false. */
+  saved: boolean;
+  /** The library afterwards, sorted by name. */
+  presets: PresetInfo[];
+}
+
+export interface InsertOutcome {
+  outcome: EditOutcome;
+  /** Effects left out or kept at their defaults, in the preset's order. */
+  warnings: EffectWarning[];
+}
+
+/** Longest preset name, in characters (as for group names). */
+export const MAX_PRESET_NAME = 64;
+
+/** `name` trimmed, if it is a valid preset name: 1 to 64 characters. Mirrors the backend. */
+export function validPresetName(name: string): string | null {
+  const trimmed = name.trim();
+  const length = [...trimmed].length;
+  return length >= 1 && length <= MAX_PRESET_NAME ? trimmed : null;
+}
+
+/** The presets, sorted by name ignoring case. */
+export function listPresets(): Promise<PresetInfo[]> {
+  return invoke("list_presets");
+}
+
+export function saveGroupPreset(
+  fileId: number,
+  groupId: number,
+  name: string,
+  replace: boolean,
+): Promise<SavePresetOutcome> {
+  return invoke("save_group_preset", { fileId, groupId, name, replace });
+}
+
+export function renamePreset(presetId: number, name: string, replace: boolean): Promise<SavePresetOutcome> {
+  return invoke("rename_preset", { presetId, name, replace });
+}
+
+/** Resolves the remaining presets. */
+export function deletePreset(presetId: number): Promise<PresetInfo[]> {
+  return invoke("delete_preset", { presetId });
+}
+
+/** Add the preset's effects to the end of the chain as a new group, as one undo step. */
+export function insertPreset(fileId: number, presetId: number): Promise<InsertOutcome> {
+  return invoke("insert_preset", { fileId, presetId });
 }
 
 // --- Effect editors and generic controls -----------------------------------------------

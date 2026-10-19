@@ -5,9 +5,12 @@ import * as api from "./api";
 import { PROGRESS_DELAY_MS, forgetStats, setSelection, showEffectWarnings, showLoaded } from "./app.svelte";
 import { askFadeCurve, curveDialog } from "./curveDialog.svelte";
 import { type EditKind, afterEdit, canApply, remapFrame, replaceNeedsConfirmation } from "./editRules";
+import { groupOfSelection } from "./chainOrder";
 import { revealSidebarView } from "./layout.svelte";
+import { effectsUi } from "./effects.svelte";
 import { notify } from "./notices.svelte";
-import { setEditState, showChainOutcome } from "./outcome";
+import { presets, refreshPresets } from "./presets.svelte";
+import { setChain, setEditState, showChainOutcome } from "./outcome";
 import { closePrompt, defaultExportPath, defaultSessionPath, withSessionExtension } from "./sessionFiles";
 import { samePath } from "./tabOrder";
 import { type Tab, activeTab, findTab, overviewCache, tabs } from "./tabs.svelte";
@@ -176,8 +179,7 @@ function effectsTab(): Tab | null {
 }
 
 export function canAddEffect(): boolean {
-  const chain = effectsTab()?.chain;
-  return !!chain && chain.effects.length < api.MAX_EFFECTS;
+  return !!effectsTab();
 }
 
 export function canBypassAll(): boolean {
@@ -199,10 +201,75 @@ export async function removeEffect(slotId: number): Promise<void> {
   if (tab) await runChain(tab, "Could not remove the effect", () => api.removeEffect(tab.id, slotId));
 }
 
-/** Move an effect of the active tab to position `index` of its chain. */
-export async function moveEffect(slotId: number, index: number): Promise<void> {
+/** Move an effect of the active tab to `to`: a place in a group, or among the top-level items. */
+export async function moveEffect(slotId: number, to: api.EffectTarget): Promise<void> {
   const tab = effectsTab();
-  if (tab) await runChain(tab, "Could not move the effect", () => api.moveEffect(tab.id, slotId, index));
+  if (tab) await runChain(tab, "Could not move the effect", () => api.moveEffect(tab.id, slotId, to));
+}
+
+/** Whether Group Effects is available: some effects of the active tab are selected. */
+export function canGroup(): boolean {
+  return !!effectsTab()?.fxSelected.length;
+}
+
+/**
+ * The group Ungroup and Rename Group apply to: the first one holding a selected (highlighted)
+ * effect of the active tab.
+ */
+function groupToUngroup(): number | null {
+  const tab = effectsTab();
+  return tab?.chain ? groupOfSelection(tab.chain, tab.fxSelected) : null;
+}
+
+export function canUngroup(): boolean {
+  return groupToUngroup() !== null;
+}
+
+export function canRenameGroup(): boolean {
+  return groupToUngroup() !== null;
+}
+
+/** Effects › Rename Group: start editing the highlighted group's name in the Effects panel. */
+export function startRenameGroup(): void {
+  const groupId = groupToUngroup();
+  if (groupId === null) return;
+  revealSidebarView("effects");
+  effectsUi.renameGroup = groupId;
+}
+
+/** Effects › Group Effects: the selected effects of the active tab, in a new group. */
+export async function groupSelected(): Promise<void> {
+  const tab = effectsTab();
+  if (!tab || !tab.fxSelected.length) return;
+  const slots = [...tab.fxSelected];
+  await runChain(tab, "Could not group the effects", () => api.groupEffects(tab.id, slots));
+}
+
+/** Effects › Ungroup: the group holding the selection, or group `groupId`. */
+export async function ungroup(groupId = groupToUngroup()): Promise<void> {
+  const tab = effectsTab();
+  if (tab && groupId !== null) await runChain(tab, "Could not ungroup the effects", () => api.ungroup(tab.id, groupId));
+}
+
+export async function renameGroup(groupId: number, name: string): Promise<void> {
+  const tab = effectsTab();
+  if (tab) await runChain(tab, "Could not rename the group", () => api.renameGroup(tab.id, groupId, name));
+}
+
+/** Move a group of the active tab to top-level position `index`, counted after it is taken out. */
+export async function moveGroup(groupId: number, index: number): Promise<void> {
+  const tab = effectsTab();
+  if (tab) await runChain(tab, "Could not move the group", () => api.moveGroup(tab.id, groupId, index));
+}
+
+export async function removeGroup(groupId: number): Promise<void> {
+  const tab = effectsTab();
+  if (tab) await runChain(tab, "Could not remove the group", () => api.removeGroup(tab.id, groupId));
+}
+
+export async function setGroupBypass(groupId: number, on: boolean): Promise<void> {
+  const tab = effectsTab();
+  if (tab) await runChain(tab, "Could not bypass the group", () => api.setGroupBypass(tab.id, groupId, on));
 }
 
 export async function setEffectBypass(slotId: number, on: boolean): Promise<void> {
@@ -223,6 +290,109 @@ export function bypassAllOn(): boolean {
 /** Effects › Bypass All Effects. */
 export function toggleBypassAll(): Promise<void> {
   return canBypassAll() ? setBypassAll(!bypassAllOn()) : Promise.resolve();
+}
+
+// --- Effect presets ------------------------------------------------------------------------
+
+/** How saving or renaming a preset went: saved, the name is taken (nothing changed), or failed. */
+export type PresetSaveResult = "saved" | "taken" | "failed";
+
+/** Whether Save Group as Preset is available: a group of the active tab is highlighted. */
+export function canSaveGroupPreset(): boolean {
+  return groupToUngroup() !== null;
+}
+
+/** Save as Preset: ask for a name for group `groupId` of the active tab (the highlighted one). */
+export function startSaveGroupPreset(groupId = groupToUngroup()): void {
+  const tab = effectsTab();
+  const group = tab?.chain?.groups.find((g) => g.groupId === groupId);
+  if (!tab || !group) return;
+  presets.prompt = { kind: "save", fileId: tab.id, groupId: group.groupId, initial: group.name };
+}
+
+/** Save group `groupId` of tab `fileId` as preset `name`. Failures are shown as notices. */
+export async function saveGroupPreset(
+  fileId: number,
+  groupId: number,
+  name: string,
+  replace: boolean,
+): Promise<PresetSaveResult> {
+  const tab = findTab(fileId);
+  if (!tab) return "failed";
+  // Let changes already on their way land first, so the preset has them.
+  await queues.get(tab.id);
+  try {
+    const out = await api.saveGroupPreset(fileId, groupId, name, replace);
+    presets.list = out.presets;
+    return out.saved ? "saved" : "taken";
+  } catch (e) {
+    notify("error", "Could not save the preset", String(e));
+    return "failed";
+  }
+}
+
+export async function renamePreset(presetId: number, name: string, replace: boolean): Promise<PresetSaveResult> {
+  try {
+    const out = await api.renamePreset(presetId, name, replace);
+    presets.list = out.presets;
+    return out.saved ? "saved" : "taken";
+  } catch (e) {
+    notify("error", "Could not rename the preset", String(e));
+    void refreshPresets();
+    return "failed";
+  }
+}
+
+/** Delete a preset after asking. Resolves whether it was deleted. */
+export async function deletePreset(preset: api.PresetInfo): Promise<boolean> {
+  const choice = await message(`Delete the preset “${preset.name}”?\n\nGroups already inserted from it are kept.`, {
+    title: "Delete Preset",
+    kind: "warning",
+    buttons: { ok: "Delete", cancel: "Cancel" },
+  });
+  if (choice !== "Delete") return false;
+  try {
+    presets.list = await api.deletePreset(preset.id);
+    return true;
+  } catch (e) {
+    notify("error", "Could not delete the preset", String(e));
+    void refreshPresets();
+    return false;
+  }
+}
+
+/** Ask whether to replace preset `name`. Resolves true to replace it. */
+export async function confirmReplacePreset(name: string): Promise<boolean> {
+  const choice = await message(`A preset named “${name}” already exists. Replace it?`, {
+    title: "Replace Preset",
+    kind: "warning",
+    buttons: { ok: "Replace", cancel: "Cancel" },
+  });
+  return choice === "Replace";
+}
+
+/** Whether Insert Preset is available: the active tab can take effects. */
+export function canInsertPreset(): boolean {
+  return !!effectsTab();
+}
+
+/** Effects › Insert Preset: add preset `presetId` to the end of the active tab's chain as a group. */
+export async function insertPreset(presetId: number): Promise<void> {
+  const tab = effectsTab();
+  if (!tab) return;
+  let warnings: api.EffectWarning[] = [];
+  const outcome = await runChain(tab, "Could not insert the preset", async () => {
+    const out = await api.insertPreset(tab.id, presetId);
+    warnings = out.warnings;
+    return out.outcome;
+  });
+  if (!outcome) {
+    // It may have been deleted meanwhile.
+    void refreshPresets();
+    return;
+  }
+  revealSidebarView("effects");
+  showEffectWarnings(warnings, "inserted");
 }
 
 /** The tab's playhead: live in `transport` while active, saved on the tab otherwise. */
@@ -254,7 +424,7 @@ async function showOutcome(
   tab.meta = outcome.metadata;
   if (clipRuns) tab.clipRuns = clipRuns;
   tab.clip = outcome.clip;
-  tab.chain = outcome.chain;
+  setChain(tab, outcome.chain);
   setEditState(tab, outcome.edit_state);
   tab.revision = outcome.edit_state.revision;
   tab.peaksVersion = version;

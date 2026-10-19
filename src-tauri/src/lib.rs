@@ -4,6 +4,7 @@ pub mod fx;
 pub mod peaks;
 pub mod playback;
 pub mod plugins;
+pub mod presets;
 pub mod session;
 pub mod state;
 pub mod stats;
@@ -19,7 +20,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let plugins = commands::open_plugin_cache(app.path().app_data_dir()?)?;
+            let data_dir = app.path().app_data_dir()?;
+            let plugins = commands::open_plugin_cache(data_dir.clone())?;
+            app.manage(commands::open_presets(&data_dir, &plugins));
             app.manage(plugins.clone());
             commands::start_plugin_scan(app.handle(), &plugins, false);
             let ui = Arc::new(app.handle().clone());
@@ -101,7 +104,18 @@ pub fn run() {
             commands::remove_effect,
             commands::move_effect,
             commands::set_effect_bypass,
+            commands::group_effects,
+            commands::ungroup,
+            commands::rename_group,
+            commands::move_group,
+            commands::remove_group,
+            commands::set_group_bypass,
             commands::set_bypass_all,
+            commands::list_presets,
+            commands::save_group_preset,
+            commands::rename_preset,
+            commands::delete_preset,
+            commands::insert_preset,
             commands::open_editor,
             commands::close_editor,
             commands::set_active_file,

@@ -5,15 +5,22 @@ import {
   applyEdit,
   bypassAllOn,
   fadeWithCurve,
+  groupSelected,
+  insertPreset,
   redo,
+  startRenameGroup,
+  startSaveGroupPreset,
   save,
   saveAs,
   exportAudio,
   replaceAudio,
   toggleBypassAll,
   undo,
+  ungroup,
 } from "./editActions";
+import type { PresetInfo } from "./api";
 import { effectsUi } from "./effects.svelte";
+import { presets } from "./presets.svelte";
 import { zoomIn, zoomOut, zoomToFit } from "./view.svelte";
 
 /** Menu items whose enabled state follows the app (see `setMenuEnabled`). */
@@ -31,6 +38,10 @@ export type ToggleId =
   | "fade-in"
   | "fade-out"
   | "add-effect"
+  | "group-effects"
+  | "ungroup"
+  | "rename-group"
+  | "save-group-preset"
   | "bypass-all";
 
 /** Check items whose checked state follows the app (see `setMenuChecked`). */
@@ -64,6 +75,45 @@ export async function setMenuChecked(states: Partial<Record<CheckId, boolean>>):
     if (item) changes.push(item.setChecked(checked));
   }
   await Promise.all(changes);
+}
+
+/** Effects › Insert Preset, once the menu exists. */
+let presetMenu: Submenu | null = null;
+/** The presets and enabled state wanted in Insert Preset, and those it shows. */
+let wantedPresets = { list: [] as { id: number; name: string }[], enabled: false };
+let shownPresets = "";
+let presetUpdates: Promise<void> = Promise.resolve();
+
+/**
+ * Show `list` in Effects › Insert Preset, each item enabled if `enabled`, or a greyed-out
+ * "No presets" item when it is empty. The items are only rebuilt when something changed.
+ */
+export function setPresetMenu(list: PresetInfo[], enabled: boolean): Promise<void> {
+  wantedPresets = { list: list.map((p) => ({ id: p.id, name: p.name })), enabled };
+  presetUpdates = presetUpdates.then(updatePresetMenu).catch(() => {});
+  return presetUpdates;
+}
+
+/** A name as menu text: `&` would underline the next letter, and a tab starts the shortcut. */
+function menuText(name: string): string {
+  return name.replaceAll("&", "&&").replaceAll("\t", " ");
+}
+
+async function updatePresetMenu(): Promise<void> {
+  const submenu = presetMenu;
+  const wanted = wantedPresets;
+  const key = JSON.stringify(wanted);
+  if (!submenu || key === shownPresets) return;
+  shownPresets = key;
+  for (const item of await submenu.items()) await submenu.remove(item);
+  const items = wanted.list.length
+    ? await Promise.all(
+        wanted.list.map((p) =>
+          MenuItem.new({ text: menuText(p.name), enabled: wanted.enabled, action: () => void insertPreset(p.id) }),
+        ),
+      )
+    : [await MenuItem.new({ text: "No presets", enabled: false })];
+  await submenu.append(items);
 }
 
 /** Quitting goes through the window's close request, which checks for unsaved changes. */
@@ -125,12 +175,23 @@ export async function installMenu(): Promise<void> {
   });
   items.set("bypass-all", bypassAll);
   checks.set("bypass-all", bypassAll);
+  const insertPresetMenu = await Submenu.new({
+    text: "Insert Preset",
+    items: [await MenuItem.new({ text: "No presets", enabled: false })],
+  });
   const effects = await Submenu.new({
     text: "Effects",
     items: [
       await toggle("add-effect", "Add Effect…", () => (effectsUi.browserOpen = true)),
+      insertPresetMenu,
+      await PredefinedMenuItem.new({ item: "Separator" }),
+      await toggle("group-effects", "Group Effects", () => void groupSelected(), "CmdOrCtrl+G"),
+      await toggle("ungroup", "Ungroup", () => void ungroup(), "CmdOrCtrl+Shift+G"),
+      await toggle("rename-group", "Rename Group", startRenameGroup, "CmdOrCtrl+R"),
+      await toggle("save-group-preset", "Save Group as Preset…", () => startSaveGroupPreset()),
       bypassAll,
       await PredefinedMenuItem.new({ item: "Separator" }),
+      await MenuItem.new({ id: "manage-presets", text: "Manage Presets…", action: () => (presets.managerOpen = true) }),
       await MenuItem.new({ id: "manage-plugins", text: "Manage Plugins…", action: () => (effectsUi.managerOpen = true) }),
     ],
   });
@@ -162,4 +223,7 @@ export async function installMenu(): Promise<void> {
     ...[...items].map(([id, item]) => item.setEnabled(wanted.get(id) ?? false)),
     ...[...checks].map(([id, item]) => item.setChecked(wantedChecks.get(id) ?? false)),
   ]);
+  presetMenu = insertPresetMenu;
+  presetUpdates = presetUpdates.then(updatePresetMenu).catch(() => {});
+  await presetUpdates;
 }

@@ -113,12 +113,16 @@
 
   Add `open_editor` and `close_editor` returning `{ native, reason? }`. Add Windows steps to `docs/acceptance.md` and check them by hand with a free plugin that has a resizable editor.
 - [ ] 7.2 Implement `plugins/editor/mac.rs` (an `NSWindow` as a child window of the main window, `kPlatformTypeNSView`, resizing). Add macOS steps to `docs/acceptance.md` and check them by hand on Apple Silicon, including an Intel-only plugin showing as Incompatible.
+
+  Status (2026-10-18): `plugins/editor/mac.rs` and the macOS steps (P12–P15) are written. Still to do: build it on macOS (it is `cfg`-gated, so Windows checks don't compile it) and run P12–P15 by hand on Apple Silicon.
 - [ ] 7.3 Implement `plugins/editor/x11.rs`:
   - an `x11rb` window with `WM_TRANSIENT_FOR` when GTK is on X11, using `kPlatformTypeX11EmbedWindowID`;
   - the `IRunLoop` file descriptors and timers, and the X connection, as GLib sources on the main context;
   - "no X11 display" reported as an unavailable reason.
 
   Add Linux steps to `docs/acceptance.md`, including a Wayland session with and without XWayland, and check them by hand. Verify `npm run lint:rust` passes on Linux CI.
+
+  Status (2026-10-18): `plugins/editor/x11.rs` and the Linux steps (P16–P18) are written. Still to do: `npm run lint:rust` on Linux CI, and P16–P18 by hand.
 
 ## 8. Generic controls backend
 
@@ -137,27 +141,33 @@
   - drag reorder, plus Alt+Up and Alt+Down on a focused row;
   - Bypass All;
   - the empty-state hint;
-  - a note that the waveform and statistics don't include effects;
-  - Add Effect disabled with a tooltip when the chain is full.
+  - a note that the waveform and statistics don't include effects.
+
+  (The original "Add Effect disabled with a tooltip when the chain is full" item was dropped: `remove-effect-chain-cap` removed the limit.)
 
   Put the pure reorder and index logic in `src/lib/` with vitest tests. Verify `npm run check` and `npm test` pass, and check the "Reorder", "Keyboard reorder" and "A/B compare" scenarios by hand.
+
+  Status (2026-10-18): rows, drag and Alt+Up/Down reorder (`chainOrder.ts`, tested), Bypass All and the empty-state hint are done, and `npm run check` and `npm test` pass. Still to do: the note that the waveform and statistics don't include effects is missing from `EffectsPanel.svelte` (required by effect-chain "Effects not drawn or analysed"), and the three scenarios by hand.
 - [x] 9.3 Add `EffectBrowser.svelte`: search by name and vendor, grouped by vendor, incompatible effects greyed out with the reason (layout matched against the file's channels), and "Scanning plugins… n of m" progress. Choosing an effect adds it and opens its controls. Put the filtering and compatibility logic in `src/lib/` with vitest tests (search matching, the 5.1 file greys out stereo-only effects, failed and disabled plugins hidden). Verify `npm run check` and `npm test` pass.
-- [ ] 9.4 Add `PluginManager.svelte`:
+- [x] 9.4 Add `PluginManager.svelte`:
   - the plugin list with name, vendor, version, location, status and reason;
   - enable and disable;
   - standard folders shown read-only and extra folders added with the folder dialog or removed;
   - Rescan All and progress.
 
-  Check the "Add a folder", "Remove a folder", "Disable a plugin" and "Re-enable after a crash" scenarios by hand. Verify `npm run check` passes.
-- [ ] 9.5 Add `GenericControls.svelte`, a floating, non-modal panel:
+  Verify `npm run check` passes.
+  - [ ] 9.4.1 Check the "Add a folder", "Remove a folder", "Disable a plugin" and "Re-enable after a crash" scenarios by hand (V3, V4, V12, V14 in `docs/acceptance.md`).
+- [x] 9.5 Add `GenericControls.svelte`, a floating, non-modal panel:
   - sliders with display text and units;
   - double-click to reset;
   - follows `fx-param-changed` and `fx-params-reset`;
   - a note when the native editor is unavailable;
   - a "Show generic controls" entry on each effect.
 
-  Check the "Both views agree" and "Reset a parameter" scenarios by hand. Verify `npm run check` passes.
-- [ ] 9.6 Add the Effects menu (Add Effect…, Bypass All Effects as a check item, Manage Plugins…) to `menu.ts`, with enabled states following the active tab. Verify `npm run check` passes, and check by hand that the items are greyed out with no file open.
+  Verify `npm run check` passes.
+  - [ ] 9.5.1 Check the "Both views agree" and "Reset a parameter" scenarios by hand (P20, P21 in `docs/acceptance.md`).
+- [x] 9.6 Add the Effects menu (Add Effect…, Bypass All Effects as a check item, Manage Plugins…) to `menu.ts`, with enabled states following the active tab. Verify `npm run check` passes.
+  - [ ] 9.6.1 Check by hand that Add Effect… and Bypass All Effects are greyed out with no file open (FX22 in `docs/acceptance.md`).
 
 ## 10. Documentation and integration checks
 
@@ -165,8 +175,11 @@
 - [ ] 10.2 Run the full `docs/acceptance.md` effects pass on Windows, macOS and Linux. Cover every scenario in the `effect-chain`, `plugin-editors` and `vst3-plugins` specs that the automated tests don't, and record the plugins used. Verify each scenario passes, or file its failure as a follow-up task here.
 - [ ] 10.3 Push the branch and verify that CI (check, vitest, clippy, Rust tests including the test-plugin builds, and installers) passes on all three platforms. Then run `openspec validate add-vst3-effect-chain --strict`.
 
+  Status (2026-10-18): `openspec validate add-vst3-effect-chain --strict` and `openspec validate --specs` pass. Still to do: push and check CI on all three platforms.
+
 ## Workflow follow-up
 
 - Open a pull request from `feat/vst3-plugins` once the tasks are complete.
 - Archive the change after review, which syncs the `effect-chain`, `plugin-editors`, `vst3-plugins` and `wav-export` specs.
-- Before archiving, rebase the `wav-export` delta onto the main spec as `save-sessions-export-audio` left it (archived 2026-10-13): "After saving" no longer exists (Export leaves the chain in place, so drop that block), and "Output format" now says exported files. Keep the processed-samples wording and "Clamped samples are reported" for Export.
+- Done 2026-10-18: the `wav-export` delta is rebased onto the main spec as `save-sessions-export-audio` left it. It now only adds "Clamped samples are reported", worded for Export, and that requirement is also synced into the main spec. The `effect-chain`, `plugin-editors` and `vst3-plugins` deltas match the main specs, including the no-limit "Add an effect" from `remove-effect-chain-cap` and Export wording in place of Save. Archiving changes no main spec.
+- Tasks 4.2, 6.2 and 7.1 above describe the code as first built (a cap of 8, Save baking effects in and clearing the chain). `remove-effect-chain-cap` and `save-sessions-export-audio` replaced that behaviour; the tests were moved to match.

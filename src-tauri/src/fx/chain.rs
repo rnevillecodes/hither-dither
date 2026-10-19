@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use vst3::Steinberg::Vst::SpeakerArr;
 
+use crate::fx::layout::GroupId;
 use crate::plugins::ClassId;
 use crate::plugins::instance::{Instance, speaker_arrangement};
 use crate::plugins::main_thread::UiThread;
@@ -18,9 +19,6 @@ use crate::plugins::scan::ScannedClass;
 
 /// Identifies an effect slot, unique for the life of the app.
 pub type SlotId = u32;
-
-/// Most effects a chain can hold.
-pub const MAX_EFFECTS: usize = 8;
 
 /// Largest block the live chain processes: the playback feeder's chunk size.
 pub const LIVE_BLOCK: usize = 1024;
@@ -180,30 +178,52 @@ impl Drop for Slot {
     }
 }
 
-/// The slots of a chain in processing order, with Bypass All.
+/// The slots of a chain in processing order, with Bypass All and the chain's groups.
 #[derive(Clone, Default)]
 pub struct Chain {
     pub slots: Vec<Arc<Slot>>,
     pub bypass_all: bool,
+    /// For each slot, whether its group is bypassed.
+    held: Vec<bool>,
+    groups: Vec<GroupInfo>,
 }
 
 impl Chain {
-    /// Builds a chain and records each slot's wanted bypass state.
+    /// Builds a chain without groups and records each slot's wanted bypass state.
     pub fn new(slots: Vec<Arc<Slot>>, bypass_all: bool) -> Chain {
-        for s in &slots {
+        let slots = slots.into_iter().map(|s| (s, false)).collect();
+        Chain::grouped(slots, bypass_all, Vec::new())
+    }
+
+    /// Builds a chain from slots paired with whether their group is bypassed, and records
+    /// each slot's wanted bypass state: Bypass All, its group's switch or its own.
+    pub fn grouped(
+        slots: Vec<(Arc<Slot>, bool)>,
+        bypass_all: bool,
+        groups: Vec<GroupInfo>,
+    ) -> Chain {
+        for (s, held) in &slots {
             s.wanted_bypass
-                .store(bypass_all || s.bypassed(), Ordering::Relaxed);
+                .store(bypass_all || *held || s.bypassed(), Ordering::Relaxed);
         }
-        Chain { slots, bypass_all }
+        let (slots, held) = slots.into_iter().unzip();
+        Chain {
+            slots,
+            bypass_all,
+            held,
+            groups,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
         self.slots.is_empty()
     }
 
-    /// Whether the chain changes the audio: some effect isn't bypassed and Bypass All is off.
+    /// Whether the chain changes the audio: some effect isn't bypassed, by itself or its
+    /// group, and Bypass All is off.
     pub fn is_active(&self) -> bool {
-        !self.bypass_all && self.slots.iter().any(|s| !s.bypassed())
+        let on = self.slots.iter().zip(&self.held);
+        !self.bypass_all && on.into_iter().any(|(s, &held)| !held && !s.bypassed())
     }
 
     /// The slots that process audio, in order. Bypassed slots with a bypass parameter still
@@ -229,6 +249,7 @@ impl Chain {
             effects: self.slots.iter().map(|s| s.info()).collect(),
             bypass_all: self.bypass_all,
             latency: self.latency(),
+            groups: self.groups.clone(),
         }
     }
 }
@@ -241,6 +262,20 @@ pub struct ChainInfo {
     pub bypass_all: bool,
     /// Total processing delay in frames, compensated in playback and saving.
     pub latency: u32,
+    /// The chain's groups in order. Each group's effects are neighbours in `effects`.
+    pub groups: Vec<GroupInfo>,
+}
+
+/// An effect group as the frontend shows it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupInfo {
+    pub group_id: GroupId,
+    pub name: String,
+    /// The group's own bypass switch.
+    pub bypassed: bool,
+    /// The group's effects, in processing order.
+    pub slot_ids: Vec<SlotId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -270,6 +305,13 @@ pub fn layout_name(channels: u16, mask: Option<u32>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chain_without_groups_sends_an_empty_list() {
+        let info = serde_json::to_value(Chain::default().info()).unwrap();
+        assert_eq!(info["groups"], serde_json::json!([]));
+        assert_eq!(info["bypassAll"], false);
+    }
 
     #[test]
     fn layouts_are_named() {
