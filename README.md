@@ -63,6 +63,7 @@ HitherDither never changes the WAV you open. Your work is saved as a session, an
 - **File › Save** (Ctrl/Cmd+S) saves the tab as a session file (`take.hdsession.json`), asking where the first time. **Save As…** (Ctrl/Cmd+Shift+S) saves it to a new session file. A session holds the edits, the effect chain in order with each effect's bypass switch, Bypass All, and every plugin's complete settings. It doesn't contain the audio: it points to the WAV.
 - **File › Export…** (Ctrl/Cmd+E) renders the edits and effects to a new WAV (`take-export.wav` by default). The tab carries on as it was, with its edits, effects and undo history, so you can keep working and export again. Export won't write over the WAV you're editing or one open in another tab.
 - **Unsaved changes** are anything since the session was last saved: edits, effect changes, bypass switches and plugin settings. Closing a tab or quitting asks whether to save the session.
+- **The window title** shows the active tab's session, such as "mix — HitherDither", with a "•" after the name while it has unsaved changes. A tab that has never been saved as a session leaves the title as "HitherDither".
 
 Open a session with **File › Open…** or by dropping it on the window. Its WAV opens in a new tab with the edits and effects as they were. Effect editors start closed, and there is nothing to undo until the next change. When the app starts, tabs that had a session file are reopened from their session.
 

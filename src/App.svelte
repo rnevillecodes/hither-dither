@@ -57,6 +57,7 @@
   import { runScrollBenchmark } from "./lib/perf";
   import { readSession, rememberedPath, rememberedTabs, writeSession } from "./lib/session";
   import { samePath } from "./lib/tabOrder";
+  import { windowTitle } from "./lib/windowTitle";
   import { activeTab, tabs } from "./lib/tabs.svelte";
   import { goToStart, initTransport, seek, togglePlay, transport } from "./lib/transport.svelte";
   import { zoomIn, zoomOut, zoomToFit } from "./lib/view.svelte";
@@ -130,6 +131,12 @@
     if (!(await confirmQuit())) event.preventDefault();
   });
   onQuit(() => void appWindow.close());
+
+  // The title shows the active tab's session and whether it has unsaved changes.
+  const title = $derived(windowTitle(active ?? null));
+  $effect(() => {
+    void appWindow.setTitle(title).catch(() => {});
+  });
 
   function onKeydown(e: KeyboardEvent) {
     const target = e.target as HTMLElement | null;
